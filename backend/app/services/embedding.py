@@ -1,4 +1,5 @@
-from sentence_transformers import SentenceTransformer
+# TODO: Re-enable when sentence-transformers is needed
+# from sentence_transformers import SentenceTransformer
 import numpy as np
 from typing import List, Union
 import asyncio
@@ -8,48 +9,64 @@ from app.core.config import settings
 
 class EmbeddingService:
     """Service for generating text embeddings using sentence-transformers"""
-    
+
     def __init__(self):
         self.model_name = settings.EMBEDDING_MODEL
         self.dimension = settings.EMBEDDING_DIMENSION
         self._model = None
-    
+
     @property
     def model(self):
         """Lazy load the model"""
-        if self._model is None:
-            self._model = SentenceTransformer(self.model_name)
-        return self._model
-    
+        # TODO: Re-enable when sentence-transformers is needed
+        # if self._model is None:
+        #     self._model = SentenceTransformer(self.model_name)
+        # return self._model
+        raise NotImplementedError("Embedding service is currently disabled")
+
     async def generate_embedding(self, text: Union[str, List[str]]) -> Union[np.ndarray, List[np.ndarray]]:
         """
         Generate embeddings for text asynchronously
-        
+
         Args:
             text: Single text string or list of texts
-            
+
         Returns:
-            Numpy array of embeddings
+            Numpy array of embeddings (currently returns dummy data)
         """
+        # TODO: Re-enable when sentence-transformers is needed
         # Run the embedding generation in a thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        embeddings = await loop.run_in_executor(
-            None,
-            self._generate_embedding_sync,
-            text
-        )
-        return embeddings
-    
+        # loop = asyncio.get_event_loop()
+        # embeddings = await loop.run_in_executor(
+        #     None,
+        #     self._generate_embedding_sync,
+        #     text
+        # )
+        # return embeddings
+
+        # Return dummy embedding for now
+        if isinstance(text, str):
+            return np.zeros(self.dimension, dtype=np.float32)
+        else:
+            return [np.zeros(self.dimension, dtype=np.float32) for _ in text]
+
     def _generate_embedding_sync(self, text: Union[str, List[str]]) -> Union[np.ndarray, List[np.ndarray]]:
         """Synchronous embedding generation"""
+        # TODO: Re-enable when sentence-transformers is needed
+        # if isinstance(text, str):
+        #     # Single text
+        #     embedding = self.model.encode(text, convert_to_numpy=True)
+        #     return embedding
+        # else:
+        #     # Multiple texts
+        #     embeddings = self.model.encode(text, convert_to_numpy=True)
+        #     return embeddings
+
+        # Return dummy embedding for now
         if isinstance(text, str):
-            # Single text
-            embedding = self.model.encode(text, convert_to_numpy=True)
-            return embedding
+            return np.zeros(self.dimension, dtype=np.float32)
         else:
-            # Multiple texts
-            embeddings = self.model.encode(text, convert_to_numpy=True)
-            return embeddings
+            return [np.zeros(self.dimension, dtype=np.float32) for _ in text]
     
     async def batch_generate_embeddings(self, texts: List[str], batch_size: int = 32) -> List[np.ndarray]:
         """

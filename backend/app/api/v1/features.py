@@ -44,7 +44,8 @@ async def create_feature(
     
     # Create normalized text and embedding
     normalized_text = f"{feature_data.title} {feature_data.description}".lower()
-    embedding = await embedding_service.generate_embedding(normalized_text)
+    # TODO: Re-enable when embedding service is active
+    # embedding = await embedding_service.generate_embedding(normalized_text)
     
     feature = Feature(
         **feature_data.model_dump(),
@@ -308,9 +309,10 @@ async def search_similar_features(
     db: AsyncSession = Depends(get_db)
 ):
     """Search for features similar to the given text using vector similarity"""
+    # TODO: Re-enable when embedding service is active
     # Generate embedding for search text
-    search_embedding = await embedding_service.generate_embedding(text.lower())
-    
+    # search_embedding = await embedding_service.generate_embedding(text.lower())
+
     # TODO: Implement vector similarity search using pgvector
     # For now, return empty list as placeholder
     return []
