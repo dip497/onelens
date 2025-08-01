@@ -27,12 +27,67 @@ export function AgentChat({
   const [isLoading, setIsLoading] = useState(false);
   const [agent, setAgent] = useState<HttpAgent | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const currentAssistantMessageRef = useRef<Message | null>(null);
 
   useEffect(() => {
     // Initialize AG-UI HttpAgent - connects to AG-UI compatible backend
     const agentInstance = new HttpAgent({
       url: agentUrl,
     });
+
+    // Set up event handlers ONCE when agent is created
+    agentInstance.subscribe({
+      onTextMessageStartEvent: ({ event }) => {
+        // Create new assistant message when text starts
+        const newAssistantMessage: Message = {
+          id: event.messageId || Date.now().toString(),
+          role: 'assistant',
+          content: '',
+          timestamp: new Date(),
+        };
+
+        currentAssistantMessageRef.current = newAssistantMessage;
+        setMessages(prev => [...prev, newAssistantMessage]);
+      },
+
+      onTextMessageContentEvent: ({ event }) => {
+        // Stream content to the current assistant message
+        if (currentAssistantMessageRef.current && event.messageId === currentAssistantMessageRef.current.id) {
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === event.messageId
+                ? { ...msg, content: msg.content + event.delta }
+                : msg
+            )
+          );
+        }
+      },
+
+      onTextMessageEndEvent: ({ event }) => {
+        // Message is complete, clear the reference
+        if (currentAssistantMessageRef.current?.id === event.messageId) {
+          currentAssistantMessageRef.current = null;
+        }
+      },
+
+      onRunFinishedEvent: () => {
+        setIsLoading(false);
+        currentAssistantMessageRef.current = null;
+      },
+
+      onRunErrorEvent: ({ event }) => {
+        console.error('Agent error:', event);
+        setIsLoading(false);
+        currentAssistantMessageRef.current = null;
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: 'assistant',
+          content: 'Sorry, I encountered an error. Please try again.',
+          timestamp: new Date(),
+        }]);
+      },
+    });
+
     setAgent(agentInstance);
   }, [agentUrl]);
 
@@ -58,7 +113,8 @@ export function AgentChat({
     setIsLoading(true);
 
     try {
-      let currentAssistantMessage: Message | null = null;
+      // Clear the current assistant message reference for new conversation turn
+      currentAssistantMessageRef.current = null;
 
       // Add user message to agent's message history
       agent.messages = [
@@ -70,49 +126,7 @@ export function AgentChat({
         },
       ];
 
-      // Subscribe to agent events and run
-      agent.subscribe({
-        onTextMessageStartEvent: ({ event }) => {
-          // Create new assistant message when text starts
-          currentAssistantMessage = {
-            id: event.messageId || Date.now().toString(),
-            role: 'assistant',
-            content: '',
-            timestamp: new Date(),
-          };
-          setMessages(prev => [...prev, currentAssistantMessage!]);
-        },
-
-        onTextMessageContentEvent: ({ event }) => {
-          // Stream content to the current assistant message
-          if (currentAssistantMessage) {
-            setMessages(prev =>
-              prev.map(msg =>
-                msg.id === currentAssistantMessage!.id
-                  ? { ...msg, content: msg.content + event.delta }
-                  : msg
-              )
-            );
-          }
-        },
-
-        onRunFinishedEvent: () => {
-          setIsLoading(false);
-        },
-
-        onRunErrorEvent: ({ event }) => {
-          console.error('Agent error:', event);
-          setIsLoading(false);
-          setMessages(prev => [...prev, {
-            id: Date.now().toString(),
-            role: 'assistant',
-            content: 'Sorry, I encountered an error. Please try again.',
-            timestamp: new Date(),
-          }]);
-        },
-      });
-
-      // Run the agent
+      // Run the agent - event handlers are already set up in useEffect
       await agent.runAgent({
         tools: [], // Can add tools here for enhanced functionality
       });
@@ -120,6 +134,7 @@ export function AgentChat({
     } catch (error) {
       console.error('Error sending message:', error);
       setIsLoading(false);
+      currentAssistantMessageRef.current = null;
       setMessages(prev => [...prev, {
         id: Date.now().toString(),
         role: 'assistant',
