@@ -1,68 +1,129 @@
-:root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
+@layer base {
   :root {
-    color: #213547;
-    background-color: #ffffff;
+    /* Light Theme — Clean, Neutral, SaaS */
+    --background: 0 0% 100%;
+    --foreground: 220 15% 15%;
+
+    --card: 0 0% 99%;
+    --card-foreground: 220 15% 15%;
+
+    --popover: 0 0% 99%;
+    --popover-foreground: 220 15% 15%;
+
+    --primary: 220 90% 56%;
+    --primary-foreground: 0 0% 100%;
+    --primary-soft: 220 100% 97%;
+    /* light fill for bg/hover */
+    --primary-glow: 220 90% 65%;
+
+    --secondary: 240 20% 95%;
+    --secondary-foreground: 220 15% 25%;
+
+    --muted: 220 20% 96%;
+    --muted-foreground: 220 10% 40%;
+
+    --accent: 275 70% 60%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 75% 58%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 145 70% 45%;
+    --warning: 35 100% 50%;
+    --info: 210 100% 50%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 95%;
+    --ring: 220 90% 56%;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(220, 90%, 56%), hsl(230, 90%, 65%));
+    --gradient-card: linear-gradient(135deg, hsl(0, 0%, 99%) 0%, hsl(0, 0%, 97%) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(0, 0%, 100%) 0%, hsl(0, 0%, 98%) 50%, hsl(0, 0%, 96%) 100%);
+
+    /* Shadows */
+    --shadow-glow: 0 0 20px hsl(220 90% 56% / 0.07);
+    --shadow-card: 0 2px 10px hsl(220 14% 70% / 0.05);
+    --shadow-elevated: 0 6px 20px hsl(220 14% 60% / 0.08);
+
+    --radius: 0.75rem;
+
+    /* Sidebar */
+    --sidebar-background: 220 13% 97%;
+    --sidebar-foreground: 220 15% 15%;
+    --sidebar-primary: 220 90% 56%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 275 70% 60%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 220 13% 90%;
+    --sidebar-ring: 220 90% 56%;
   }
-  a:hover {
-    color: #747bff;
+
+  .dark {
+    /* Dark Theme — Modern Neutral */
+    --background: 220 16% 10%;
+    --foreground: 220 10% 95%;
+
+    --card: 220 16% 12%;
+    --card-foreground: 220 10% 95%;
+
+    --popover: 220 16% 12%;
+    --popover-foreground: 220 10% 95%;
+
+    --primary: 220 90% 70%;
+    --primary-foreground: 220 20% 10%;
+    --primary-soft: 220 50% 20%;
+    --primary-glow: 220 100% 75%;
+
+    --secondary: 220 10% 25%;
+    --secondary-foreground: 220 10% 95%;
+
+    --muted: 220 10% 20%;
+    --muted-foreground: 220 10% 65%;
+
+    --accent: 275 75% 70%;
+    --accent-foreground: 0 0% 10%;
+
+    --destructive: 0 80% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 145 65% 50%;
+    --warning: 35 100% 60%;
+    --info: 210 100% 70%;
+
+    --border: 220 10% 30%;
+    --input: 220 10% 20%;
+    --ring: 220 90% 70%;
+
+    --gradient-primary: linear-gradient(135deg, hsl(220, 90%, 70%), hsl(230, 100%, 75%));
+    --gradient-card: linear-gradient(135deg, hsl(220, 16%, 12%) 0%, hsl(220, 16%, 18%) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(220, 16%, 10%) 0%, hsl(230, 15%, 12%) 50%, hsl(240, 15%, 14%) 100%);
+
+    --shadow-glow: 0 0 20px hsl(220 90% 70% / 0.1);
+    --shadow-card: 0 2px 10px hsl(220 20% 5% / 0.15);
+    --shadow-elevated: 0 6px 20px hsl(220 20% 5% / 0.2);
+
+    --sidebar-background: 220 16% 12%;
+    --sidebar-foreground: 220 10% 95%;
+    --sidebar-primary: 220 90% 70%;
+    --sidebar-primary-foreground: 220 20% 10%;
+    --sidebar-accent: 275 75% 70%;
+    --sidebar-accent-foreground: 220 20% 10%;
+    --sidebar-border: 220 10% 30%;
+    --sidebar-ring: 220 90% 70%;
   }
-  button {
-    background-color: #f9f9f9;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
   }
 }
