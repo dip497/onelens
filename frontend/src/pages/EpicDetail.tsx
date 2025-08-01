@@ -1,6 +1,9 @@
+import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit, Trash2, PlayCircle, Plus } from 'lucide-react';
 import { useEpic, useDeleteEpic, useAnalyzeEpic } from '@/hooks/useEpics';
+import { useFeatures } from '@/hooks/useFeatures';
+import { CreateFeatureDialog } from '@/components/features/CreateFeatureDialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +15,9 @@ import { EpicStatus } from '@/types';
 export function EpicDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [createFeatureOpen, setCreateFeatureOpen] = useState(false);
   const { data: epic, isLoading } = useEpic(id!);
+  const { features, isLoading: featuresLoading } = useFeatures(id);
   const deleteEpic = useDeleteEpic();
   const analyzeEpic = useAnalyzeEpic();
 
@@ -130,18 +135,51 @@ export function EpicDetail() {
         <TabsContent value="features" className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold">Features</h3>
-            <Button>
+            <Button onClick={() => setCreateFeatureOpen(true)}>
               <Plus className="mr-2 h-4 w-4" />
               Add Feature
             </Button>
           </div>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-center py-8 text-muted-foreground">
-                No features added yet. Add your first feature to get started.
-              </div>
-            </CardContent>
-          </Card>
+          {featuresLoading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-20 w-full" />
+            </div>
+          ) : features.length === 0 ? (
+            <Card>
+              <CardContent className="pt-6">
+                <div className="text-center py-8 text-muted-foreground">
+                  No features added yet. Add your first feature to get started.
+                </div>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-3">
+              {features.map((feature) => (
+                <Card key={feature.id} className="hover:shadow-md transition-shadow">
+                  <CardContent className="pt-6">
+                    <div className="flex items-start justify-between">
+                      <div className="space-y-1">
+                        <h4 className="font-semibold">{feature.title}</h4>
+                        {feature.description && (
+                          <p className="text-sm text-muted-foreground">{feature.description}</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">
+                          {feature.customer_request_count} customer requests
+                        </p>
+                      </div>
+                      {feature.priority_score && (
+                        <Badge variant="secondary">
+                          Score: {feature.priority_score.final_score.toFixed(2)}
+                        </Badge>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
         </TabsContent>
         
         <TabsContent value="analysis" className="space-y-4">
@@ -178,6 +216,15 @@ export function EpicDetail() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Create Feature Dialog */}
+      {epic && (
+        <CreateFeatureDialog
+          open={createFeatureOpen}
+          onOpenChange={setCreateFeatureOpen}
+          epicId={epic.id}
+        />
+      )}
     </div>
   );
 }

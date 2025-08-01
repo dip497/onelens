@@ -9,7 +9,7 @@ export function AgentPage() {
           Chat with our AI assistant powered by AG-UI protocol and Agno framework
         </p>
       </div>
-      
+
       <AgentChat
         agentUrl="http://localhost:8000/api/v1/agent"
         title="OneLens Assistant"
