@@ -181,7 +181,8 @@ async def update_feature(
         title = update_data.get("title", feature.title)
         description = update_data.get("description", feature.description)
         normalized_text = f"{title} {description}".lower()
-        embedding = await embedding_service.generate_embedding(normalized_text)
+        # TODO: Re-enable when embedding service is active
+        # embedding = await embedding_service.generate_embedding(normalized_text)
         
         update_data["normalized_text"] = normalized_text
         # update_data["embedding"] = embedding  # TODO: Enable after creating pgvector extension

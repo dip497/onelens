@@ -1,25 +1,48 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit, Trash2, PlayCircle, Plus } from 'lucide-react';
+import { ArrowLeft, Edit, Trash2, PlayCircle, Plus, MoreVertical } from 'lucide-react';
 import { useEpic, useDeleteEpic, useAnalyzeEpic } from '@/hooks/useEpics';
-import { useFeatures } from '@/hooks/useFeatures';
+import { useFeatures, useDeleteFeature } from '@/hooks/useFeatures';
 import { CreateFeatureDialog } from '@/components/features/CreateFeatureDialog';
+import { EditFeatureDialog } from '@/components/features/EditFeatureDialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { format } from 'date-fns';
-import { EpicStatus } from '@/types';
+import { EpicStatus, Feature } from '@/types';
 
 export function EpicDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [createFeatureOpen, setCreateFeatureOpen] = useState(false);
+  const [editFeatureOpen, setEditFeatureOpen] = useState(false);
+  const [featureToEdit, setFeatureToEdit] = useState<Feature | null>(null);
+  const [featureToDelete, setFeatureToDelete] = useState<Feature | null>(null);
   const { data: epic, isLoading } = useEpic(id!);
   const { features, isLoading: featuresLoading } = useFeatures(id);
   const deleteEpic = useDeleteEpic();
   const analyzeEpic = useAnalyzeEpic();
+  const deleteFeature = useDeleteFeature();
 
   if (isLoading) {
     return (
@@ -51,6 +74,18 @@ export function EpicDetail() {
 
   const handleAnalyze = async () => {
     await analyzeEpic.mutateAsync(id!);
+  };
+
+  const handleEditFeature = (feature: Feature) => {
+    setFeatureToEdit(feature);
+    setEditFeatureOpen(true);
+  };
+
+  const handleDeleteFeature = async () => {
+    if (featureToDelete) {
+      await deleteFeature.mutateAsync(featureToDelete.id);
+      setFeatureToDelete(null);
+    }
   };
 
   return (
@@ -117,7 +152,7 @@ export function EpicDetail() {
             <div>
               <h4 className="font-medium mb-1">Features</h4>
               <p className="text-muted-foreground">
-                {epic.features_count || 0} features
+                {features.length || epic.features_count || 0} features
               </p>
             </div>
           </div>
@@ -160,7 +195,7 @@ export function EpicDetail() {
                 <Card key={feature.id} className="hover:shadow-md transition-shadow">
                   <CardContent className="pt-6">
                     <div className="flex items-start justify-between">
-                      <div className="space-y-1">
+                      <div className="flex-1 space-y-1">
                         <h4 className="font-semibold">{feature.title}</h4>
                         {feature.description && (
                           <p className="text-sm text-muted-foreground">{feature.description}</p>
@@ -169,11 +204,35 @@ export function EpicDetail() {
                           {feature.customer_request_count} customer requests
                         </p>
                       </div>
-                      {feature.priority_score && (
-                        <Badge variant="secondary">
-                          Score: {feature.priority_score.final_score.toFixed(2)}
-                        </Badge>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {feature.priority_score && (
+                          <Badge variant="secondary">
+                            Score: {feature.priority_score.final_score.toFixed(2)}
+                          </Badge>
+                        )}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-8 w-8">
+                              <MoreVertical className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                            <DropdownMenuItem onClick={() => handleEditFeature(feature)}>
+                              <Edit className="mr-2 h-4 w-4" />
+                              Edit
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              className="text-destructive"
+                              onClick={() => setFeatureToDelete(feature)}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
@@ -225,6 +284,35 @@ export function EpicDetail() {
           epicId={epic.id}
         />
       )}
+
+      {/* Edit Feature Dialog */}
+      <EditFeatureDialog
+        open={editFeatureOpen}
+        onOpenChange={setEditFeatureOpen}
+        feature={featureToEdit}
+      />
+
+      {/* Delete Feature Confirmation */}
+      <AlertDialog open={!!featureToDelete} onOpenChange={() => setFeatureToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the feature "{featureToDelete?.title}".
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={handleDeleteFeature} 
+              className="bg-destructive text-destructive-foreground"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

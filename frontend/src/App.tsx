@@ -9,6 +9,7 @@ import { MainLayout } from '@/components/layout/MainLayout';
 // Pages
 import { EpicDashboard } from '@/components/epics/EpicDashboard';
 import { EpicDetail } from '@/pages/EpicDetail';
+import { EditEpic } from '@/pages/EditEpic';
 import { FeatureDashboard } from '@/pages/FeatureDashboard';
 import { AnalysisReports } from '@/pages/AnalysisReports';
 import { CompetitorAnalysis } from '@/pages/CompetitorAnalysis';
@@ -36,6 +37,7 @@ function App() {
             <Route index element={<Navigate to="/epics" replace />} />
             <Route path="epics" element={<EpicDashboard />} />
             <Route path="epics/:id" element={<EpicDetail />} />
+            <Route path="epics/:id/edit" element={<EditEpic />} />
             <Route path="features" element={<FeatureDashboard />} />
             <Route path="analysis" element={<AnalysisReports />} />
             <Route path="competitors" element={<CompetitorAnalysis />} />
@@ -46,7 +48,7 @@ function App() {
         </Routes>
       </Router>
       <Toaster position="bottom-right" richColors />
-      <ReactQueryDevtools initialIsOpen={false} />
+      {/* <ReactQueryDevtools initialIsOpen={false} /> */}
     </QueryClientProvider>
   );
 }

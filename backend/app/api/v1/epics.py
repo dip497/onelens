@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, and_
+from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from uuid import UUID
 
@@ -36,8 +37,22 @@ async def create_epic(
     db.add(epic)
     await db.commit()
     await db.refresh(epic)
+    
+    # Convert to response with features_count
+    epic_dict = {
+        "id": epic.id,
+        "title": epic.title,
+        "description": epic.description,
+        "business_justification": epic.business_justification,
+        "status": epic.status,
+        "created_at": epic.created_at,
+        "updated_at": epic.updated_at,
+        "created_by": epic.created_by,
+        "assigned_to": epic.assigned_to,
+        "features_count": 0  # New epic has no features
+    }
 
-    return epic
+    return EpicResponse(**epic_dict)
 
 @router.get("/", response_model=EpicListResponse)
 async def list_epics(
@@ -49,7 +64,21 @@ async def list_epics(
     db: AsyncSession = Depends(get_db)
 ):
     """List epics with filtering and pagination"""
-    query = select(Epic)
+    # Create a subquery for feature counts
+    feature_count_subquery = (
+        select(Feature.epic_id, func.count(Feature.id).label("feature_count"))
+        .group_by(Feature.epic_id)
+        .subquery()
+    )
+    
+    # Main query with feature count
+    query = (
+        select(
+            Epic,
+            func.coalesce(feature_count_subquery.c.feature_count, 0).label("features_count")
+        )
+        .outerjoin(feature_count_subquery, Epic.id == feature_count_subquery.c.epic_id)
+    )
     
     # Apply filters
     if status:
@@ -78,10 +107,28 @@ async def list_epics(
     
     # Execute query
     result = await db.execute(query)
-    epics = result.scalars().all()
+    rows = result.all()
+    
+    # Process results to include feature count
+    epics_with_counts = []
+    for row in rows:
+        epic = row[0]
+        epic_dict = {
+            "id": epic.id,
+            "title": epic.title,
+            "description": epic.description,
+            "business_justification": epic.business_justification,
+            "status": epic.status,
+            "created_at": epic.created_at,
+            "updated_at": epic.updated_at,
+            "created_by": epic.created_by,
+            "assigned_to": epic.assigned_to,
+            "features_count": row[1]  # feature count from the query
+        }
+        epics_with_counts.append(EpicResponse(**epic_dict))
     
     return EpicListResponse(
-        items=epics,
+        items=epics_with_counts,
         total=total,
         page=pagination.page,
         size=pagination.limit,
@@ -150,7 +197,25 @@ async def update_epic(
     await db.commit()
     await db.refresh(epic)
     
-    return epic
+    # Get features count
+    features_query = select(func.count()).select_from(Feature).where(Feature.epic_id == epic_id)
+    features_count = await db.scalar(features_query)
+    
+    # Convert to response with features_count
+    epic_dict = {
+        "id": epic.id,
+        "title": epic.title,
+        "description": epic.description,
+        "business_justification": epic.business_justification,
+        "status": epic.status,
+        "created_at": epic.created_at,
+        "updated_at": epic.updated_at,
+        "created_by": epic.created_by,
+        "assigned_to": epic.assigned_to,
+        "features_count": features_count
+    }
+    
+    return EpicResponse(**epic_dict)
 
 @router.delete("/{epic_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_epic(

@@ -3,7 +3,6 @@ import { HttpAgent } from '@ag-ui/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Send, Bot, User } from 'lucide-react';
 
 interface Message {
@@ -152,16 +151,16 @@ export function AgentChat({
   };
 
   return (
-    <Card className="w-full max-w-2xl mx-auto h-[600px] flex flex-col">
-      <CardHeader>
+    <Card className="w-full max-w-5xl mx-auto h-[700px] flex flex-col">
+      <CardHeader className="flex-shrink-0 border-b">
         <CardTitle className="flex items-center gap-2">
           <Bot className="h-5 w-5" />
           {title}
         </CardTitle>
       </CardHeader>
-      <CardContent className="flex-1 flex flex-col gap-4">
-        <ScrollArea className="flex-1 pr-4" ref={scrollAreaRef}>
-          <div className="space-y-4">
+      <CardContent className="flex-1 flex flex-col p-0 overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4" ref={scrollAreaRef}>
+          <div className="space-y-4 max-w-4xl mx-auto">
             {messages.length === 0 && (
               <div className="text-center text-muted-foreground py-8">
                 Start a conversation with the AI assistant
@@ -175,26 +174,30 @@ export function AgentChat({
                 }`}
               >
                 <div
-                  className={`flex gap-2 max-w-[80%] ${
+                  className={`flex gap-3 max-w-[85%] ${
                     message.role === 'user' ? 'flex-row-reverse' : 'flex-row'
                   }`}
                 >
                   <div className="flex-shrink-0">
                     {message.role === 'user' ? (
-                      <User className="h-6 w-6 mt-1" />
+                      <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                        <User className="h-4 w-4 text-primary-foreground" />
+                      </div>
                     ) : (
-                      <Bot className="h-6 w-6 mt-1" />
+                      <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center">
+                        <Bot className="h-4 w-4" />
+                      </div>
                     )}
                   </div>
                   <div
-                    className={`rounded-lg px-3 py-2 ${
+                    className={`rounded-lg px-4 py-3 ${
                       message.role === 'user'
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-muted'
                     }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                    <p className="text-xs opacity-70 mt-1">
+                    <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                    <p className="text-xs opacity-70 mt-2">
                       {message.timestamp.toLocaleTimeString()}
                     </p>
                   </div>
@@ -203,9 +206,11 @@ export function AgentChat({
             ))}
             {isLoading && (
               <div className="flex gap-3 justify-start">
-                <div className="flex gap-2">
-                  <Bot className="h-6 w-6 mt-1" />
-                  <div className="bg-muted rounded-lg px-3 py-2">
+                <div className="flex gap-3">
+                  <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center">
+                    <Bot className="h-4 w-4" />
+                  </div>
+                  <div className="bg-muted rounded-lg px-4 py-3">
                     <div className="flex gap-1">
                       <div className="w-2 h-2 bg-current rounded-full animate-bounce" />
                       <div className="w-2 h-2 bg-current rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
@@ -216,23 +221,25 @@ export function AgentChat({
               </div>
             )}
           </div>
-        </ScrollArea>
-        <div className="flex gap-2">
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type your message..."
-            disabled={isLoading}
-            className="flex-1"
-          />
-          <Button 
-            onClick={sendMessage} 
-            disabled={!input.trim() || isLoading}
-            size="icon"
-          >
-            <Send className="h-4 w-4" />
-          </Button>
+        </div>
+        <div className="flex-shrink-0 border-t p-4 bg-background">
+          <div className="flex gap-2 max-w-4xl mx-auto">
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Type your message..."
+              disabled={isLoading}
+              className="flex-1"
+            />
+            <Button 
+              onClick={sendMessage} 
+              disabled={!input.trim() || isLoading}
+              size="icon"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </CardContent>
     </Card>
