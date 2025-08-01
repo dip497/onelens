@@ -1,0 +1,154 @@
+workflows:
+  epic_complete_analysis:
+    name: "Epic Complete Analysis"
+    description: "End-to-end analysis triggered by epic creation"
+    trigger_events: ["epic_created", "manual_trigger"]
+    
+    data_requirements:
+      - table: "epics"
+        fields: ["id", "title", "description"]
+      - table: "features" 
+        fields: ["id", "epic_id", "title", "description", "embedding"]
+      - table: "customers"
+        fields: ["segment", "arr", "geographic_region"]
+      - table: "feature_requests"
+        fields: ["feature_id", "customer_id", "urgency", "estimated_deal_impact"]
+      - table: "competitors"
+        fields: ["name", "market_position", "primary_markets"]
+      - table: "competitor_features"
+        fields: ["competitor_id", "feature_name", "availability", "strengths", "weaknesses"]
+    
+    steps:
+      - step: "validate_data_completeness"
+        agent: "data_validation_agent"
+        description: "Ensure all required data exists before analysis"
+        input_validation:
+          - epic_exists: true
+          - features_exist: true
+        timeout: 60
+        
+      - step: "trend_alignment_analysis"
+        agent: "trend_analysis_agent"
+        depends_on: ["validate_data_completeness"]
+        parallel_execution: true
+        data_sources:
+          - database: "features table"
+          - external: "trend research APIs"
+        output_target: "trend_analysis table"
+        timeout: 300
+        
+      - step: "business_impact_calculation"
+        agent: "business_impact_agent"
+        depends_on: ["validate_data_completeness"]
+        parallel_execution: true
+        data_sources:
+          - database: "feature_requests + customers tables"
+          - calculated: "customer_request_count, arr_weighted_score"
+        output_target: "business_impact_analysis table"
+        timeout: 240
+        
+      - step: "competitive_gap_analysis"
+        agent: "competitive_analysis_agent"
+        depends_on: ["validate_data_completeness"]
+        parallel_execution: true
+        data_sources:
+          - database: "competitors + competitor_features tables"
+          - external: "competitor research APIs"
+        output_target: "market_opportunity_analysis table"
+        timeout: 600
+        
+      - step: "geographic_market_assessment"
+        agent: "market_opportunity_agent"
+        depends_on: ["competitive_gap_analysis"]
+        data_sources:
+          - database: "competitive analysis results"
+          - external: "geographic market data APIs"
+          - static: "top_5_countries configuration"
+        output_target: "geographic_analysis table"
+        timeout: 480
+        
+      - step: "priority_score_calculation"
+        agent: "priority_scoring_agent"
+        depends_on: [
+          "trend_alignment_analysis",
+          "business_impact_calculation",
+          "competitive_gap_analysis",
+          "geographic_market_assessment"
+        ]
+        data_sources:
+          - database: "all previous analysis results"
+          - algorithm: "priority_scoring_algorithm"
+        output_target: "priority_scores table"
+        timeout: 120
+        
+      - step: "generate_analysis_report"
+        agent: "report_generation_agent"
+        depends_on: ["priority_score_calculation"]
+        data_sources:
+          - database: "all analysis tables"
+        output_target: "feature_analysis_reports table"
+        human_review: true
+        timeout: 180
+
+  rfp_processing:
+    name: "RFP Processing Pipeline"
+    description: "Process RFP documents and match to features"
+    trigger_events: ["rfp_uploaded"]
+    
+    steps:
+      - step: "parse_document"
+        agent: "document_parser_agent"
+        description: "Extract Q&A pairs from RFP document"
+        output: "qa_pairs"
+        timeout: 300
+        
+      - step: "generate_embeddings"
+        agent: "embedding_agent"
+        depends_on: ["parse_document"]
+        description: "Generate embeddings for Q&A pairs"
+        output: "qa_embeddings"
+        timeout: 180
+        
+      - step: "similarity_matching"
+        agent: "similarity_agent"
+        depends_on: ["generate_embeddings"]
+        description: "Match Q&A to existing features"
+        similarity_threshold: 0.85
+        output: "matched_features"
+        timeout: 120
+        
+      - step: "update_feature_requests"
+        agent: "database_agent"
+        depends_on: ["similarity_matching"]
+        description: "Update feature request counts"
+        timeout: 60
+        
+      - step: "trigger_reanalysis"
+        agent: "workflow_trigger_agent"
+        depends_on: ["update_feature_requests"]
+        description: "Trigger priority recalculation"
+        target_workflow: "priority_recalculation"
+        timeout: 30
+
+  priority_recalculation:
+    name: "Priority Recalculation"
+    description: "Recalculate priority scores when data changes"
+    trigger_events: ["feature_request_added", "competitor_data_updated", "manual_trigger"]
+    
+    steps:
+      - step: "aggregate_latest_data"
+        agent: "data_aggregation_agent"
+        description: "Collect all relevant data for recalculation"
+        timeout: 120
+        
+      - step: "recalculate_scores"
+        agent: "priority_scoring_agent"
+        depends_on: ["aggregate_latest_data"]
+        description: "Recalculate priority scores"
+        timeout: 180
+        
+      - step: "update_rankings"
+        agent: "ranking_agent"
+        depends_on: ["recalculate_scores"]
+        description: "Update feature rankings"
+        timeout: 60
