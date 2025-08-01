@@ -5,6 +5,7 @@ from agno.models.openai import OpenAIChat
 from ag_ui.core import RunAgentInput, EventType, RunStartedEvent, RunFinishedEvent, TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent
 from ag_ui.encoder import EventEncoder
 from dotenv import load_dotenv
+from app.tools import search_knowledge_base
 import json
 import uuid
 
@@ -14,6 +15,7 @@ load_dotenv()
 # Create the OneLens AI Assistant agent
 onelens_agent = Agent(
     name="OneLens Assistant",
+    tools=[search_knowledge_base],
     model=OpenAIChat(id="gpt-4o-mini"),
     instructions=[
         "You are OneLens AI Assistant, a helpful AI assistant for the OneLens platform.",

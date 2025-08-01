@@ -35,8 +35,7 @@ class Settings(BaseSettings):
     ALLOWED_FILE_EXTENSIONS: list[str] = [".csv", ".xlsx", ".xls", ".pdf", ".txt"]
     UPLOAD_DIR: str = "uploads"
     
-    # Embedding Model (currently disabled)
-    # TODO: Re-enable when sentence-transformers is needed
+    # Embedding Model
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_DIMENSION: int = 384
     
