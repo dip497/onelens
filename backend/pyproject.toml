@@ -28,4 +28,5 @@ dependencies = [
     "agno>=1.6.3",
     "openai>=1.88.0",
     "ag-ui-protocol>=0.1.5",
+    "chromadb>=0.4.0",
 ]
