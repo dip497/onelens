@@ -10,7 +10,7 @@ import type {
   ApiError
 } from '@/types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
 const API_PREFIX = '/api/v1';
 
 // Create axios instance with default config
@@ -216,6 +216,25 @@ export const featureApi = {
   searchSimilar: async (text: string, threshold = 0.7, limit = 10): Promise<Feature[]> => {
     const response = await api.post('/features/search/similar', null, {
       params: { text, threshold, limit }
+    });
+    return response.data;
+  },
+
+  // Run individual agent analysis
+  runAgentAnalysis: async (
+    featureId: string,
+    agentType: string,
+    forceRefresh = false
+  ): Promise<{
+    feature_id: string;
+    agent_type: string;
+    analysis: string;
+    cached: boolean;
+    cached_at: string;
+    status: string;
+  }> => {
+    const response = await api.post(`/features/${featureId}/agent-analysis/${agentType}`, null, {
+      params: { force_refresh: forceRefresh }
     });
     return response.data;
   },

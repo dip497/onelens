@@ -1,13 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from uuid import UUID
 import numpy as np
 import logging
+import json
+from datetime import datetime, timedelta
 
 from app.core.database import get_db
-from app.models import Feature, Epic, FeatureRequest, Customer, PriorityScore
+from app.models import (
+    Feature, Epic, FeatureRequest, Customer, PriorityScore,
+    TrendAnalysis, BusinessImpactAnalysis, MarketOpportunityAnalysis,
+    GeographicAnalysis, FeatureAnalysisReport
+)
+from app.agents.agent_definitions import get_agent
 from app.schemas.feature import (
     FeatureCreate,
     FeatureUpdate,
@@ -147,7 +154,7 @@ async def get_feature(
         # Get latest priority score
         priority_query = select(PriorityScore).where(
             PriorityScore.feature_id == feature_id
-        ).order_by(PriorityScore.calculated_at.desc()).limit(1)
+        ).order_by(PriorityScore.created_at.desc()).limit(1)
         priority_result = await db.execute(priority_query)
         priority_score = priority_result.scalar_one_or_none()
         
@@ -401,7 +408,7 @@ async def get_feature_analysis_results(
         }
     
     # Get priority score
-    priority_query = select(PriorityScore).where(PriorityScore.feature_id == feature_id).order_by(PriorityScore.calculated_at.desc()).limit(1)
+    priority_query = select(PriorityScore).where(PriorityScore.feature_id == feature_id).order_by(PriorityScore.created_at.desc()).limit(1)
     priority_result = await db.execute(priority_query)
     priority_score = priority_result.scalar_one_or_none()
     if priority_score:
@@ -412,7 +419,7 @@ async def get_feature_analysis_results(
             "business_impact_score": priority_score.business_impact_score,
             "market_opportunity_score": priority_score.market_opportunity_score,
             "segment_diversity_score": priority_score.segment_diversity_score,
-            "calculated_at": priority_score.calculated_at.isoformat()
+            "calculated_at": priority_score.created_at.isoformat()
         }
     
     return {
@@ -466,3 +473,209 @@ async def search_similar_features(
     # TODO: Implement vector similarity search using pgvector
     # For now, return empty list as placeholder
     return []
+
+
+# Cache for agent analysis results
+_analysis_cache: Dict[str, Dict[str, Any]] = {}
+CACHE_DURATION_HOURS = 24
+
+
+@router.post("/{feature_id}/agent-analysis/{agent_type}")
+async def run_individual_agent_analysis(
+    feature_id: UUID,
+    agent_type: str,
+    background_tasks: BackgroundTasks,
+    force_refresh: bool = Query(False, description="Force refresh cached results"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Run individual agent analysis for a specific feature.
+
+    Supported agent types:
+    - trend_analyst: Market trend analysis
+    - competitive_analyst: Competitive analysis against ManageEngine, Freshservice, HaloITSM
+    - market_opportunity_analyst: Market trends and future forecasting
+    - business_impact_analyst: Business impact analysis
+    - geographic_analyst: Geographic market analysis
+    """
+
+    # Validate agent type
+    valid_agents = [
+        "trend_analyst",
+        "competitive_analyst",
+        "market_opportunity_analyst",
+        "business_impact_analyst",
+        "geographic_analyst"
+    ]
+
+    if agent_type not in valid_agents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid agent type. Must be one of: {', '.join(valid_agents)}"
+        )
+
+    # Check if feature exists
+    feature_query = select(Feature).where(Feature.id == feature_id)
+    feature_result = await db.execute(feature_query)
+    feature = feature_result.scalar_one_or_none()
+
+    if not feature:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Feature not found"
+        )
+
+    # Create cache key
+    cache_key = f"{feature_id}_{agent_type}"
+
+    # Check cache first (unless force refresh)
+    if not force_refresh and cache_key in _analysis_cache:
+        cached_result = _analysis_cache[cache_key]
+        cache_time = datetime.fromisoformat(cached_result["cached_at"])
+
+        # Check if cache is still valid (24 hours)
+        if datetime.now() - cache_time < timedelta(hours=CACHE_DURATION_HOURS):
+            return {
+                "feature_id": str(feature_id),
+                "agent_type": agent_type,
+                "analysis": cached_result["analysis"],
+                "cached": True,
+                "cached_at": cached_result["cached_at"],
+                "status": "completed"
+            }
+
+    try:
+        # Get the agent
+        agent = get_agent(agent_type)
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Agent {agent_type} not available"
+            )
+
+        # Prepare feature context for the agent
+        feature_context = {
+            "feature_id": str(feature_id),
+            "title": feature.title,
+            "description": feature.description or "",
+            "customer_request_count": feature.customer_request_count
+        }
+
+        # Create analysis prompt based on agent type
+        analysis_prompt = _create_analysis_prompt(agent_type, feature_context)
+
+        # Run the agent analysis
+        response = agent.run(analysis_prompt)
+
+        # Extract the analysis content
+        analysis_content = response.content if hasattr(response, 'content') else str(response)
+
+        # Cache the result
+        cache_result = {
+            "analysis": analysis_content,
+            "cached_at": datetime.now().isoformat()
+        }
+        _analysis_cache[cache_key] = cache_result
+
+        return {
+            "feature_id": str(feature_id),
+            "agent_type": agent_type,
+            "analysis": analysis_content,
+            "cached": False,
+            "cached_at": cache_result["cached_at"],
+            "status": "completed"
+        }
+
+    except Exception as e:
+        logger.error(f"Error running {agent_type} analysis for feature {feature_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to run {agent_type} analysis: {str(e)}"
+        )
+
+
+def _create_analysis_prompt(agent_type: str, feature_context: Dict[str, Any]) -> str:
+    """Create analysis prompt based on agent type and feature context"""
+
+    base_context = f"""
+    Feature Analysis Request:
+    - Feature: {feature_context['title']}
+    - Description: {feature_context['description']}
+    - Customer Requests: {feature_context['customer_request_count']}
+    """
+
+    if agent_type == "trend_analyst":
+        return f"""{base_context}
+
+        Please provide a comprehensive market trend analysis for this feature. Include:
+        1. Current market trends relevant to this feature
+        2. Technology trends and emerging patterns
+        3. Industry adoption patterns
+        4. Future outlook and predictions
+        5. Trend alignment score and justification
+
+        Format your response in markdown with clear sections and bullet points.
+        """
+
+    elif agent_type == "competitive_analyst":
+        return f"""{base_context}
+
+        Please provide a detailed competitive analysis focusing on:
+        1. ManageEngine - their offering, strengths, and weaknesses
+        2. Freshservice - their offering, strengths, and weaknesses
+        3. HaloITSM - their offering, strengths, and weaknesses
+        4. Market gaps and opportunities
+        5. Competitive positioning recommendations
+
+        Format your response in markdown with comparison tables where appropriate.
+        """
+
+    elif agent_type == "market_opportunity_analyst":
+        return f"""{base_context}
+
+        Please provide market trends and future forecasting analysis including:
+        1. Market size and growth projections
+        2. Geographic opportunities (US, UK, Germany, Japan, Australia)
+        3. Industry vertical analysis
+        4. Future market trends and forecasting
+        5. Revenue opportunity assessment
+        6. Risk factors and mitigation strategies
+
+        Include detailed analysis with numbers, tables, and graphs where possible.
+        Format your response in markdown.
+        """
+
+    elif agent_type == "business_impact_analyst":
+        return f"""{base_context}
+
+        Please provide business impact analysis including:
+        1. Revenue impact potential
+        2. User adoption forecast
+        3. Strategic alignment assessment
+        4. Implementation complexity analysis
+        5. ROI projections
+        6. Business justification
+
+        Format your response in markdown with clear metrics and projections.
+        """
+
+    elif agent_type == "geographic_analyst":
+        return f"""{base_context}
+
+        Please provide geographic market analysis including:
+        1. Regional market penetration opportunities
+        2. Regulatory considerations by geography
+        3. Cultural adoption factors
+        4. Competitive landscape by region
+        5. Market entry strategies
+        6. Localization requirements
+
+        Format your response in markdown with regional breakdowns.
+        """
+
+    else:
+        return f"""{base_context}
+
+        Please provide a comprehensive analysis of this feature.
+        Format your response in markdown.
+        """

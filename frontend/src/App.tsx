@@ -11,6 +11,7 @@ import { EpicDashboard } from '@/components/epics/EpicDashboard';
 import { EpicDetail } from '@/pages/EpicDetail';
 import { EditEpic } from '@/pages/EditEpic';
 import { FeatureDashboard } from '@/pages/FeatureDashboard';
+import { FeatureAnalysis } from '@/pages/FeatureAnalysis';
 import { AnalysisReports } from '@/pages/AnalysisReports';
 import { CompetitorAnalysis } from '@/pages/CompetitorAnalysis';
 import { CustomerInsights } from '@/pages/CustomerInsights';
@@ -45,6 +46,7 @@ function App() {
             <Route path="epics/:id" element={<EpicDetail />} />
             <Route path="epics/:id/edit" element={<EditEpic />} />
             <Route path="features" element={<FeatureDashboard />} />
+            <Route path="features/:featureId/analysis" element={<FeatureAnalysis />} />
             <Route path="rfp" element={<RFPDashboard />} />
             <Route path="analysis" element={<AnalysisReports />} />
             <Route path="competitors" element={<CompetitorAnalysis />} />

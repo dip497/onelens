@@ -35,7 +35,7 @@ class PriorityScoreResponse(BaseSchema):
     business_impact_score: float
     market_opportunity_score: float
     segment_diversity_score: float
-    calculated_at: datetime
+    calculated_at: datetime = Field(alias='created_at')
 
 class FeatureWithAnalysis(FeatureResponse):
     priority_score: Optional[PriorityScoreResponse] = None
