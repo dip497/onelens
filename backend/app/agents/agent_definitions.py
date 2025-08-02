@@ -1,14 +1,17 @@
 """
 Updated Centralized Agent Definitions for OneLens Platform
- 
+
 This file contains all agent configurations and definitions used across the OneLens platform.
 Import agents from this file to ensure consistency across the application.
 """
- 
-from typing import Dict, Any, List, Optional
+
+from typing import Dict, List, Optional
 from agno.agent import Agent
+from agno.team import Team
+from agno.memory.v2.db.sqlite import SqliteMemoryDb
+from agno.memory.v2.memory import Memory
 from agno.models.openai import OpenAIChat
-from agno.tools.duckduckgo import DuckDuckGoTools
+# from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.tavily import TavilyTools
 from app.tools import search_knowledge_base
 from app.core.config import settings
@@ -23,10 +26,8 @@ class AgentRegistry:
     
     def _initialize_agents(self):
         """Initialize all agents"""
-        self._agents.update({
-            # Core Platform Agents
-            "onelens_assistant": self._create_onelens_assistant(),
-            
+        # First create individual agents
+        individual_agents = {
             # Analysis Agents
             "trend_analyst": self._create_trend_analyst(),
             "business_impact_analyst": self._create_business_impact_analyst(),
@@ -34,15 +35,27 @@ class AgentRegistry:
             "market_opportunity_analyst": self._create_market_opportunity_analyst(),
             "geographic_analyst": self._create_geographic_analyst(),
             "priority_calculator": self._create_priority_calculator(),
-            
+
             # Document Processing Agents
             "document_parser": self._create_document_parser(),
             "rfp_processor": self._create_rfp_processor(),
             "embedding_generator": self._create_embedding_generator(),
-            
+
             # Utility Agents
             "similarity_matcher": self._create_similarity_matcher(),
             "database_updater": self._create_database_updater(),
+
+            # ServiceOps Agent
+            "serviceops_agent": self._create_serviceops_agent(),
+        }
+
+        # Store individual agents
+        self._agents.update(individual_agents)
+
+        # Create teams with memory context
+        self._agents.update({
+            # Core Platform Team
+            "onelens_assistant": self._create_onelens_team(individual_agents),
         })
     
     def get_agent(self, name: str) -> Optional[Agent]:
@@ -57,60 +70,145 @@ class AgentRegistry:
         """Get all agents"""
         return self._agents.copy()
     
-    # Core Platform Agents
-    def _create_onelens_assistant(self) -> Agent:
-        """OneLens AI Assistant for general platform help with enhanced web search capabilities"""
-        return Agent(
-            name="OneLens Assistant",
-            tools=[search_knowledge_base, TavilyTools(api_key=settings.TAVILY_API_KEY)],
+    # Core Platform Team
+    def _create_onelens_team(self, individual_agents: Dict[str, Agent]) -> Team:
+        """OneLens AI Assistant Team - Multi-agent paradigm with memory context"""
+
+        # Create memory database for team context
+        memory_db = SqliteMemoryDb(table_name="onelens_team_memory", db_file="tmp/onelens_team_memory.db")
+        memory = Memory(db=memory_db)
+
+        # Select team members from individual agents - Single unified team
+        team_members = [
+            individual_agents["trend_analyst"],
+            individual_agents["business_impact_analyst"],
+            individual_agents["competitive_analyst"],
+            individual_agents["market_opportunity_analyst"],
+            individual_agents["geographic_analyst"],
+            individual_agents["priority_calculator"],
+            individual_agents["document_parser"],
+            individual_agents["rfp_processor"],
+            individual_agents["serviceops_agent"],
+        ]
+
+        # Create the unified OneLens team with memory context
+        return Team(
+            name="OneLens Assistant Team",
+            description="Unified multi-agent team for comprehensive product management and analysis",
+            members=team_members,
             model=OpenAIChat(id="gpt-4o-mini"),
+            memory=memory,
+            enable_user_memories=True,
+            enable_agentic_memory=True,
+            add_history_to_messages=True,
+            num_history_runs=5,
             instructions=[
-                "You are OneLens AI Assistant, an expert AI assistant for the OneLens comprehensive product management and analysis platform.",
+                "You are the OneLens Assistant Team, a unified multi-agent system for comprehensive product management and analysis.",
                 "",
-                "CORE CAPABILITIES:",
-                "• Epic and feature lifecycle management",
-                "• Advanced product analysis and strategic insights",
-                "• Real-time competitor analysis and market intelligence",
-                "• Customer journey mapping and insights",
-                "• Product roadmap optimization",
-                "• Priority scoring and resource allocation",
-                "• Cross-functional team collaboration support",
+                "CRITICAL ROUTING RULES:",
+                "• ALL requests from agent.py come directly to this unified team",
+                "• Route ServiceOps feature queries STRICTLY to ServiceOps Agent ONLY for factual answers",
+                "• Route analysis/research tasks to appropriate analysis agents (NOT ServiceOps Agent)",
+                "• ServiceOps Agent has ONLY ChromaDB access - no web search capabilities",
+                "• Analysis agents have web search capabilities for research and competitive analysis",
                 "",
-                "ADVANCED SEARCH & RESEARCH:",
-                "• Real-time market trend analysis and industry benchmarking",
-                "• Competitive intelligence gathering and analysis",
-                "• Current product management methodologies and best practices",
-                "• Industry case studies and success stories",
-                "• Regulatory and compliance updates",
-                "• Technology adoption trends and emerging opportunities",
+                "SPECIFIC ROUTING INSTRUCTIONS:",
                 "",
-                "INTERACTION GUIDELINES:",
-                "• Be proactive: Anticipate user needs and suggest relevant insights",
+                "ROUTE TO SERVICEOPS AGENT ONLY when query mentions:",
+                "• 'ServiceOps features' or 'ServiceOps capabilities'",
+                "• Platform configuration, setup, or technical documentation",
+                "• API integration guidance or troubleshooting",
+                "• User guides, how-to questions, or operational procedures",
+                "• Direct platform feature questions requiring factual answers",
+                "",
+                "ROUTE TO ANALYSIS AGENTS when query involves:",
+                "• Market trend analysis or industry insights (→ Trend Analyst)",
+                "• Business impact assessment or ROI analysis (→ Business Impact Analyst)",
+                "• Competitive analysis or competitor intelligence (→ Competitive Analyst)",
+                "• Market opportunity evaluation (→ Market Opportunity Analyst)",
+                "• Geographic market analysis (→ Geographic Analyst)",
+                "• Feature prioritization or priority scoring (→ Priority Calculator)",
+                "• Document processing or RFP handling (→ Document Parser/RFP Processor)",
+                "• Research requiring web search and external data",
+                "",
+                "STRICT SEPARATION RULE:",
+                "• DO NOT involve ServiceOps Agent in analysis/research tasks",
+                "• DO NOT involve analysis agents in direct ServiceOps feature queries",
+                "• Only use ServiceOps Agent for factual, ChromaDB-based responses",
+                "",
+                "TEAM COORDINATION:",
+                "• Maintain context and memory across all team interactions",
+                "• Provide unified, coherent responses leveraging appropriate expertise",
+                "• Collaborate between analysis agents when complex analysis requires multiple perspectives",
+                "• Keep ServiceOps Agent responses factual and database-driven",
+                "",
+                "RESPONSE GUIDELINES:",
                 "• Be strategic: Always consider business impact, ROI, and user value",
-                "• Be data-driven: Support recommendations with current market data",
+                "• Be data-driven: Support recommendations with appropriate data sources",
                 "• Be actionable: Provide specific, implementable recommendations",
                 "• Be concise: Deliver insights efficiently without overwhelming detail",
                 "",
-                "DECISION SUPPORT:",
-                "• Evaluate features against market trends and competitive landscape",
-                "• Assess business impact using weighted scoring models",
-                "• Provide risk assessment and mitigation strategies",
-                "• Suggest optimization opportunities and quick wins",
-                "",
-                "SEARCH STRATEGY:",
-                "When users need current information, proactively use web search for:",
-                "- Market trends and industry reports (last 6-12 months)",
-                "- Competitor product updates and announcements",
-                "- Customer feedback and sentiment analysis",
-                "- Technology adoption statistics and forecasts",
-                "- Regulatory changes affecting product strategy",
-                "",
-                "Always cite sources when using external research and explain the relevance to OneLens platform decisions.",
+                "Always maintain team memory and context to provide personalized, continuous support.",
             ],
             add_datetime_to_instructions=True,
             markdown=True,
         )
     
+    # ServiceOps Agent
+    def _create_serviceops_agent(self) -> Agent:
+        """ServiceOps Agent with ChromaDB access only (no web search capabilities)"""
+        return Agent(
+            name="ServiceOps Agent",
+            model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[search_knowledge_base],  # Only ChromaDB knowledge base search, no Tavily
+            instructions=[
+                "You are the ServiceOps Agent, specialized in ChromaDB-based knowledge retrieval from the ServiceOps platform.",
+                "",
+                "PRIMARY RESPONSIBILITIES:",
+                "• Search and retrieve information ONLY from the ServiceOps ChromaDB knowledge base",
+                "• Provide factual, accurate information based solely on stored knowledge",
+                "• Support ServiceOps feature queries with direct database retrieval",
+                "• Assist with platform configuration and setup questions using stored documentation",
+                "• Answer general platform questions using internal knowledge",
+                "",
+                "KNOWLEDGE BASE EXPERTISE:",
+                "• Platform features and capabilities documentation",
+                "• API documentation and integration guides",
+                "• Troubleshooting guides and FAQs",
+                "• Best practices and operational procedures",
+                "• System configuration and setup instructions",
+                "• User guides and tutorials",
+                "",
+                "CHROMADB SEARCH STRATEGY:",
+                "• ALWAYS query ChromaDB knowledge base first for every request",
+                "• Only use information from ChromaDB retrieval with confidence > 60%",
+                "• If ChromaDB confidence is < 60%, clearly state insufficient data available",
+                "• NEVER use external web search, APIs, or any other data sources",
+                "• ONLY provide answers based on high-confidence ChromaDB retrieval",
+                "",
+                "RESPONSE FORMAT:",
+                "• FIRST: Always query ChromaDB knowledge base",
+                "• CHECK: Verify confidence score is > 60% before responding",
+                "• IF confidence < 60%: State 'Insufficient high-confidence data in knowledge base'",
+                "• IF confidence > 60%: Provide clear, step-by-step instructions when applicable",
+                "• Include relevant references from the ChromaDB knowledge base",
+                "• Highlight important warnings or prerequisites from retrieved data",
+                "• If no high-confidence data available, suggest contacting support",
+                "",
+                "STRICT DATA SOURCE LIMITATIONS:",
+                "• NO access to external web search or real-time information",
+                "• NO access to any data source other than ChromaDB knowledge base",
+                "• ONLY ChromaDB retrieval with confidence score > 60% allowed",
+                "• Must reject queries if ChromaDB confidence < 60%",
+                "• Cannot provide market analysis, trends, or competitive intelligence",
+                "• Must be factual and based solely on high-confidence ChromaDB data",
+                "",
+                "Focus on providing accurate, ChromaDB-driven responses for operational and platform queries.",
+            ],
+            add_datetime_to_instructions=True,
+            markdown=True,
+        )
+
     # Analysis Agents with Enhanced Instructions
     def _create_trend_analyst(self) -> Agent:
         """Enhanced market trend analysis agent"""
@@ -155,6 +253,7 @@ class AgentRegistry:
         return Agent(
             name="Business Impact Analyst",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
                 "You are a senior business impact analyst specializing in product strategy and ROI optimization.",
                 "",
@@ -285,6 +384,7 @@ class AgentRegistry:
         return Agent(
             name="Priority Calculator",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
                 "You are a strategic priority scoring engine using advanced weighted algorithms.",
                 "",
@@ -374,6 +474,7 @@ class AgentRegistry:
         return Agent(
             name="Document Parser",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
                 "You are an advanced document parsing specialist with expertise in enterprise document formats.",
                 "",
@@ -411,9 +512,9 @@ class AgentRegistry:
         return Agent(
             name="RFP Processor",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
-            tools=[search_knowledge_base],
+            tools=[search_knowledge_base, TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
-                "You are an RFP response specialist with deep knowledge of OneLens platform capabilities.",
+                "You are an RFP response specialist with deep knowledge of ServiceOps platform capabilities.",
                 "",
                 "RFP PROCESSING METHODOLOGY:",
                 "1. REQUIREMENT ANALYSIS:",
@@ -423,7 +524,7 @@ class AgentRegistry:
                 "   • Flag critical decision factors",
                 "",
                 "2. CAPABILITY MATCHING:",
-                "   • Search OneLens knowledge base comprehensively",
+                "   • Search ServiceOps knowledge base comprehensively",
                 "   • Match requirements to existing features",
                 "   • Identify customization and configuration options",
                 "   • Assess development effort for gaps",
@@ -454,6 +555,7 @@ class AgentRegistry:
         return Agent(
             name="Embedding Generator",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
                 "You are a semantic embedding specialist optimizing for enterprise content search and matching.",
                 "",
@@ -492,6 +594,7 @@ class AgentRegistry:
         return Agent(
             name="Similarity Matcher",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
                 "You are a semantic similarity specialist using advanced matching algorithms.",
                 "",
@@ -535,6 +638,7 @@ class AgentRegistry:
         return Agent(
             name="Database Updater",
             model=OpenAIChat(id="gpt-4o-mini", max_retries=3, timeout=60.0),
+            tools=[TavilyTools(api_key=settings.TAVILY_API_KEY)],
             instructions=[
                 "You are a database operations specialist ensuring data integrity and consistency.",
                 "",
@@ -584,9 +688,17 @@ def get_agent(name: str) -> Optional[Agent]:
     return agent_registry.get_agent(name)
  
  
-def get_onelens_assistant() -> Agent:
-    """Get the main OneLens assistant agent"""
+def get_onelens_assistant() -> Team:
+    """Get the main ServiceOps assistant team"""
     return agent_registry.get_agent("onelens_assistant")
+
+
+def get_serviceops_agent() -> Agent:
+    """Get the ServiceOps agent"""
+    return agent_registry.get_agent("serviceops_agent")
+
+
+# Removed smart router and route_query functions - using unified team approach
  
  
 def get_analysis_agents() -> Dict[str, Agent]:

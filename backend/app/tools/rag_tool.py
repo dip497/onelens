@@ -97,48 +97,63 @@ def get_rag_interface():
 @tool(show_result=False)
 def search_knowledge_base(query: str, max_results: int = 1) -> str:
     """
-    Search the OneLens knowledge base for relevant information.
+    Search the OneLens ChromaDB knowledge base for relevant information.
+    Only returns results with confidence score > 60% to ensure high-quality responses.
 
     Args:
         query: The search query to find relevant documents
-        max_results: Maximum number of results to return (default: 5)
+        max_results: Maximum number of results to return (not used, always returns top 2)
 
     Returns:
-        str: Formatted context from the knowledge base with source links
+        str: Formatted context from ChromaDB with source links, or message if confidence too low
     """
     try:
-        print("input:", query)
+        print("ChromaDB Query Input:", query)
         rag_interface = get_rag_interface()
+
+        # Always retrieve top 2 chunks as specified
         search_results = rag_interface.search(query, top_k=2)
 
         if not search_results:
-            return "No relevant information found in the knowledge base."
+            return "No relevant information found in the ChromaDB knowledge base."
 
-        # Format results
+        # Filter results with confidence score > 60% (0.6)
+        high_confidence_results = []
+        for result in search_results:
+            confidence_percentage = result.similarity_score * 100
+            print(f"ChromaDB Chunk Confidence: {confidence_percentage:.1f}%")
+
+            if result.similarity_score > 0.6:  # 60% confidence threshold
+                high_confidence_results.append(result)
+
+        # Only proceed if we have high-confidence results
+        if not high_confidence_results:
+            return "No high-confidence information found in ChromaDB (confidence < 60%). Cannot provide reliable answer from knowledge base."
+
+        # Format high-confidence results only
         context_parts = []
         source_links = []
 
-        for i, result in enumerate(search_results):
-            if result.similarity_score > 0.2:  # Only relevant results
-                context_parts.append(f"Document {i+1}: {result.content}")
-                context_parts.append(f"Title: {result.title}")
-                if result.url and result.url != "No URL":
-                    context_parts.append(f"Source URL: {result.url}")
-                    if result.url not in source_links:
-                        source_links.append(result.url)
-                context_parts.append("---")
-
-        if not context_parts:
-            return "No highly relevant information found in the knowledge base."
+        for i, result in enumerate(high_confidence_results):
+            confidence_percentage = result.similarity_score * 100
+            context_parts.append(f"Document {i+1} (Confidence: {confidence_percentage:.1f}%): {result.content}")
+            context_parts.append(f"Title: {result.title}")
+            if result.url and result.url != "No URL":
+                context_parts.append(f"Source URL: {result.url}")
+                if result.url not in source_links:
+                    source_links.append(result.url)
+            context_parts.append("---")
 
         context_data = "\n".join(context_parts)
 
         # Add source links
         if source_links:
-            links_text = "\n\nSOURCE LINKS:\n" + "\n".join([f"- {link}" for link in source_links])
+            links_text = "\n\nCHROMADB SOURCE LINKS:\n" + "\n".join([f"- {link}" for link in source_links])
             context_data += links_text
-        print("output:", context_data)
+
+        print("ChromaDB Output:", context_data)
         return context_data
 
-    except Exception:
-        return "Error occurred while searching the knowledge base."
+    except Exception as e:
+        print(f"ChromaDB Error: {e}")
+        return "Error occurred while searching the ChromaDB knowledge base."
