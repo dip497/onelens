@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     MARKET_RESEARCH_API_KEY: Optional[str] = None
     WEB_SEARCH_API_KEY: Optional[str] = None
+    TAVILY_API_KEY: Optional[str] = None
     
     # Agno Framework
     AGNO_SERVICE_URL: str = "http://localhost:8080"
