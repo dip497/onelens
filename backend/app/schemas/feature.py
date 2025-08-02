@@ -13,6 +13,10 @@ class FeatureBase(BaseSchema):
 class FeatureCreate(FeatureBase):
     epic_id: UUID
 
+class FeatureCreateInEpic(FeatureBase):
+    """Schema for creating a feature within an epic context (epic_id provided in URL)"""
+    pass
+
 class FeatureUpdate(BaseSchema):
     title: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None

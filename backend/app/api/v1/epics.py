@@ -16,6 +16,7 @@ from app.schemas.epic import (
     EpicListResponse,
     EpicSummary
 )
+from app.schemas.feature import FeatureCreateInEpic, FeatureResponse
 from app.schemas.base import PaginationParams
 from app.models.enums import EpicStatus
 
@@ -255,7 +256,8 @@ async def trigger_epic_analysis(
         )
     
     # Integrate with Agno workflow
-    from app.services.agno_service import agno_service_v2 as agno_service
+    from app.services.agno_service import get_agno_service_v2
+    agno_service = get_agno_service_v2()
     
     # Get all features for this epic
     features_query = select(Feature).where(Feature.epic_id == epic_id)
@@ -346,6 +348,92 @@ async def trigger_epic_analysis(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Analysis service temporarily unavailable"
         )
+
+@router.post("/{epic_id}/features", response_model=FeatureResponse, status_code=status.HTTP_201_CREATED)
+async def create_feature_in_epic(
+    epic_id: UUID,
+    feature_data: FeatureCreateInEpic,
+    db: AsyncSession = Depends(get_db)
+):
+    """Create a new feature within this epic"""
+    # Import here to avoid circular imports
+    from app.schemas.feature import FeatureResponse
+    
+    # Verify epic exists
+    query = select(Epic).where(Epic.id == epic_id)
+    result = await db.execute(query)
+    epic = result.scalar_one_or_none()
+    
+    if not epic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Epic not found"
+        )
+    
+    # Create normalized text
+    normalized_text = f"{feature_data.title} {feature_data.description or ''}".lower()
+    
+    # Create the feature with the epic_id
+    feature = Feature(
+        epic_id=epic_id,
+        title=feature_data.title,
+        description=feature_data.description,
+        normalized_text=normalized_text,
+        customer_request_count=0
+    )
+    
+    db.add(feature)
+    await db.commit()
+    await db.refresh(feature)
+    
+    return FeatureResponse(
+        id=feature.id,
+        epic_id=feature.epic_id,
+        title=feature.title,
+        description=feature.description,
+        normalized_text=feature.normalized_text,
+        customer_request_count=feature.customer_request_count,
+        created_at=feature.created_at,
+        updated_at=feature.updated_at
+    )
+
+@router.get("/{epic_id}/features", response_model=List[FeatureResponse])
+async def get_epic_features(
+    epic_id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get all features for this epic"""
+    from app.schemas.feature import FeatureResponse
+    
+    # Verify epic exists
+    epic_query = select(Epic).where(Epic.id == epic_id)
+    epic_result = await db.execute(epic_query)
+    epic = epic_result.scalar_one_or_none()
+    
+    if not epic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Epic not found"
+        )
+    
+    # Get all features for this epic
+    features_query = select(Feature).where(Feature.epic_id == epic_id).order_by(Feature.created_at.desc())
+    features_result = await db.execute(features_query)
+    features = features_result.scalars().all()
+    
+    return [
+        FeatureResponse(
+            id=feature.id,
+            epic_id=feature.epic_id,
+            title=feature.title,
+            description=feature.description,
+            normalized_text=feature.normalized_text,
+            customer_request_count=feature.customer_request_count,
+            created_at=feature.created_at,
+            updated_at=feature.updated_at
+        )
+        for feature in features
+    ]
 
 @router.get("/{epic_id}/analysis/results")
 async def get_epic_analysis_results(

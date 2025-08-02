@@ -109,7 +109,7 @@ def search_knowledge_base(query: str, max_results: int = 1) -> str:
     try:
         print("input:", query)
         rag_interface = get_rag_interface()
-        search_results = rag_interface.search(query, top_k=max_results)
+        search_results = rag_interface.search(query, top_k=2)
 
         if not search_results:
             return "No relevant information found in the knowledge base."

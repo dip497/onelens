@@ -50,16 +50,19 @@ async def list_customers(
     query = select(Customer)
     
     if segment:
-        query = query.filter(Customer.segment == segment)
+        query = query.where(Customer.segment == segment)
     
     if vertical:
-        query = query.filter(Customer.vertical == vertical)
+        query = query.where(Customer.vertical == vertical)
     
     if search:
-        query = query.filter(
-            Customer.name.ilike(f"%{search}%") |
-            Customer.company.ilike(f"%{search}%") |
-            Customer.email.ilike(f"%{search}%")
+        from sqlalchemy import or_
+        query = query.where(
+            or_(
+                Customer.name.ilike(f"%{search}%"),
+                Customer.company.ilike(f"%{search}%"),
+                Customer.email.ilike(f"%{search}%")
+            )
         )
     
     # Get total count
@@ -93,7 +96,7 @@ async def get_customer(
             selectinload(Customer.feature_requests),
             selectinload(Customer.rfp_documents)
         )
-        .filter(Customer.id == customer_id)
+        .where(Customer.id == customer_id)
     )
     customer = result.scalar_one_or_none()
     

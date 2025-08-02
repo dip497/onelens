@@ -4,15 +4,13 @@ from uuid import uuid4
 import logging
 from pydantic import BaseModel, Field
 
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.workflow.v2 import Workflow, Step, Parallel
 from agno.storage.sqlite import SqliteStorage
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.agents import get_analysis_agents, get_agent
 from app.models import (
     Feature, Epic, TrendAnalysis, BusinessImpactAnalysis,
     MarketOpportunityAnalysis, GeographicAnalysis, PriorityScore,
@@ -97,166 +95,38 @@ class AgnoWorkflowServiceV2:
         self._initialize_workflows()
     
     def _initialize_agents(self):
-        """Initialize Agno agents with proper response models"""
-        
-        # Trend Analysis Agent
-        self.trend_agent = Agent(
-            name="Trend Analyst",
-            model=OpenAIChat(
-                id="gpt-4o-mini",
-                max_retries=3,
-                timeout=60.0
-            ),
-            role="Market trend analyst for feature evaluation",
-            response_model=TrendAnalysisResult,  # Structured output
-            use_json_mode=True,
-            exponential_backoff=True,
-            delay_between_retries=5,
-            instructions=[
-                "You are analyzing a product feature for trend alignment with current technology and market trends.",
-                "IMPORTANT: You MUST provide the feature_id in your response.",
-                "For Multi-Factor Authentication (MFA) features, consider these current trends:",
-                "- Zero Trust security models are becoming standard",
-                "- Passwordless authentication is gaining momentum",
-                "- Biometric authentication adoption is increasing",
-                "- Regulatory compliance (SOX, GDPR, HIPAA) drives MFA adoption",
-                "- Remote work has increased security requirements",
-                "Identify 3-5 key trend keywords relevant to the feature (e.g., 'zero-trust', 'passwordless', 'biometric', 'compliance').",
-                "Calculate an alignment score between 0 and 1 (MFA features should score high ~0.8-0.9).",
-                "List 2-3 emerging trends that relate to this feature.",
-                "Provide detailed findings as a dictionary with keys like 'market_analysis', 'technology_trends', 'security_landscape'.",
-                "Give 3-5 specific recommendations for implementation or enhancement.",
-                "Your confidence_score should reflect how certain you are about the analysis (0.8+ for well-established trends like MFA).",
-                "ALL fields in the TrendAnalysisResult model are required."
-            ]
-        )
-        
-        # Business Impact Agent
-        self.business_impact_agent = Agent(
-            name="Business Impact Analyst",
-            model=OpenAIChat(
-                id="gpt-4o-mini",
-                max_retries=3,
-                timeout=60.0
-            ),
-            role="Business impact analyst for feature evaluation",
-            response_model=BusinessImpactAnalysisResult,  # Structured output
-            use_json_mode=True,
-            exponential_backoff=True,
-            delay_between_retries=5,
-            instructions=[
-                "You are calculating business impact for a product feature.",
-                "IMPORTANT: You MUST provide the feature_id in your response.",
-                "For Multi-Factor Authentication (MFA) features, consider these business impacts:",
-                "- Security breaches cost companies $4.45M on average (IBM 2023)",
-                "- MFA reduces breach risk by 99.9% (Microsoft)",
-                "- Compliance requirements drive adoption (SOX, GDPR, HIPAA)",
-                "- Enterprise customers prioritize security features highly",
-                "Based on customer requests and feature type, calculate an impact_score (60-85 for MFA features).",
-                "Determine revenue_impact as 'High' for security features due to compliance needs.",
-                "Calculate user_adoption_score (70-90 for MFA) based on security awareness.",
-                "List customer segments that will benefit most (Enterprise, Healthcare, Financial Services).",
-                "Provide detailed findings with keys like 'revenue_analysis', 'customer_impact', 'compliance_value'.",
-                "Give 3-5 business recommendations focusing on security ROI and compliance.",
-                "Consider: Enterprise=10x weight, Large=5x, Medium=2.5x, Small=1x.",
-                "ALL fields in the BusinessImpactAnalysisResult model are required."
-            ]
-        )
-        
-        # Competitive Analysis Agent
-        self.competitive_agent = Agent(
-            name="Competitive Intelligence Analyst",
-            model=OpenAIChat(
-                id="gpt-4o-mini",
-                max_retries=3,
-                timeout=60.0
-            ),
-            role="Competitive analyst for feature evaluation",
-            response_model=CompetitiveAnalysisResult,  # Structured output
-            use_json_mode=True,
-            exponential_backoff=True,
-            delay_between_retries=5,
-            instructions=[
-                "You are analyzing competitive landscape for a product feature.",
-                "IMPORTANT: You MUST provide the feature_id in your response.",
-                "For Multi-Factor Authentication (MFA) features, analyze these known competitors:",
-                "- Microsoft (Azure AD MFA): Strong enterprise integration, SMS/app-based",
-                "- Google (2-Step Verification): Wide adoption, authenticator app focus",
-                "- Okta: Enterprise SSO with MFA, strong API integration",
-                "- Duo Security (Cisco): User-friendly, push notifications",
-                "- RSA SecurID: Hardware tokens, enterprise legacy",
-                "List major competitors with their strengths, weaknesses, and MFA capabilities.",
-                "Identify 3-5 market gaps: biometric integration, seamless UX, cost-effectiveness, mobile-first design.",
-                "List 3-5 competitive advantages: better UX, lower cost, faster implementation, better mobile support.",
-                "Calculate opportunity_score (6-8 for MFA) based on market saturation vs. growing demand.",
-                "Provide detailed findings with competitive positioning insights.",
-                "Give 3-5 strategic recommendations for differentiation.",
-                "ALL fields in the CompetitiveAnalysisResult model are required."
-            ]
-        )
-        
-        # Geographic Analysis Agent
-        self.geographic_agent = Agent(
-            name="Geographic Market Analyst",
-            model=OpenAIChat(
-                id="gpt-4o-mini",
-                max_retries=3,
-                timeout=60.0
-            ),
-            role="Geographic market analyst for feature evaluation",
-            response_model=GeographicAnalysisResult,  # Structured output
-            use_json_mode=True,
-            exponential_backoff=True,
-            delay_between_retries=5,
-            instructions=[
-                "You are analyzing geographic market opportunities for a feature.",
-                "IMPORTANT: You MUST provide the feature_id in your response.",
-                "For Multi-Factor Authentication (MFA) features, analyze these key markets:",
-                "- United States: Large enterprise market, strong compliance requirements (SOX, HIPAA)",
-                "- United Kingdom: GDPR compliance, growing fintech sector",
-                "- Germany: Strong privacy regulations, manufacturing sector digitization",
-                "- Japan: Cybersecurity investment growth, enterprise digital transformation",
-                "- Australia: Government security initiatives, banking sector requirements",
-                "For each region, provide: country, market_size (High/Medium/Low), opportunity_rating (1-10), regulatory_factors.",
-                "List 3-5 overall market opportunities: compliance-driven adoption, remote work security, fintech growth.",
-                "Identify key regulatory factors: GDPR, SOX, HIPAA, PCI-DSS, local data protection laws.",
-                "Provide detailed findings by region with market size and growth drivers.",
-                "Give 3-5 geographic expansion recommendations prioritizing compliance-heavy markets.",
-                "Use realistic market assessments based on security spending and regulatory environment.",
-                "ALL fields in the GeographicAnalysisResult model are required."
-            ]
-        )
+        """Initialize Agno agents from centralized definitions"""
+        try:
+            analysis_agents = get_analysis_agents()
 
-        # Priority Scoring Agent
-        self.priority_agent = Agent(
-            name="Priority Calculator",
-            model=OpenAIChat(
-                id="gpt-4o-mini",
-                max_retries=3,
-                timeout=60.0
-            ),
-            role="Priority scoring engine for features",
-            response_model=PriorityScoreResult,  # Structured output
-            use_json_mode=True,
-            exponential_backoff=True,
-            delay_between_retries=5,
-            instructions=[
-                "You are calculating the final priority score for a feature.",
-                "IMPORTANT: You MUST provide the feature_id in your response.",
-                "For Multi-Factor Authentication (MFA) features, calculate priority_score (75-90) using these weights:",
-                "- Customer Impact (30%): Security features have high enterprise demand",
-                "- Trend Alignment (20%): MFA aligns strongly with security trends (score: 85-95)",
-                "- Business Impact (25%): High revenue potential due to compliance needs",
-                "- Market Opportunity (20%): Growing market with differentiation potential",
-                "- Segment Diversity (5%): Appeals to enterprise, healthcare, finance sectors",
-                "Provide score_breakdown with each component (Customer: 25-30, Trend: 17-19, Business: 20-23, Market: 15-18, Diversity: 4-5).",
-                "List 3-5 key ranking_factors: security compliance, market demand, competitive advantage, revenue impact.",
-                "Provide detailed findings about why this feature should be prioritized.",
-                "Give 3-5 priority-based recommendations for implementation and positioning.",
-                "ALL fields in the PriorityScoreResult model are required."
-            ]
-        )
-    
+            self.trend_agent = analysis_agents.get("trend_analyst")
+            self.business_impact_agent = analysis_agents.get("business_impact_analyst")
+            self.competitive_agent = analysis_agents.get("competitive_analyst")
+            self.geographic_agent = analysis_agents.get("geographic_analyst")
+            self.priority_agent = analysis_agents.get("priority_calculator")
+
+            # Verify all agents were loaded
+            missing_agents = []
+            for name, agent in [
+                ("trend_analyst", self.trend_agent),
+                ("business_impact_analyst", self.business_impact_agent),
+                ("competitive_analyst", self.competitive_agent),
+                ("geographic_analyst", self.geographic_agent),
+                ("priority_calculator", self.priority_agent)
+            ]:
+                if agent is None:
+                    missing_agents.append(name)
+
+            if missing_agents:
+                logger.error(f"Failed to load agents: {missing_agents}")
+                raise ValueError(f"Failed to load agents: {missing_agents}")
+
+            logger.info("All agents successfully initialized from centralized definitions")
+
+        except Exception as e:
+            logger.error(f"Error initializing agents: {str(e)}", exc_info=True)
+            raise
+
     def _initialize_workflows(self):
         """Initialize workflow definitions"""
         
@@ -808,5 +678,12 @@ IMPORTANT: Always include feature_id="{feature_id}" in your response.
             }
 
 
-# Singleton instance
-agno_service_v2 = AgnoWorkflowServiceV2()
+# Singleton instance - lazy initialization to avoid import-time errors
+agno_service_v2 = None
+
+def get_agno_service_v2() -> AgnoWorkflowServiceV2:
+    """Get the singleton AgnoWorkflowServiceV2 instance"""
+    global agno_service_v2
+    if agno_service_v2 is None:
+        agno_service_v2 = AgnoWorkflowServiceV2()
+    return agno_service_v2

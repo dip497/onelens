@@ -15,7 +15,7 @@ from app.schemas.competitor import (
 )
 from app.services.competitor_intelligence import CompetitorIntelligenceService
 
-router = APIRouter(prefix="/competitors", tags=["competitors"])
+router = APIRouter()
 
 
 @router.get("/", response_model=List[CompetitorResponse])

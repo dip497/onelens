@@ -52,7 +52,7 @@ app.include_router(customers.router, prefix=f"{settings.API_PREFIX}/customers", 
 app.include_router(products.router, prefix=f"{settings.API_PREFIX}", tags=["products"])
 app.include_router(battle_cards.router, prefix=f"{settings.API_PREFIX}", tags=["battle-cards"])
 app.include_router(persona.router, prefix=f"{settings.API_PREFIX}", tags=["persona"])
-app.include_router(competitors.router, prefix=f"{settings.API_PREFIX}", tags=["competitors"])
+app.include_router(competitors.router, prefix=f"{settings.API_PREFIX}/competitors", tags=["competitors"])
 app.include_router(module_features.router, prefix=f"{settings.API_PREFIX}", tags=["module-features"])
 # app.include_router(auth.router, prefix=f"{settings.API_PREFIX}/auth", tags=["auth"])
 # app.include_router(analysis.router, prefix=f"{settings.API_PREFIX}/analysis", tags=["analysis"])

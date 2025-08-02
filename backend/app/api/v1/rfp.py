@@ -171,30 +171,97 @@ def extract_qa_smart_fallback(df):
 async def extract_questions_only(df):
     """
     Extract only questions from Excel file for response generation mode.
+    Uses LLM to intelligently identify the RFP column.
     """
     questions = []
 
-    # Look for the first column that seems to contain questions
-    for col in df.columns:
-        sample_values = df[col].dropna().head(5)
-        question_indicators = 0
+    # Use LLM to identify which column contains RFP questions/requirements
+    try:
+        from agno.agent import Agent
+        from agno.models.openai import OpenAIChat
 
-        for value in sample_values:
-            value_str = str(value).strip().lower()
-            if any(value_str.startswith(word) for word in ['what', 'how', 'can', 'do', 'does', 'will', 'are', 'is']):
-                question_indicators += 1
+        # Create column analysis agent
+        column_agent = Agent(
+            name="RFP Column Identifier",
+            model=OpenAIChat(id="gpt-4o-mini"),
+            description="Expert at identifying which column in Excel data contains RFP questions or requirements.",
+            instructions=[
+                "Analyze the Excel columns and their sample data.",
+                "Identify which column contains RFP questions, requirements, or specifications.",
+                "Look for columns with questions, numbered requirements, technical specifications, or vendor requirements.",
+                "Return only the column name that contains the main RFP content."
+            ]
+        )
 
-        # If more than half the samples look like questions, use this column
-        if question_indicators >= len(sample_values) * 0.5:
-            for _, row in df.iterrows():
-                if pd.notna(row[col]):
-                    question = str(row[col]).strip()
-                    if len(question) > 10:
+        # Prepare column analysis data
+        column_info = {}
+        for col in df.columns:
+            sample_data = df[col].dropna().head(5).tolist()
+            column_info[col] = [str(item)[:200] for item in sample_data]  # Limit length
+
+        prompt = f"""
+        Analyze these Excel columns and identify which one contains RFP questions or requirements:
+
+        Available columns and their sample data:
+        {column_info}
+
+        Which column contains the RFP questions/requirements? Return only the column name.
+        """
+
+        response = column_agent.run(prompt)
+        identified_column = response.content.strip().strip('"\'')
+
+        # Validate the identified column exists
+        if identified_column in df.columns:
+            best_column = identified_column
+        else:
+            # Fallback to first column if LLM response is invalid
+            best_column = df.columns[0] if len(df.columns) > 0 else None
+
+    except Exception as e:
+        print(f"LLM column identification failed: {e}")
+        # Fallback to first column
+        best_column = df.columns[0] if len(df.columns) > 0 else None
+
+    # Extract all content from the identified column
+    if best_column:
+        current_question = ""
+
+        for _, row in df.iterrows():
+            if pd.notna(row[best_column]):
+                text = str(row[best_column]).strip()
+
+                if len(text) < 5:  # Skip very short content
+                    continue
+
+                # Check if this looks like a new numbered item
+                import re
+                if re.match(r'^\d+\.?\s+', text):
+                    # Save previous question if we have one
+                    if current_question and len(current_question.strip()) > 10:
                         questions.append({
-                            'question': question,
-                            'answer': ''  # Empty answer for response mode
+                            'question': current_question.strip(),
+                            'answer': ''
                         })
-            break
+                    # Start new question
+                    current_question = text
+                elif current_question and len(text) > 5:
+                    # This might be a continuation of the previous question
+                    current_question += " " + text
+                else:
+                    # This is a standalone question/requirement
+                    if len(text) > 10:
+                        questions.append({
+                            'question': text,
+                            'answer': ''
+                        })
+
+        # Don't forget the last question
+        if current_question and len(current_question.strip()) > 10:
+            questions.append({
+                'question': current_question.strip(),
+                'answer': ''
+            })
 
     return questions
 

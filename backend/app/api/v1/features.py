@@ -291,7 +291,8 @@ async def trigger_feature_analysis(
         )
     
     # Integrate with Agno workflow
-    from app.services.agno_service import agno_service_v2 as agno_service
+    from app.services.agno_service import get_agno_service_v2
+    agno_service = get_agno_service_v2()
     
     # Prepare analysis types - if not specified, run all analysis types
     analysis_types = analysis_request.analysis_types or [

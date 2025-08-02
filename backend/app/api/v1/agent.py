@@ -1,38 +1,17 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from agno.agent.agent import Agent
-from agno.models.openai import OpenAIChat
 from ag_ui.core import RunAgentInput, EventType, RunStartedEvent, RunFinishedEvent, TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent
 from ag_ui.encoder import EventEncoder
 from dotenv import load_dotenv
-from app.tools import search_knowledge_base
+from app.agents import get_onelens_assistant
 import json
 import uuid
 
 router = APIRouter()
 
 load_dotenv()
-# Create the OneLens AI Assistant agent
-onelens_agent = Agent(
-    name="OneLens Assistant",
-    tools=[search_knowledge_base],
-    model=OpenAIChat(id="gpt-4o-mini"),
-    instructions=[
-        "You are OneLens AI Assistant, a helpful AI assistant for the OneLens platform.",
-        "OneLens is a comprehensive product management and analysis platform.",
-        "You can help users with:",
-        "- Epic and feature management",
-        "- Product analysis and insights",
-        "- Competitor analysis",
-        "- Customer insights",
-        "- General product management questions",
-        "Be friendly, helpful, and provide actionable insights.",
-        "When discussing features or epics, consider their business impact and user value.",
-        "Keep responses concise but informative.",
-    ],
-    add_datetime_to_instructions=True,
-    markdown=True,
-)
+# Get the OneLens AI Assistant agent from centralized definitions
+onelens_agent = get_onelens_assistant()
 
 @router.post("/agent")
 async def agent_endpoint(request: Request):
