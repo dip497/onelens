@@ -57,3 +57,9 @@ class FeatureRequestResponse(FeatureRequestCreate, TimestampSchema):
 
 class FeatureAnalysisRequest(BaseSchema):
     analysis_types: Optional[List[str]] = None
+
+class FeatureInitResponse(BaseSchema):
+    """Response schema for feature initialization"""
+    message: str
+    features_created: int
+    features: List[FeatureResponse]

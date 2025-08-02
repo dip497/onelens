@@ -33,5 +33,6 @@ dependencies = [
     "aiohttp>=3.12.15",
     "beautifulsoup4>=4.13.4",
     "duckduckgo-search>=5.0",
-    "tavily-python>=0.3.0"
+    "tavily-python>=0.3.0",
+    "requests>=2.31.0"
 ]

@@ -23,7 +23,8 @@ from app.schemas.feature import (
     FeatureListResponse,
     FeatureRequestCreate,
     FeatureRequestResponse,
-    FeatureAnalysisRequest
+    FeatureAnalysisRequest,
+    FeatureInitResponse
 )
 from app.schemas.base import PaginationParams
 from app.services.embedding import EmbeddingService

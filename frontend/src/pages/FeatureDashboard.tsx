@@ -26,7 +26,7 @@ export function FeatureDashboard() {
       search: search || undefined,
       page,
       size: 20,
-      has_priority_score: true
+      // has_priority_score: true  // Temporarily removed to show all features
     }),
   });
 
