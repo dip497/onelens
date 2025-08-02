@@ -26,6 +26,7 @@ export function AgentChat({
   const [isLoading, setIsLoading] = useState(false);
   const [agent, setAgent] = useState<HttpAgent | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const currentAssistantMessageRef = useRef<Message | null>(null);
 
   useEffect(() => {
     // Initialize AG-UI HttpAgent - connects to AG-UI compatible backend
@@ -56,38 +57,46 @@ export function AgentChat({
     setInput('');
     setIsLoading(true);
 
-    try {
-      let currentAssistantMessage: Message | null = null;
+    // Clear the current assistant message reference
+    currentAssistantMessageRef.current = null;
 
-      // Add user message to agent's message history
-      agent.messages = [
-        ...agent.messages,
-        {
-          id: userMessage.id,
-          role: 'user',
-          content: userMessage.content,
-        },
-      ];
+    try {
+      // Create a fresh agent instance or reset the existing one to avoid state accumulation
+      const freshAgent = new HttpAgent({
+        url: agentUrl,
+      });
+
+      // Set the complete conversation history including the new user message
+      const allMessages = [...messages, userMessage];
+      freshAgent.messages = allMessages.map(msg => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+      }));
 
       // Subscribe to agent events and run
-      agent.subscribe({
+      freshAgent.subscribe({
         onTextMessageStartEvent: ({ event }) => {
-          // Create new assistant message when text starts
-          currentAssistantMessage = {
-            id: event.messageId || Date.now().toString(),
-            role: 'assistant',
-            content: '',
-            timestamp: new Date(),
-          };
-          setMessages(prev => [...prev, currentAssistantMessage!]);
+          // Only create new assistant message if we don't have one already
+          if (!currentAssistantMessageRef.current) {
+            const newAssistantMessage: Message = {
+              id: event.messageId || `assistant-${Date.now()}`,
+              role: 'assistant',
+              content: '',
+              timestamp: new Date(),
+            };
+            currentAssistantMessageRef.current = newAssistantMessage;
+            setMessages(prev => [...prev, newAssistantMessage]);
+          }
         },
 
         onTextMessageContentEvent: ({ event }) => {
           // Stream content to the current assistant message
-          if (currentAssistantMessage) {
+          if (currentAssistantMessageRef.current) {
+            const messageId = currentAssistantMessageRef.current.id;
             setMessages(prev =>
               prev.map(msg =>
-                msg.id === currentAssistantMessage!.id
+                msg.id === messageId
                   ? { ...msg, content: msg.content + event.delta }
                   : msg
               )
@@ -97,13 +106,16 @@ export function AgentChat({
 
         onRunFinishedEvent: () => {
           setIsLoading(false);
+          currentAssistantMessageRef.current = null;
         },
 
         onRunErrorEvent: ({ event }) => {
           console.error('Agent error:', event);
           setIsLoading(false);
+          currentAssistantMessageRef.current = null;
+
           setMessages(prev => [...prev, {
-            id: Date.now().toString(),
+            id: `error-${Date.now()}`,
             role: 'assistant',
             content: 'Sorry, I encountered an error. Please try again.',
             timestamp: new Date(),
@@ -112,15 +124,17 @@ export function AgentChat({
       });
 
       // Run the agent
-      await agent.runAgent({
+      await freshAgent.runAgent({
         tools: [], // Can add tools here for enhanced functionality
       });
 
     } catch (error) {
       console.error('Error sending message:', error);
       setIsLoading(false);
+      currentAssistantMessageRef.current = null;
+
       setMessages(prev => [...prev, {
-        id: Date.now().toString(),
+        id: `error-${Date.now()}`,
         role: 'assistant',
         content: 'Sorry, I encountered an error. Please try again.',
         timestamp: new Date(),
@@ -135,12 +149,27 @@ export function AgentChat({
     }
   };
 
+  const clearConversation = () => {
+    setMessages([]);
+    currentAssistantMessageRef.current = null;
+  };
+
   return (
     <Card className="w-full max-w-5xl mx-auto h-[700px] flex flex-col">
       <CardHeader className="flex-shrink-0 border-b">
-        <CardTitle className="flex items-center gap-2">
-          <Bot className="h-5 w-5" />
-          {title}
+        <CardTitle className="flex items-center gap-2 justify-between">
+          <div className="flex items-center gap-2">
+            <Bot className="h-5 w-5" />
+            {title}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={clearConversation}
+            disabled={isLoading}
+          >
+            Clear
+          </Button>
         </CardTitle>
       </CardHeader>
       <CardContent className="flex-1 flex flex-col p-0 overflow-hidden">
@@ -154,14 +183,12 @@ export function AgentChat({
             {messages.map((message) => (
               <div
                 key={message.id}
-                className={`flex gap-3 ${
-                  message.role === 'user' ? 'justify-end' : 'justify-start'
-                }`}
+                className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
               >
                 <div
-                  className={`flex gap-3 max-w-[85%] ${
-                    message.role === 'user' ? 'flex-row-reverse' : 'flex-row'
-                  }`}
+                  className={`flex gap-3 max-w-[85%] ${message.role === 'user' ? 'flex-row-reverse' : 'flex-row'
+                    }`}
                 >
                   <div className="flex-shrink-0">
                     {message.role === 'user' ? (
@@ -175,11 +202,10 @@ export function AgentChat({
                     )}
                   </div>
                   <div
-                    className={`rounded-lg px-4 py-3 ${
-                      message.role === 'user'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted'
-                    }`}
+                    className={`rounded-lg px-4 py-3 ${message.role === 'user'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted'
+                      }`}
                   >
                     <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
                     <p className="text-xs opacity-70 mt-2">
@@ -217,8 +243,8 @@ export function AgentChat({
               disabled={isLoading}
               className="flex-1"
             />
-            <Button 
-              onClick={sendMessage} 
+            <Button
+              onClick={sendMessage}
               disabled={!input.trim() || isLoading}
               size="icon"
             >
