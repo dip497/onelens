@@ -9,6 +9,7 @@ from .agent_definitions import (
     agent_registry,
     get_agent,
     get_onelens_assistant,
+    get_serviceops_agent,
     get_analysis_agents,
     get_document_processing_agents,
     list_all_agents,
@@ -16,9 +17,10 @@ from .agent_definitions import (
 
 __all__ = [
     "AgentRegistry",
-    "agent_registry", 
+    "agent_registry",
     "get_agent",
     "get_onelens_assistant",
+    "get_serviceops_agent",
     "get_analysis_agents",
     "get_document_processing_agents",
     "list_all_agents",

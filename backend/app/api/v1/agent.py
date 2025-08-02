@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from ag_ui.core import RunAgentInput, EventType, RunStartedEvent, RunFinishedEvent, TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent
+from ag_ui.core import EventType, RunStartedEvent, RunFinishedEvent, TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent
 from ag_ui.encoder import EventEncoder
 from dotenv import load_dotenv
 from app.agents import get_onelens_assistant
@@ -10,8 +10,8 @@ import uuid
 router = APIRouter()
 
 load_dotenv()
-# Get the OneLens AI Assistant agent from centralized definitions
-onelens_agent = get_onelens_assistant()
+# Get the unified OneLens AI Assistant team from centralized definitions
+onelens_team = get_onelens_assistant()  # Unified team with all agents including ServiceOps
 
 @router.post("/agent")
 async def agent_endpoint(request: Request):
@@ -54,8 +54,20 @@ async def agent_endpoint(request: Request):
             )
             yield encoder.encode(msg_start)
 
-            # Get response from Agno agent
-            response = onelens_agent.run(user_message, stream=True)
+            # Use unified team - all routing handled internally by team instructions
+            selected_agent = onelens_team
+            agent_info = ""
+
+            # Send routing information as first chunk
+            routing_event = TextMessageContentEvent(
+                type=EventType.TEXT_MESSAGE_CONTENT,
+                message_id=message_id,
+                delta=f"{agent_info}\n\n"
+            )
+            yield encoder.encode(routing_event)
+
+            # Get response from selected agent
+            response = selected_agent.run(user_message, stream=True)
 
             # Stream the response content
             for chunk in response:
