@@ -157,7 +157,7 @@ export function MainLayout() {
               <DropdownMenuLabel>My Account</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem>Profile</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => navigate('/rfp')}>Rfp Data</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => navigate('/rfp')}>RFP Data</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem>Sign out</DropdownMenuItem>
             </DropdownMenuContent>
