@@ -4,6 +4,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Send, Bot, User } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
+import rehypeHighlight from 'rehype-highlight';
 
 interface Message {
   id: string;
@@ -162,14 +166,14 @@ export function AgentChat({
             <Bot className="h-5 w-5" />
             {title}
           </div>
-          <Button
+          {/* <Button
             variant="outline"
             size="sm"
             onClick={clearConversation}
             disabled={isLoading}
           >
             Clear
-          </Button>
+          </Button> */}
         </CardTitle>
       </CardHeader>
       <CardContent className="flex-1 flex flex-col p-0 overflow-hidden">
@@ -207,7 +211,64 @@ export function AgentChat({
                       : 'bg-muted'
                       }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                    {message.role === 'assistant' ? (
+                      <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkBreaks]}
+                          rehypePlugins={[rehypeHighlight]}
+                          components={{
+                            p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                            ul: ({ children }) => <ul className="list-disc pl-4 mb-2">{children}</ul>,
+                            ol: ({ children }) => <ol className="list-decimal pl-4 mb-2">{children}</ol>,
+                            li: ({ children }) => <li className="mb-1">{children}</li>,
+                            code: ({ node, className, children, ...props }) => {
+                              const match = /language-(\w+)/.exec(className || '');
+                              const inline = !match;
+                              return inline ? (
+                                <code className="px-1 py-0.5 rounded bg-black/10 dark:bg-white/10 text-xs" {...props}>
+                                  {children}
+                                </code>
+                              ) : (
+                                <pre className="overflow-x-auto p-3 rounded bg-black/5 dark:bg-white/5 mb-2">
+                                  <code className={className} {...props}>{children}</code>
+                                </pre>
+                              );
+                            },
+                          blockquote: ({ children }) => (
+                            <blockquote className="border-l-4 border-gray-300 pl-3 italic">
+                              {children}
+                            </blockquote>
+                          ),
+                          h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+                          h2: ({ children }) => <h2 className="text-base font-bold mb-2">{children}</h2>,
+                          h3: ({ children }) => <h3 className="text-sm font-bold mb-2">{children}</h3>,
+                          a: ({ href, children }) => (
+                            <a href={href} className="text-blue-500 hover:underline" target="_blank" rel="noopener noreferrer">
+                              {children}
+                            </a>
+                          ),
+                          table: ({ children }) => (
+                            <div className="overflow-x-auto mb-2">
+                              <table className="min-w-full divide-y divide-gray-200">{children}</table>
+                            </div>
+                          ),
+                          thead: ({ children }) => <thead className="bg-gray-50 dark:bg-gray-800">{children}</thead>,
+                          tbody: ({ children }) => <tbody className="divide-y divide-gray-200">{children}</tbody>,
+                          tr: ({ children }) => <tr>{children}</tr>,
+                          th: ({ children }) => (
+                            <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wider">
+                              {children}
+                            </th>
+                          ),
+                          td: ({ children }) => <td className="px-3 py-2 text-sm">{children}</td>,
+                        }}
+                      >
+                        {message.content}
+                      </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                    )}
                     <p className="text-xs opacity-70 mt-2">
                       {message.timestamp.toLocaleTimeString()}
                     </p>

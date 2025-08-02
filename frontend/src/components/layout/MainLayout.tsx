@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation } from 'react-router-dom';
+import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import {
   LayoutDashboard,
@@ -31,16 +31,17 @@ import { Badge } from '@/components/ui/badge';
 const navigation = [
   { name: 'Epics', href: '/epics', icon: LayoutDashboard },
   { name: 'Features', href: '/features', icon: FileText },
-  { name: 'RFP Analyzer', href: '/rfp', icon: Upload },
-  { name: 'Analysis', href: '/analysis', icon: BarChart3 },
-  { name: 'Competitors', href: '/competitors', icon: Building2 },
-  { name: 'Customers', href: '/customers', icon: Users },
-  { name: 'Product Personas', href: '/personas', icon: Package },
+  // { name: 'RFP Analyzer', href: '/rfp', icon: Upload },
+  // { name: 'Analysis', href: '/analysis', icon: BarChart3 },
+  // { name: 'Competitors', href: '/competitors', icon: Building2 },
+  // { name: 'Customers', href: '/customers', icon: Users },
+  // { name: 'Product Personas', href: '/personas', icon: Package },
   { name: 'AI Assistant', href: '/agent', icon: Bot },
 ];
 
 export function MainLayout() {
   const location = useLocation();
+  const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
@@ -49,8 +50,8 @@ export function MainLayout() {
       <div className="hidden md:flex md:w-64 md:flex-col">
         <div className="flex flex-1 flex-col border-r bg-card">
           <div className="flex h-16 items-center gap-2 px-6">
-            <BarChart3 className="h-8 w-8 text-primary" />
-            <span className="text-xl font-bold">Epic Analysis</span>
+            <Search className="h-8 w-8 text-primary" />
+            <span className="text-xl font-bold">OneLens</span>
           </div>
           <nav className="flex-1 space-y-1 px-3 py-4">
             {navigation.map((item) => {
@@ -81,8 +82,8 @@ export function MainLayout() {
         <div className="relative flex h-full w-64 flex-col border-r bg-card">
           <div className="flex h-16 items-center justify-between px-6">
             <div className="flex items-center gap-2">
-              <BarChart3 className="h-8 w-8 text-primary" />
-              <span className="text-xl font-bold">Epic Analysis</span>
+              <Search className="h-8 w-8 text-primary" />
+              <span className="text-xl font-bold">OneLens</span>
             </div>
             <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(false)}>
               <X className="h-5 w-5" />
@@ -127,23 +128,23 @@ export function MainLayout() {
 
           {/* Search */}
           <div className="flex-1">
-            <div className="relative max-w-md">
+            {/* <div className="relative max-w-md">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 type="search"
                 placeholder="Search epics, features..."
                 className="pl-9"
               />
-            </div>
+            </div> */}
           </div>
 
           {/* Notifications */}
-          <Button variant="ghost" size="icon" className="relative">
+          {/* <Button variant="ghost" size="icon" className="relative">
             <Bell className="h-5 w-5" />
             <Badge className="absolute -right-1 -top-1 h-5 w-5 rounded-full p-0 text-xs">
               3
             </Badge>
-          </Button>
+          </Button> */}
 
           {/* User menu */}
           <DropdownMenu>
@@ -156,7 +157,7 @@ export function MainLayout() {
               <DropdownMenuLabel>My Account</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem>Profile</DropdownMenuItem>
-              <DropdownMenuItem>Settings</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => navigate('/rfp')}>Rfp Data</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem>Sign out</DropdownMenuItem>
             </DropdownMenuContent>
