@@ -47,7 +47,7 @@ export function MainLayout() {
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       {/* Sidebar for desktop */}
-      <div className="hidden md:flex md:w-64 md:flex-col">
+      {/* <div className="hidden md:flex md:w-64 md:flex-col">
         <div className="flex flex-1 flex-col border-r bg-card">
           <div className="flex h-16 items-center gap-2 px-6">
             <Search className="h-8 w-8 text-primary" />
@@ -74,7 +74,7 @@ export function MainLayout() {
             })}
           </nav>
         </div>
-      </div>
+      </div> */}
 
       {/* Mobile sidebar */}
       <div className={cn('fixed inset-0 z-50 md:hidden', sidebarOpen ? 'block' : 'hidden')}>
@@ -125,6 +125,10 @@ export function MainLayout() {
           >
             <Menu className="h-5 w-5" />
           </Button>
+           <div className="flex h-16 items-center gap-2 px-6">
+            <Search className="h-8 w-8 text-primary" />
+            <span className="text-xl font-bold">OneLens</span>
+          </div>
 
           {/* Search */}
           <div className="flex-1">
@@ -138,13 +142,26 @@ export function MainLayout() {
             </div> */}
           </div>
 
-          {/* Notifications */}
-          {/* <Button variant="ghost" size="icon" className="relative">
-            <Bell className="h-5 w-5" />
-            <Badge className="absolute -right-1 -top-1 h-5 w-5 rounded-full p-0 text-xs">
-              3
-            </Badge>
-          </Button> */}
+           {navigation.map((item) => {
+              const isActive = location.pathname.startsWith(item.href);
+              return (
+                <Link
+                  key={item.name}
+                  to={item.href}
+                  className={cn(
+                    'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                    isActive
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                  )}
+                >
+                  <item.icon className="h-5 w-5" />
+                  {item.name}
+                </Link>
+              );
+            })}
+
+        
 
           {/* User menu */}
           <DropdownMenu>
