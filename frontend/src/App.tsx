@@ -14,8 +14,14 @@ import { FeatureDashboard } from '@/pages/FeatureDashboard';
 import { AnalysisReports } from '@/pages/AnalysisReports';
 import { CompetitorAnalysis } from '@/pages/CompetitorAnalysis';
 import { CustomerInsights } from '@/pages/CustomerInsights';
+import CustomersPage from '@/pages/customers';
 import { AgentPage } from '@/pages/AgentPage';
 import { NotFound } from '@/pages/NotFound';
+import RFPDashboard from '@/components/rfp/RFPDashboard';
+import { PersonaDashboard } from '@/components/personas/PersonaDashboard';
+import { ProductDetail } from '@/pages/ProductDetail';
+import { BattleCardBuilder } from '@/pages/BattleCardBuilder';
+import { BattleCardView } from '@/pages/BattleCardView';
 
 // Create a client
 const queryClient = new QueryClient({
@@ -39,10 +45,16 @@ function App() {
             <Route path="epics/:id" element={<EpicDetail />} />
             <Route path="epics/:id/edit" element={<EditEpic />} />
             <Route path="features" element={<FeatureDashboard />} />
+            <Route path="rfp" element={<RFPDashboard />} />
             <Route path="analysis" element={<AnalysisReports />} />
             <Route path="competitors" element={<CompetitorAnalysis />} />
-            <Route path="customers" element={<CustomerInsights />} />
+            <Route path="customers" element={<CustomersPage />} />
+            <Route path="customer-insights" element={<CustomerInsights />} />
             <Route path="agent" element={<AgentPage />} />
+            <Route path="personas" element={<PersonaDashboard />} />
+            <Route path="personas/:productId" element={<ProductDetail />} />
+            <Route path="personas/:productId/battle-cards/new" element={<BattleCardBuilder />} />
+            <Route path="personas/:productId/battle-cards/:battleCardId" element={<BattleCardView />} />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>

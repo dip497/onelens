@@ -4,13 +4,17 @@ from sqlalchemy.orm import relationship
 import uuid
 
 from .base import Base, TimestampMixin
-from .enums import CustomerSegment, CustomerVertical, UrgencyLevel, RequestSource, ImpactLevel
+from .enums import CustomerSegment, CustomerVertical, UrgencyLevel, RequestSource, ImpactLevel, TShirtSize
 
 class Customer(Base, TimestampMixin):
     __tablename__ = "customers"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
+    email = Column(String(255))
+    company = Column(String(255))
+    phone = Column(String(50))
+    t_shirt_size = Column(Enum(TShirtSize))
     segment = Column(Enum(CustomerSegment))
     vertical = Column(Enum(CustomerVertical))
     arr = Column(DECIMAL(12, 2))  # Annual Recurring Revenue

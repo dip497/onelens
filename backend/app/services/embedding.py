@@ -32,23 +32,13 @@ class EmbeddingService:
             text: Single text string or list of texts
 
         Returns:
-            Numpy array of embeddings (currently returns dummy data)
+            Numpy array of embeddings (using simple text-based features for now)
         """
-        # TODO: Re-enable when sentence-transformers is needed
-        # Run the embedding generation in a thread pool to avoid blocking
-        # loop = asyncio.get_event_loop()
-        # embeddings = await loop.run_in_executor(
-        #     None,
-        #     self._generate_embedding_sync,
-        #     text
-        # )
-        # return embeddings
-
-        # Return dummy embedding for now
+        # Use simple text-based features until sentence-transformers is enabled
         if isinstance(text, str):
-            return np.zeros(self.dimension, dtype=np.float32)
+            return self._generate_simple_embedding(text)
         else:
-            return [np.zeros(self.dimension, dtype=np.float32) for _ in text]
+            return [self._generate_simple_embedding(t) for t in text]
 
     def _generate_embedding_sync(self, text: Union[str, List[str]]) -> Union[np.ndarray, List[np.ndarray]]:
         """Synchronous embedding generation"""
@@ -87,6 +77,68 @@ class EmbeddingService:
             all_embeddings.extend(embeddings)
         
         return all_embeddings
+
+    def _generate_simple_embedding(self, text: str) -> np.ndarray:
+        """
+        Generate a simple embedding based on text features.
+        This is a temporary solution until sentence-transformers is enabled.
+        """
+        import re
+        from collections import Counter
+
+        # Normalize text
+        text = text.lower().strip()
+
+        # Extract features
+        words = re.findall(r'\b\w+\b', text)
+        word_count = len(words)
+        unique_words = len(set(words))
+
+        # Character-level features
+        char_count = len(text)
+        digit_count = len(re.findall(r'\d', text))
+
+        # Common tech keywords (for feature matching)
+        tech_keywords = [
+            'api', 'integration', 'security', 'performance', 'scalability',
+            'authentication', 'authorization', 'database', 'analytics',
+            'reporting', 'dashboard', 'notification', 'email', 'mobile',
+            'web', 'cloud', 'backup', 'export', 'import', 'sync',
+            'real-time', 'batch', 'automation', 'workflow', 'approval',
+            'user', 'admin', 'role', 'permission', 'audit', 'log'
+        ]
+
+        # Business keywords
+        business_keywords = [
+            'revenue', 'cost', 'profit', 'customer', 'client', 'sales',
+            'marketing', 'support', 'service', 'quality', 'compliance',
+            'regulation', 'process', 'efficiency', 'productivity', 'roi'
+        ]
+
+        # Count keyword occurrences
+        tech_score = sum(1 for keyword in tech_keywords if keyword in text)
+        business_score = sum(1 for keyword in business_keywords if keyword in text)
+
+        # Create embedding vector
+        embedding = np.array([
+            word_count / 100.0,  # Normalized word count
+            unique_words / 100.0,  # Normalized unique word count
+            char_count / 1000.0,  # Normalized character count
+            digit_count / 10.0,  # Normalized digit count
+            tech_score / 10.0,  # Tech keyword density
+            business_score / 10.0,  # Business keyword density
+            len(re.findall(r'[.!?]', text)) / 10.0,  # Sentence count
+            len(re.findall(r'[A-Z]', text)) / 10.0,  # Capital letter count
+        ], dtype=np.float32)
+
+        # Pad or truncate to match expected dimension
+        if len(embedding) < self.dimension:
+            padding = np.zeros(self.dimension - len(embedding), dtype=np.float32)
+            embedding = np.concatenate([embedding, padding])
+        else:
+            embedding = embedding[:self.dimension]
+
+        return embedding
     
     def compute_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         """

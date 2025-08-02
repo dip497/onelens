@@ -29,6 +29,9 @@ dependencies = [
     "openai>=1.88.0",
     "ag-ui-protocol>=0.1.5",
     "chromadb>=0.4.0",
+    "greenlet>=3.2.3",
+    "aiohttp>=3.12.15",
+    "beautifulsoup4>=4.13.4",
     "duckduckgo-search>=5.0"
 
 ]

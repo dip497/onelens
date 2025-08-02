@@ -12,6 +12,8 @@ import {
   Search,
   Bell,
   User,
+  Upload,
+  Package,
 } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -29,9 +31,11 @@ import { Badge } from '@/components/ui/badge';
 const navigation = [
   { name: 'Epics', href: '/epics', icon: LayoutDashboard },
   { name: 'Features', href: '/features', icon: FileText },
+  { name: 'RFP Analyzer', href: '/rfp', icon: Upload },
   { name: 'Analysis', href: '/analysis', icon: BarChart3 },
   { name: 'Competitors', href: '/competitors', icon: Building2 },
   { name: 'Customers', href: '/customers', icon: Users },
+  { name: 'Product Personas', href: '/personas', icon: Package },
   { name: 'AI Assistant', href: '/agent', icon: Bot },
 ];
 

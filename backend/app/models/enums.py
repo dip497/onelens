@@ -84,3 +84,43 @@ class ProcessedStatus(str, enum.Enum):
     PROCESSING = "Processing"
     COMPLETE = "Complete"
     FAILED = "Failed"
+
+class TShirtSize(str, enum.Enum):
+    XS = "XS"
+    S = "S"
+    M = "M"
+    L = "L"
+    XL = "XL"
+    XXL = "XXL"
+
+class CustomerSize(str, enum.Enum):
+    SMB = "SMB"
+    MID_MARKET = "Mid Market"
+    ENTERPRISE = "Enterprise"
+    ALL = "All"
+
+class BattleCardStatus(str, enum.Enum):
+    DRAFT = "Draft"
+    PUBLISHED = "Published"
+    ARCHIVED = "Archived"
+
+class BattleCardSectionType(str, enum.Enum):
+    WHY_WE_WIN = "Why We Win"
+    COMPETITOR_STRENGTHS = "Competitor Strengths"
+    OBJECTION_HANDLING = "Objection Handling"
+    FEATURE_COMPARISON = "Feature Comparison"
+    PRICING_COMPARISON = "Pricing Comparison"
+    KEY_DIFFERENTIATORS = "Key Differentiators"
+
+class ScrapingJobType(str, enum.Enum):
+    FEATURES = "Features"
+    PRICING = "Pricing"
+    NEWS = "News"
+    REVIEWS = "Reviews"
+    FULL_SCAN = "Full Scan"
+
+class ScrapingJobStatus(str, enum.Enum):
+    PENDING = "Pending"
+    RUNNING = "Running"
+    COMPLETED = "Completed"
+    FAILED = "Failed"

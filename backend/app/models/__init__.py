@@ -13,6 +13,15 @@ from .analysis import (
     FeatureAnalysisReport
 )
 from .rfp import RFPDocument, RFPQAPair
+from .product import (
+    Product,
+    ProductSegment,
+    ProductModule,
+    BattleCard,
+    BattleCardSection,
+    CompetitorScrapingJob
+)
+from .module_feature import ModuleFeature
 
 __all__ = [
     "Base",
@@ -31,5 +40,12 @@ __all__ = [
     "PriorityScore",
     "FeatureAnalysisReport",
     "RFPDocument",
-    "RFPQAPair"
+    "RFPQAPair",
+    "Product",
+    "ProductSegment",
+    "ProductModule",
+    "BattleCard",
+    "BattleCardSection",
+    "CompetitorScrapingJob",
+    "ModuleFeature"
 ]

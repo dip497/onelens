@@ -8,7 +8,7 @@ from app.core.database import engine
 from app.models import Base
 
 # Import routers
-from app.api.v1 import epics, features, agent, debug
+from app.api.v1 import epics, features, agent, rfp, customers, products, battle_cards, persona, competitors, module_features
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,10 +47,14 @@ app.add_middleware(
 app.include_router(epics.router, prefix=f"{settings.API_PREFIX}/epics", tags=["epics"])
 app.include_router(features.router, prefix=f"{settings.API_PREFIX}/features", tags=["features"])
 app.include_router(agent.router, prefix=f"{settings.API_PREFIX}", tags=["agent"])
-app.include_router(debug.router, prefix=f"{settings.API_PREFIX}/debug", tags=["debug"])
+app.include_router(rfp.router, prefix=f"{settings.API_PREFIX}/rfp", tags=["rfp"])
+app.include_router(customers.router, prefix=f"{settings.API_PREFIX}/customers", tags=["customers"])
+app.include_router(products.router, prefix=f"{settings.API_PREFIX}", tags=["products"])
+app.include_router(battle_cards.router, prefix=f"{settings.API_PREFIX}", tags=["battle-cards"])
+app.include_router(persona.router, prefix=f"{settings.API_PREFIX}", tags=["persona"])
+app.include_router(competitors.router, prefix=f"{settings.API_PREFIX}", tags=["competitors"])
+app.include_router(module_features.router, prefix=f"{settings.API_PREFIX}", tags=["module-features"])
 # app.include_router(auth.router, prefix=f"{settings.API_PREFIX}/auth", tags=["auth"])
-# app.include_router(customers.router, prefix=f"{settings.API_PREFIX}/customers", tags=["customers"])
-# app.include_router(competitors.router, prefix=f"{settings.API_PREFIX}/competitors", tags=["competitors"])
 # app.include_router(analysis.router, prefix=f"{settings.API_PREFIX}/analysis", tags=["analysis"])
 
 @app.get("/")

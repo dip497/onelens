@@ -11,10 +11,11 @@ from ..models.enums import (
     MarketPosition, CompanySize, AvailabilityStatus, 
     PricingTier, LocalPresence
 )
-from .base import BaseCreateSchema, BaseUpdateSchema, BaseResponseSchema, PaginatedResponse
+from .base import BaseSchema, TimestampSchema, PaginatedResponse
+from pydantic import BaseModel
 
 
-class CompetitorBase(BaseCreateSchema):
+class CompetitorBase(BaseSchema):
     """Base Competitor schema with common fields."""
     
     name: str = Field(..., min_length=1, max_length=255, description="Competitor name")
@@ -48,7 +49,7 @@ class CompetitorCreate(CompetitorBase):
         return v
 
 
-class CompetitorUpdate(BaseUpdateSchema):
+class CompetitorUpdate(BaseSchema):
     """Schema for updating an existing Competitor."""
     
     name: Optional[str] = Field(None, min_length=1, max_length=255, description="Competitor name")
@@ -77,7 +78,7 @@ class CompetitorUpdate(BaseUpdateSchema):
         return v
 
 
-class CompetitorResponse(BaseResponseSchema):
+class CompetitorResponse(TimestampSchema):
     """Schema for Competitor responses."""
     
     name: str
@@ -114,7 +115,7 @@ class CompetitorListResponse(PaginatedResponse):
     items: List[CompetitorResponse]
 
 
-class CompetitorSummary(BaseResponseSchema):
+class CompetitorSummary(TimestampSchema):
     """Minimal Competitor schema for summary views."""
     
     name: str
@@ -125,7 +126,7 @@ class CompetitorSummary(BaseResponseSchema):
 
 
 # Competitor Feature schemas
-class CompetitorFeatureBase(BaseCreateSchema):
+class CompetitorFeatureBase(BaseSchema):
     """Base CompetitorFeature schema with common fields."""
     
     feature_name: Optional[str] = Field(None, max_length=255, description="Feature name")
@@ -149,7 +150,7 @@ class CompetitorFeatureCreate(CompetitorFeatureBase):
         return v
 
 
-class CompetitorFeatureUpdate(BaseUpdateSchema):
+class CompetitorFeatureUpdate(BaseSchema):
     """Schema for updating an existing CompetitorFeature."""
     
     feature_name: Optional[str] = Field(None, max_length=255, description="Feature name")
@@ -167,7 +168,7 @@ class CompetitorFeatureUpdate(BaseUpdateSchema):
         return v
 
 
-class CompetitorFeatureResponse(BaseResponseSchema):
+class CompetitorFeatureResponse(TimestampSchema):
     """Schema for CompetitorFeature responses."""
     
     competitor_id: UUID
@@ -185,7 +186,7 @@ class CompetitorFeatureResponse(BaseResponseSchema):
 
 
 # Competitor Geographic Presence schemas
-class CompetitorGeographicPresenceBase(BaseCreateSchema):
+class CompetitorGeographicPresenceBase(BaseSchema):
     """Base CompetitorGeographicPresence schema with common fields."""
     
     country: Optional[str] = Field(None, max_length=100, description="Country name")
@@ -217,7 +218,7 @@ class CompetitorGeographicPresenceCreate(CompetitorGeographicPresenceBase):
         return v
 
 
-class CompetitorGeographicPresenceUpdate(BaseUpdateSchema):
+class CompetitorGeographicPresenceUpdate(BaseSchema):
     """Schema for updating an existing CompetitorGeographicPresence."""
     
     country: Optional[str] = Field(None, max_length=100, description="Country name")
@@ -243,7 +244,7 @@ class CompetitorGeographicPresenceUpdate(BaseUpdateSchema):
         return v
 
 
-class CompetitorGeographicPresenceResponse(BaseResponseSchema):
+class CompetitorGeographicPresenceResponse(TimestampSchema):
     """Schema for CompetitorGeographicPresence responses."""
     
     competitor_id: UUID
@@ -256,7 +257,7 @@ class CompetitorGeographicPresenceResponse(BaseResponseSchema):
     competitor: Optional[dict] = Field(None, description="Associated competitor information")
 
 
-class CompetitorAnalysis(BaseCreateSchema):
+class CompetitorAnalysis(BaseSchema):
     """Schema for competitor analysis results."""
     
     competitor_id: UUID
@@ -269,7 +270,7 @@ class CompetitorAnalysis(BaseCreateSchema):
     market_coverage: dict = Field(default_factory=dict, description="Geographic market coverage analysis")
 
 
-class CompetitorComparison(BaseCreateSchema):
+class CompetitorComparison(BaseSchema):
     """Schema for comparing multiple competitors."""
     
     competitor_ids: List[UUID] = Field(..., min_items=2, description="List of competitor IDs to compare")

@@ -7,10 +7,18 @@ from uuid import UUID
 from pydantic import Field, validator
 
 from ..models.enums import ProcessedStatus
-from .base import BaseCreateSchema, BaseUpdateSchema, BaseResponseSchema, PaginatedResponse
+from .base import BaseSchema, TimestampSchema, PaginatedResponse
 
 
-class RFPDocumentBase(BaseCreateSchema):
+# Simple feature schema for nested responses
+class FeatureBasic(BaseSchema):
+    """Basic feature information for nested responses."""
+    id: UUID
+    title: str
+    description: Optional[str] = None
+
+
+class RFPDocumentBase(BaseSchema):
     """Base RFPDocument schema with common fields."""
     
     filename: Optional[str] = Field(None, max_length=255, description="Original filename of the RFP document")
@@ -35,7 +43,7 @@ class RFPDocumentCreate(RFPDocumentBase):
         return v
 
 
-class RFPDocumentUpdate(BaseUpdateSchema):
+class RFPDocumentUpdate(BaseSchema):
     """Schema for updating an existing RFPDocument."""
     
     filename: Optional[str] = Field(None, max_length=255, description="Original filename of the RFP document")
@@ -59,9 +67,10 @@ class RFPDocumentUpdate(BaseUpdateSchema):
         return v
 
 
-class RFPDocumentResponse(BaseResponseSchema):
+class RFPDocumentResponse(RFPDocumentBase, TimestampSchema):
     """Schema for RFPDocument responses."""
     
+    id: UUID
     filename: Optional[str]
     customer_id: Optional[UUID]
     processed_status: ProcessedStatus
@@ -71,7 +80,7 @@ class RFPDocumentResponse(BaseResponseSchema):
     
     # Nested relationships
     customer: Optional[dict] = Field(None, description="Associated customer information")
-    qa_pairs: List[dict] = Field(default_factory=list, description="Q&A pairs from the RFP")
+    qa_pairs: List['RFPQAPairResponse'] = Field(default_factory=list, description="Q&A pairs from the RFP")
     
     # Computed fields
     processing_progress_percentage: Optional[float] = Field(None, description="Processing progress percentage")
@@ -84,15 +93,31 @@ class RFPDocumentResponse(BaseResponseSchema):
         return v
 
 
+class RFPDocumentListItem(RFPDocumentBase, TimestampSchema):
+    """Schema for RFPDocument list items (without relationships)."""
+
+    id: UUID
+    filename: Optional[str]
+    customer_id: Optional[UUID]
+    processed_status: ProcessedStatus
+    total_questions: Optional[int]
+    processed_questions: Optional[int]
+    business_context: Optional[Dict[str, Any]]
+
+    # Computed fields
+    processing_progress_percentage: Optional[float] = Field(None, description="Processing progress percentage")
+    questions_remaining: Optional[int] = Field(None, description="Number of questions remaining to process")
+
+
 class RFPDocumentListResponse(PaginatedResponse):
-    """Paginated RFPDocument list response."""
-    
-    items: List[RFPDocumentResponse]
+    """Paginated RFP Document list response."""
+
+    items: List[RFPDocumentListItem]
 
 
-class RFPDocumentSummary(BaseResponseSchema):
+class RFPDocumentSummary(BaseSchema):
     """Minimal RFPDocument schema for summary views."""
-    
+
     filename: Optional[str]
     customer_id: Optional[UUID]
     processed_status: ProcessedStatus
@@ -102,7 +127,7 @@ class RFPDocumentSummary(BaseResponseSchema):
 
 
 # RFP Q&A Pair schemas
-class RFPQAPairBase(BaseCreateSchema):
+class RFPQAPairBase(BaseSchema):
     """Base RFPQAPair schema with common fields."""
     
     question: str = Field(..., description="Question from the RFP")
@@ -130,7 +155,7 @@ class RFPQAPairCreate(RFPQAPairBase):
         return v.strip()
 
 
-class RFPQAPairUpdate(BaseUpdateSchema):
+class RFPQAPairUpdate(BaseSchema):
     """Schema for updating an existing RFPQAPair."""
     
     question: Optional[str] = Field(None, description="Question from the RFP")
@@ -152,26 +177,26 @@ class RFPQAPairUpdate(BaseUpdateSchema):
         return v.strip() if v else v
 
 
-class RFPQAPairResponse(BaseResponseSchema):
+class RFPQAPairResponse(RFPQAPairBase, TimestampSchema):
     """Schema for RFPQAPair responses."""
-    
+
+    id: UUID
     document_id: UUID
     feature_id: Optional[UUID]
     question: str
     answer: str
     customer_context: Optional[Dict[str, Any]]
     business_impact_estimate: Optional[Decimal]
-    
-    # Nested relationships
-    document: Optional[dict] = Field(None, description="Associated RFP document information")
-    feature: Optional[dict] = Field(None, description="Associated feature information")
-    
+
+    # Feature details (when available)
+    feature: Optional[FeatureBasic] = Field(None, description="Associated feature information")
+
     # Computed fields
     similarity_score: Optional[float] = Field(None, description="Similarity score to existing features")
 
 
 # RFP Processing schemas
-class RFPProcessingRequest(BaseCreateSchema):
+class RFPProcessingRequest(BaseSchema):
     """Schema for requesting RFP processing."""
     
     document_id: UUID = Field(..., description="ID of the RFP document to process")
@@ -180,7 +205,7 @@ class RFPProcessingRequest(BaseCreateSchema):
     generate_feature_suggestions: bool = Field(False, description="Generate suggestions for new features")
 
 
-class RFPProcessingResponse(BaseCreateSchema):
+class RFPProcessingResponse(BaseSchema):
     """Schema for RFP processing results."""
     
     document_id: UUID
@@ -199,7 +224,7 @@ class RFPProcessingResponse(BaseCreateSchema):
     error_messages: List[str] = Field(default_factory=list, description="Any error messages")
 
 
-class RFPAnalysisRequest(BaseCreateSchema):
+class RFPAnalysisRequest(BaseSchema):
     """Schema for requesting RFP analysis across multiple documents."""
     
     document_ids: Optional[List[UUID]] = Field(None, description="Specific document IDs to analyze")
@@ -210,7 +235,7 @@ class RFPAnalysisRequest(BaseCreateSchema):
     include_trend_analysis: bool = Field(True, description="Include trend analysis from RFPs")
 
 
-class RFPAnalysisResponse(BaseCreateSchema):
+class RFPAnalysisResponse(BaseSchema):
     """Schema for RFP analysis results."""
     
     analysis_id: UUID = Field(..., description="ID of the analysis")
@@ -235,7 +260,7 @@ class RFPAnalysisResponse(BaseCreateSchema):
     technology_keywords: List[str] = Field(default_factory=list, description="Most mentioned technology keywords")
 
 
-class RFPSearchRequest(BaseCreateSchema):
+class RFPSearchRequest(BaseSchema):
     """Schema for searching RFP content."""
     
     query: str = Field(..., min_length=1, description="Search query")
@@ -247,7 +272,7 @@ class RFPSearchRequest(BaseCreateSchema):
     max_results: int = Field(50, ge=1, le=200, description="Maximum number of results")
 
 
-class RFPSearchResponse(BaseCreateSchema):
+class RFPSearchResponse(BaseSchema):
     """Schema for RFP search results."""
     
     query: str
@@ -257,7 +282,7 @@ class RFPSearchResponse(BaseCreateSchema):
     suggested_queries: List[str] = Field(default_factory=list, description="Suggested related queries")
 
 
-class RFPMetrics(BaseCreateSchema):
+class RFPMetrics(BaseSchema):
     """Schema for RFP metrics and statistics."""
     
     total_documents: int = Field(0, description="Total RFP documents")
@@ -277,7 +302,7 @@ class RFPMetrics(BaseCreateSchema):
     documents_with_impact_estimates: int = Field(0, description="Documents with business impact estimates")
 
 
-class RFPBulkOperation(BaseCreateSchema):
+class RFPBulkOperation(BaseSchema):
     """Schema for bulk operations on RFP documents."""
     
     document_ids: List[UUID] = Field(..., min_items=1, description="List of document IDs")
@@ -289,3 +314,6 @@ class RFPBulkOperation(BaseCreateSchema):
         if not v:
             raise ValueError('At least one document ID is required')
         return list(set(v))  # Remove duplicates
+
+# Update forward references
+RFPDocumentResponse.model_rebuild()

@@ -420,6 +420,36 @@ async def get_feature_analysis_results(
         "has_results": len(results) > 0
     }
 
+@router.post("/batch-update", response_model=dict)
+async def batch_update_features(
+    updates: List[dict],
+    db: AsyncSession = Depends(get_db)
+):
+    """Batch update multiple features at once"""
+    updated_count = 0
+    
+    for update in updates:
+        feature_id = update.get("feature_id")
+        module_id = update.get("module_id")
+        is_key_differentiator = update.get("is_key_differentiator", False)
+        
+        if feature_id:
+            result = await db.execute(
+                select(Feature).where(Feature.id == feature_id)
+            )
+            feature = result.scalar_one_or_none()
+            
+            if feature:
+                if module_id is not None:
+                    feature.module_id = module_id if module_id else None
+                feature.is_key_differentiator = is_key_differentiator
+                updated_count += 1
+    
+    await db.commit()
+    
+    return {"updated": updated_count, "total": len(updates)}
+
+
 @router.post("/search/similar", response_model=List[FeatureResponse])
 async def search_similar_features(
     text: str = Query(..., description="Text to search for similar features"),

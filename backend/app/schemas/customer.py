@@ -7,14 +7,18 @@ from uuid import UUID
 
 from pydantic import Field, validator
 
-from ..models.enums import CustomerSegment, CustomerVertical, ImpactLevel
-from .base import BaseCreateSchema, BaseUpdateSchema, BaseResponseSchema, PaginatedResponse
+from ..models.enums import CustomerSegment, CustomerVertical, ImpactLevel, TShirtSize
+from .base import BaseSchema, TimestampSchema, PaginatedResponse
 
 
-class CustomerBase(BaseCreateSchema):
+class CustomerBase(BaseSchema):
     """Base Customer schema with common fields."""
-    
+
     name: str = Field(..., min_length=1, max_length=255, description="Customer name")
+    email: Optional[str] = Field(None, max_length=255, description="Customer email")
+    company: Optional[str] = Field(None, max_length=255, description="Company name")
+    phone: Optional[str] = Field(None, max_length=50, description="Phone number")
+    t_shirt_size: Optional[TShirtSize] = Field(None, description="T-shirt size preference")
     segment: Optional[CustomerSegment] = Field(None, description="Customer segment")
     vertical: Optional[CustomerVertical] = Field(None, description="Customer vertical/industry")
     arr: Optional[Decimal] = Field(None, ge=0, description="Annual Recurring Revenue")
@@ -46,10 +50,14 @@ class CustomerCreate(CustomerBase):
         return v
 
 
-class CustomerUpdate(BaseUpdateSchema):
+class CustomerUpdate(BaseSchema):
     """Schema for updating an existing Customer."""
-    
+
     name: Optional[str] = Field(None, min_length=1, max_length=255, description="Customer name")
+    email: Optional[str] = Field(None, max_length=255, description="Customer email")
+    company: Optional[str] = Field(None, max_length=255, description="Company name")
+    phone: Optional[str] = Field(None, max_length=50, description="Phone number")
+    t_shirt_size: Optional[TShirtSize] = Field(None, description="T-shirt size preference")
     segment: Optional[CustomerSegment] = Field(None, description="Customer segment")
     vertical: Optional[CustomerVertical] = Field(None, description="Customer vertical/industry")
     arr: Optional[Decimal] = Field(None, ge=0, description="Annual Recurring Revenue")
@@ -77,10 +85,15 @@ class CustomerUpdate(BaseUpdateSchema):
         return v
 
 
-class CustomerResponse(BaseResponseSchema):
+class CustomerResponse(TimestampSchema):
     """Schema for Customer responses."""
-    
+
+    id: UUID
     name: str
+    email: Optional[str]
+    company: Optional[str]
+    phone: Optional[str]
+    t_shirt_size: Optional[TShirtSize]
     segment: Optional[CustomerSegment]
     vertical: Optional[CustomerVertical]
     arr: Optional[Decimal]
@@ -88,36 +101,28 @@ class CustomerResponse(BaseResponseSchema):
     geographic_region: Optional[str]
     contract_end_date: Optional[date]
     strategic_importance: Optional[ImpactLevel]
-    
-    # Nested relationships
-    feature_requests: List[dict] = Field(default_factory=list, description="Customer's feature requests")
-    rfp_documents: List[dict] = Field(default_factory=list, description="Customer's RFP documents")
-    
-    # Computed fields
-    total_feature_requests: int = Field(0, description="Total number of feature requests")
-    total_estimated_deal_impact: Optional[Decimal] = Field(None, description="Total estimated deal impact")
-    days_to_contract_end: Optional[int] = Field(None, description="Days until contract ends")
-    
-    @validator('feature_requests', pre=True, always=True)
-    def validate_feature_requests(cls, v):
-        if v is None:
-            return []
-        return v
-    
-    @validator('rfp_documents', pre=True, always=True)
-    def validate_rfp_documents(cls, v):
-        if v is None:
-            return []
-        return v
+
+
+class CustomerListItem(TimestampSchema):
+    """Schema for customer list items."""
+    id: UUID
+    name: str
+    email: Optional[str]
+    company: Optional[str]
+    t_shirt_size: Optional[TShirtSize]
+    segment: Optional[CustomerSegment]
+    vertical: Optional[CustomerVertical]
+    arr: Optional[Decimal]
+    employee_count: Optional[int]
 
 
 class CustomerListResponse(PaginatedResponse):
     """Paginated Customer list response."""
-    
-    items: List[CustomerResponse]
+
+    items: List[CustomerListItem]
 
 
-class CustomerSummary(BaseResponseSchema):
+class CustomerSummary(TimestampSchema):
     """Minimal Customer schema for summary views."""
     
     name: str
@@ -128,7 +133,7 @@ class CustomerSummary(BaseResponseSchema):
     total_feature_requests: int = 0
 
 
-class CustomerSearch(BaseCreateSchema):
+class CustomerSearch(BaseSchema):
     """Schema for customer search parameters."""
     
     name: Optional[str] = Field(None, description="Search by customer name")
@@ -148,7 +153,7 @@ class CustomerSearch(BaseCreateSchema):
         return v
 
 
-class CustomerMetrics(BaseCreateSchema):
+class CustomerMetrics(BaseSchema):
     """Schema for customer metrics and analytics."""
     
     total_customers: int = Field(0, description="Total number of customers")
