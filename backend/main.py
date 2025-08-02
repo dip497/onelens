@@ -8,7 +8,7 @@ from app.core.database import engine
 from app.models import Base
 
 # Import routers
-from app.api.v1 import epics, features, agent
+from app.api.v1 import epics, features, agent, debug
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(epics.router, prefix=f"{settings.API_PREFIX}/epics", tags=["epics"])
 app.include_router(features.router, prefix=f"{settings.API_PREFIX}/features", tags=["features"])
 app.include_router(agent.router, prefix=f"{settings.API_PREFIX}", tags=["agent"])
+app.include_router(debug.router, prefix=f"{settings.API_PREFIX}/debug", tags=["debug"])
 # app.include_router(auth.router, prefix=f"{settings.API_PREFIX}/auth", tags=["auth"])
 # app.include_router(customers.router, prefix=f"{settings.API_PREFIX}/customers", tags=["customers"])
 # app.include_router(competitors.router, prefix=f"{settings.API_PREFIX}/competitors", tags=["competitors"])

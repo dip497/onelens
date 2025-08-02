@@ -93,14 +93,53 @@ export interface TrendAnalysis {
 export interface FeatureAnalysisReport {
   id: string;
   feature_id: string;
+  
+  // Trend Analysis
   trend_alignment_status: boolean;
-  business_impact_score: number;
-  total_competitors_analyzed: number;
-  competitors_providing_count: number;
-  market_opportunity_score: number;
-  priority_score: number;
-  priority_ranking: number;
-  generated_at: string;
+  trend_keywords?: string[];
+  trend_justification?: string;
+  
+  // Business Impact
+  business_impact_score?: number;
+  revenue_potential?: 'HIGH' | 'MEDIUM' | 'LOW';
+  user_adoption_forecast?: 'HIGH' | 'MEDIUM' | 'LOW';
+  
+  // Market Opportunity
+  total_competitors_analyzed?: number;
+  competitors_providing_count?: number;
+  market_opportunity_score?: number;
+  
+  // Geographic Insights
+  geographic_insights?: {
+    top_markets: Array<{
+      country: string;
+      market_size: number;
+      opportunity_rating: string;
+      regulatory_factors: string[];
+    }>;
+    total_market_size: number;
+    regulatory_considerations: string[];
+  };
+  
+  // Competitive Analysis
+  competitor_pros_cons?: {
+    main_competitors: Array<{
+      name: string;
+      strengths: string[];
+      weaknesses: string[];
+    }>;
+    market_gaps: string[];
+    competitive_advantages: string[];
+  };
+  competitive_positioning?: string;
+  
+  // Priority Score
+  priority_score?: number;
+  priority_ranking?: number;
+  
+  generated_by_workflow: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // Pagination

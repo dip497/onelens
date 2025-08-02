@@ -4,9 +4,10 @@ from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from uuid import UUID
+import logging
 
 from app.core.database import get_db
-from app.models import Epic, Feature, User
+from app.models import Epic, Feature, User, FeatureRequest
 from app.schemas.epic import (
     EpicCreate,
     EpicUpdate,
@@ -19,6 +20,7 @@ from app.schemas.base import PaginationParams
 from app.models.enums import EpicStatus
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/", response_model=EpicResponse, status_code=status.HTTP_201_CREATED)
 async def create_epic(
@@ -252,17 +254,190 @@ async def trigger_epic_analysis(
             detail="Epic not found"
         )
     
-    # TODO: Integrate with Agno workflow
-    # await agno_service.trigger_workflow("epic_complete_analysis", {"epic_id": epic_id})
+    # Integrate with Agno workflow
+    from app.services.agno_service import agno_service_v2 as agno_service
     
-    # Update epic status
-    epic.status = EpicStatus.ANALYSIS_PENDING
-    await db.commit()
+    # Get all features for this epic
+    features_query = select(Feature).where(Feature.epic_id == epic_id)
+    features_result = await db.execute(features_query)
+    features = features_result.scalars().all()
+    
+    if not features:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Epic has no features to analyze"
+        )
+    
+    # Prepare epic and features data
+    epic_data = {
+        "id": str(epic_id),
+        "title": epic.title,
+        "description": epic.description or ""
+    }
+
+    features_data = []
+    for feature in features:
+        feature_dict = {
+            "id": str(feature.id),
+            "title": feature.title,
+            "description": feature.description or ""
+        }
+        
+        # Get customer requests for business impact
+        requests_query = select(FeatureRequest).where(FeatureRequest.feature_id == feature.id)
+        requests_result = await db.execute(requests_query)
+        feature_requests = requests_result.scalars().all()
+        
+        feature_dict["customer_requests"] = [
+            {
+                "customer_id": str(req.customer_id),
+                "urgency": req.urgency.value,
+                "estimated_deal_impact": req.estimated_deal_impact
+            }
+            for req in feature_requests
+        ]
+        
+        features_data.append(feature_dict)
+    
+    try:
+        # Update epic status
+        epic.status = EpicStatus.ANALYSIS_PENDING
+        await db.commit()
+        
+        # Run the analysis workflow
+        result = await agno_service.analyze_epic(
+            epic_id=epic_data["id"],
+            epic_data=epic_data,
+            features_data=features_data,
+            db_session=db
+        )
+        
+        if result["status"] == "completed":
+            # Update epic status to analyzed
+            epic.status = EpicStatus.ANALYZED
+            await db.commit()
+            
+            return {
+                "message": "Analysis completed successfully",
+                "epic_id": epic_id,
+                "status": "completed",
+                "features_analyzed": result["features_analyzed"],
+                "results": result.get("results", [])
+            }
+        else:
+            # Update epic status back to draft on failure
+            epic.status = EpicStatus.DRAFT
+            await db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Analysis failed: {result.get('error', 'Unknown error')}"
+            )
+            
+    except Exception as e:
+        # Log the error but don't expose internal details
+        logger.error(f"Failed to run epic analysis workflow: {str(e)}")
+        
+        # Update epic status back to draft on error
+        epic.status = EpicStatus.DRAFT
+        await db.commit()
+        
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analysis service temporarily unavailable"
+        )
+
+@router.get("/{epic_id}/analysis/results")
+async def get_epic_analysis_results(
+    epic_id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the analysis results for all features in an epic"""
+    # Verify epic exists
+    query = select(Epic).where(Epic.id == epic_id)
+    result = await db.execute(query)
+    epic = result.scalar_one_or_none()
+    
+    if not epic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Epic not found"
+        )
+    
+    # Get all features for this epic
+    features_query = select(Feature).where(Feature.epic_id == epic_id)
+    features_result = await db.execute(features_query)
+    features = features_result.scalars().all()
+    
+    # Collect analysis results for each feature
+    features_with_analysis = []
+
+    for feature in features:
+        feature_results = {
+            "feature_id": str(feature.id),
+            "title": feature.title,
+            "description": feature.description,
+            "analyses": {}
+        }
+
+        # Get analysis report from FeatureAnalysisReport table
+        from app.models import FeatureAnalysisReport
+        report_query = select(FeatureAnalysisReport).where(
+            FeatureAnalysisReport.feature_id == feature.id
+        ).order_by(FeatureAnalysisReport.created_at.desc()).limit(1)
+        report_result = await db.execute(report_query)
+        analysis_report = report_result.scalar_one_or_none()
+
+        if analysis_report:
+            feature_results["priority_score"] = float(analysis_report.priority_score) if analysis_report.priority_score else 0
+            feature_results["analyses"]["report"] = {
+                # Core scores
+                "priority_score": float(analysis_report.priority_score) if analysis_report.priority_score else None,
+                "business_impact_score": analysis_report.business_impact_score,
+                
+                # Trend Analysis
+                "trend_alignment_status": analysis_report.trend_alignment_status,
+                "trend_keywords": analysis_report.trend_keywords or [],
+                "trend_justification": analysis_report.trend_justification,
+                
+                # Business Impact
+                "revenue_potential": analysis_report.revenue_potential.value if analysis_report.revenue_potential else None,
+                "user_adoption_forecast": analysis_report.user_adoption_forecast.value if analysis_report.user_adoption_forecast else None,
+                
+                # Market Opportunity
+                "market_opportunity_score": float(analysis_report.market_opportunity_score) if analysis_report.market_opportunity_score else None,
+                "total_competitors_analyzed": analysis_report.total_competitors_analyzed,
+                "competitors_providing_count": analysis_report.competitors_providing_count,
+                
+                # Geographic Insights
+                "geographic_insights": analysis_report.geographic_insights,
+                
+                # Competitive Analysis
+                "competitor_pros_cons": analysis_report.competitor_pros_cons,
+                "competitive_positioning": analysis_report.competitive_positioning,
+                
+                # Metadata
+                "generated_by_workflow": analysis_report.generated_by_workflow,
+                "created_at": analysis_report.created_at.isoformat() if analysis_report.created_at else None,
+                "updated_at": analysis_report.updated_at.isoformat() if analysis_report.updated_at else None
+            }
+        else:
+            feature_results["priority_score"] = 0
+
+        features_with_analysis.append(feature_results)
+    
+    # Sort features by priority score (highest first)
+    features_with_analysis.sort(
+        key=lambda x: x.get("priority_score", 0),
+        reverse=True
+    )
     
     return {
-        "message": "Analysis triggered successfully",
         "epic_id": epic_id,
-        "status": "pending"
+        "epic_title": epic.title,
+        "epic_status": epic.status.value,
+        "features_count": len(features),
+        "features": features_with_analysis
     }
 
 @router.get("/summary/by-status", response_model=List[EpicSummary])

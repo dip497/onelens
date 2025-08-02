@@ -1,0 +1,994 @@
+Index: agno-config/workflows.yaml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>workflows:\n  epic_complete_analysis:\n    name: \"Epic Complete Analysis\"\n    description: \"End-to-end analysis triggered by epic creation\"\n    trigger_events: [\"epic_created\", \"manual_trigger\"]\n    \n    data_requirements:\n      - table: \"epics\"\n        fields: [\"id\", \"title\", \"description\"]\n      - table: \"features\" \n        fields: [\"id\", \"epic_id\", \"title\", \"description\", \"embedding\"]\n      - table: \"customers\"\n        fields: [\"segment\", \"arr\", \"geographic_region\"]\n      - table: \"feature_requests\"\n        fields: [\"feature_id\", \"customer_id\", \"urgency\", \"estimated_deal_impact\"]\n      - table: \"competitors\"\n        fields: [\"name\", \"market_position\", \"primary_markets\"]\n      - table: \"competitor_features\"\n        fields: [\"competitor_id\", \"feature_name\", \"availability\", \"strengths\", \"weaknesses\"]\n    \n    steps:\n      - step: \"validate_data_completeness\"\n        agent: \"data_validation_agent\"\n        description: \"Ensure all required data exists before analysis\"\n        input_validation:\n          - epic_exists: true\n          - features_exist: true\n        timeout: 60\n        \n      - step: \"trend_alignment_analysis\"\n        agent: \"trend_analysis_agent\"\n        depends_on: [\"validate_data_completeness\"]\n        parallel_execution: true\n        data_sources:\n          - database: \"features table\"\n          - external: \"trend research APIs\"\n        output_target: \"trend_analysis table\"\n        timeout: 300\n        \n      - step: \"business_impact_calculation\"\n        agent: \"business_impact_agent\"\n        depends_on: [\"validate_data_completeness\"]\n        parallel_execution: true\n        data_sources:\n          - database: \"feature_requests + customers tables\"\n          - calculated: \"customer_request_count, arr_weighted_score\"\n        output_target: \"business_impact_analysis table\"\n        timeout: 240\n        \n      - step: \"competitive_gap_analysis\"\n        agent: \"competitive_analysis_agent\"\n        depends_on: [\"validate_data_completeness\"]\n        parallel_execution: true\n        data_sources:\n          - database: \"competitors + competitor_features tables\"\n          - external: \"competitor research APIs\"\n        output_target: \"market_opportunity_analysis table\"\n        timeout: 600\n        \n      - step: \"geographic_market_assessment\"\n        agent: \"market_opportunity_agent\"\n        depends_on: [\"competitive_gap_analysis\"]\n        data_sources:\n          - database: \"competitive analysis results\"\n          - external: \"geographic market data APIs\"\n          - static: \"top_5_countries configuration\"\n        output_target: \"geographic_analysis table\"\n        timeout: 480\n        \n      - step: \"priority_score_calculation\"\n        agent: \"priority_scoring_agent\"\n        depends_on: [\n          \"trend_alignment_analysis\",\n          \"business_impact_calculation\",\n          \"competitive_gap_analysis\",\n          \"geographic_market_assessment\"\n        ]\n        data_sources:\n          - database: \"all previous analysis results\"\n          - algorithm: \"priority_scoring_algorithm\"\n        output_target: \"priority_scores table\"\n        timeout: 120\n        \n      - step: \"generate_analysis_report\"\n        agent: \"report_generation_agent\"\n        depends_on: [\"priority_score_calculation\"]\n        data_sources:\n          - database: \"all analysis tables\"\n        output_target: \"feature_analysis_reports table\"\n        human_review: true\n        timeout: 180\n\n  rfp_processing:\n    name: \"RFP Processing Pipeline\"\n    description: \"Process RFP documents and match to features\"\n    trigger_events: [\"rfp_uploaded\"]\n    \n    steps:\n      - step: \"parse_document\"\n        agent: \"document_parser_agent\"\n        description: \"Extract Q&A pairs from RFP document\"\n        output: \"qa_pairs\"\n        timeout: 300\n        \n      - step: \"generate_embeddings\"\n        agent: \"embedding_agent\"\n        depends_on: [\"parse_document\"]\n        description: \"Generate embeddings for Q&A pairs\"\n        output: \"qa_embeddings\"\n        timeout: 180\n        \n      - step: \"similarity_matching\"\n        agent: \"similarity_agent\"\n        depends_on: [\"generate_embeddings\"]\n        description: \"Match Q&A to existing features\"\n        similarity_threshold: 0.85\n        output: \"matched_features\"\n        timeout: 120\n        \n      - step: \"update_feature_requests\"\n        agent: \"database_agent\"\n        depends_on: [\"similarity_matching\"]\n        description: \"Update feature request counts\"\n        timeout: 60\n        \n      - step: \"trigger_reanalysis\"\n        agent: \"workflow_trigger_agent\"\n        depends_on: [\"update_feature_requests\"]\n        description: \"Trigger priority recalculation\"\n        target_workflow: \"priority_recalculation\"\n        timeout: 30\n\n  priority_recalculation:\n    name: \"Priority Recalculation\"\n    description: \"Recalculate priority scores when data changes\"\n    trigger_events: [\"feature_request_added\", \"competitor_data_updated\", \"manual_trigger\"]\n    \n    steps:\n      - step: \"aggregate_latest_data\"\n        agent: \"data_aggregation_agent\"\n        description: \"Collect all relevant data for recalculation\"\n        timeout: 120\n        \n      - step: \"recalculate_scores\"\n        agent: \"priority_scoring_agent\"\n        depends_on: [\"aggregate_latest_data\"]\n        description: \"Recalculate priority scores\"\n        timeout: 180\n        \n      - step: \"update_rankings\"\n        agent: \"ranking_agent\"\n        depends_on: [\"recalculate_scores\"]\n        description: \"Update feature rankings\"\n        timeout: 60
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/agno-config/workflows.yaml b/agno-config/workflows.yaml
+--- a/agno-config/workflows.yaml	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/agno-config/workflows.yaml	(date 1754076196119)
+@@ -151,4 +151,100 @@
+         agent: "ranking_agent"
+         depends_on: ["recalculate_scores"]
+         description: "Update feature rankings"
+-        timeout: 60
+\ No newline at end of file
++        timeout: 60
++
++  feature_analysis:
++    name: "Feature Analysis"
++    description: "Individual feature analysis with selective analysis types"
++    trigger_events: ["feature_created", "manual_trigger"]
++    
++    data_requirements:
++      - table: "features"
++        fields: ["id", "title", "description", "epic_id"]
++      - table: "customers"
++        fields: ["segment", "arr", "geographic_region"]
++      - table: "feature_requests"
++        fields: ["feature_id", "customer_id", "urgency", "estimated_deal_impact"]
++      - table: "competitors"
++        fields: ["name", "market_position", "primary_markets"]
++      - table: "competitor_features"
++        fields: ["competitor_id", "feature_name", "availability", "strengths", "weaknesses"]
++    
++    configuration:
++      analysis_types:
++        required: true
++        type: "array"
++        allowed_values: ["trend_analysis", "business_impact", "competitive_analysis", "geographic_analysis", "priority_scoring"]
++    
++    steps:
++      - step: "validate_feature_data"
++        agent: "data_validation_agent"
++        description: "Ensure feature exists and has required data"
++        input_validation:
++          - feature_exists: true
++        timeout: 60
++        
++      - step: "trend_alignment_analysis"
++        agent: "trend_analysis_agent"
++        depends_on: ["validate_feature_data"]
++        condition: "trend_analysis in analysis_types"
++        data_sources:
++          - database: "features table"
++          - external: "trend research APIs"
++        output_target: "trend_analysis table"
++        timeout: 300
++        
++      - step: "business_impact_calculation"
++        agent: "business_impact_agent"
++        depends_on: ["validate_feature_data"]
++        condition: "business_impact in analysis_types"
++        data_sources:
++          - database: "feature_requests + customers tables"
++          - calculated: "customer_request_count, arr_weighted_score"
++        output_target: "business_impact_analysis table"
++        timeout: 240
++        
++      - step: "competitive_gap_analysis"
++        agent: "competitive_analysis_agent"
++        depends_on: ["validate_feature_data"]
++        condition: "competitive_analysis in analysis_types"
++        data_sources:
++          - database: "competitors + competitor_features tables"
++          - external: "competitor research APIs"
++        output_target: "market_opportunity_analysis table"
++        timeout: 600
++        
++      - step: "geographic_market_assessment"
++        agent: "market_opportunity_agent"
++        depends_on: ["validate_feature_data"]
++        condition: "geographic_analysis in analysis_types"
++        data_sources:
++          - database: "customer geographic data"
++          - external: "geographic market data APIs"
++          - static: "top_5_countries configuration"
++        output_target: "geographic_analysis table"
++        timeout: 480
++        
++      - step: "priority_score_calculation"
++        agent: "priority_scoring_agent"
++        depends_on: [
++          "trend_alignment_analysis",
++          "business_impact_calculation",
++          "competitive_gap_analysis",
++          "geographic_market_assessment"
++        ]
++        condition: "priority_scoring in analysis_types"
++        data_sources:
++          - database: "all available analysis results"
++          - algorithm: "priority_scoring_algorithm"
++        output_target: "priority_scores table"
++        timeout: 120
++        
++      - step: "generate_analysis_report"
++        agent: "report_generation_agent"
++        depends_on: ["priority_score_calculation"]
++        condition: "any analysis completed"
++        data_sources:
++          - database: "all analysis tables for this feature"
++        output_target: "feature_analysis_reports table"
++        timeout: 180
+\ No newline at end of file
+Index: backend/app/api/v1/epics.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Depends, HTTPException, Query, status\nfrom sqlalchemy.ext.asyncio import AsyncSession\nfrom sqlalchemy import select, func, or_\nfrom typing import List, Optional\nfrom uuid import UUID\n\nfrom app.core.database import get_db\nfrom app.models import Epic, Feature, User\nfrom app.schemas.epic import (\n    EpicCreate,\n    EpicUpdate,\n    EpicResponse,\n    EpicWithFeatures,\n    EpicListResponse,\n    EpicSummary\n)\nfrom app.schemas.base import PaginationParams\nfrom app.models.enums import EpicStatus\n\nrouter = APIRouter()\n\n@router.post(\"/\", response_model=EpicResponse, status_code=status.HTTP_201_CREATED)\nasync def create_epic(\n    epic_data: EpicCreate,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Create a new epic\"\"\"\n    # TODO: Get current user from auth\n    # For now, set created_by to None until user authentication is implemented\n\n    epic = Epic(\n        **epic_data.model_dump(),\n        created_by=None  # Set to None instead of placeholder UUID\n    )\n\n    db.add(epic)\n    await db.commit()\n    await db.refresh(epic)\n\n    return epic\n\n@router.get(\"/\", response_model=EpicListResponse)\nasync def list_epics(\n    pagination: PaginationParams = Depends(),\n    status: Optional[EpicStatus] = None,\n    search: Optional[str] = None,\n    created_by: Optional[UUID] = None,\n    assigned_to: Optional[UUID] = None,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"List epics with filtering and pagination\"\"\"\n    query = select(Epic)\n    \n    # Apply filters\n    if status:\n        query = query.where(Epic.status == status)\n    if created_by:\n        query = query.where(Epic.created_by == created_by)\n    if assigned_to:\n        query = query.where(Epic.assigned_to == assigned_to)\n    if search:\n        search_term = f\"%{search}%\"\n        query = query.where(\n            or_(\n                Epic.title.ilike(search_term),\n                Epic.description.ilike(search_term),\n                Epic.business_justification.ilike(search_term)\n            )\n        )\n    \n    # Get total count\n    count_query = select(func.count()).select_from(query.subquery())\n    total = await db.scalar(count_query)\n    \n    # Apply pagination\n    query = query.offset(pagination.skip).limit(pagination.limit)\n    query = query.order_by(Epic.created_at.desc())\n    \n    # Execute query\n    result = await db.execute(query)\n    epics = result.scalars().all()\n    \n    return EpicListResponse(\n        items=epics,\n        total=total,\n        page=pagination.page,\n        size=pagination.limit,\n        pages=(total + pagination.limit - 1) // pagination.limit\n    )\n\n@router.get(\"/{epic_id}\", response_model=EpicWithFeatures)\nasync def get_epic(\n    epic_id: UUID,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Get an epic by ID with its features\"\"\"\n    query = select(Epic).where(Epic.id == epic_id)\n    result = await db.execute(query)\n    epic = result.scalar_one_or_none()\n    \n    if not epic:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Epic not found\"\n        )\n    \n    # Get features count\n    features_query = select(func.count()).select_from(Feature).where(Feature.epic_id == epic_id)\n    features_count = await db.scalar(features_query)\n    \n    # Convert to response model\n    epic_dict = {\n        \"id\": epic.id,\n        \"title\": epic.title,\n        \"description\": epic.description,\n        \"business_justification\": epic.business_justification,\n        \"status\": epic.status,\n        \"created_at\": epic.created_at,\n        \"updated_at\": epic.updated_at,\n        \"created_by\": epic.created_by,\n        \"assigned_to\": epic.assigned_to,\n        \"features\": [],  # Will be populated separately if needed\n        \"features_count\": features_count\n    }\n    \n    return EpicWithFeatures(**epic_dict)\n\n@router.put(\"/{epic_id}\", response_model=EpicResponse)\nasync def update_epic(\n    epic_id: UUID,\n    epic_update: EpicUpdate,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Update an epic\"\"\"\n    query = select(Epic).where(Epic.id == epic_id)\n    result = await db.execute(query)\n    epic = result.scalar_one_or_none()\n    \n    if not epic:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Epic not found\"\n        )\n    \n    # Update fields\n    update_data = epic_update.model_dump(exclude_unset=True)\n    for field, value in update_data.items():\n        setattr(epic, field, value)\n    \n    await db.commit()\n    await db.refresh(epic)\n    \n    return epic\n\n@router.delete(\"/{epic_id}\", status_code=status.HTTP_204_NO_CONTENT)\nasync def delete_epic(\n    epic_id: UUID,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Delete an epic and all its features\"\"\"\n    query = select(Epic).where(Epic.id == epic_id)\n    result = await db.execute(query)\n    epic = result.scalar_one_or_none()\n    \n    if not epic:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Epic not found\"\n        )\n    \n    await db.delete(epic)\n    await db.commit()\n\n@router.post(\"/{epic_id}/analyze\", status_code=status.HTTP_202_ACCEPTED)\nasync def trigger_epic_analysis(\n    epic_id: UUID,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Trigger analysis for all features in an epic\"\"\"\n    query = select(Epic).where(Epic.id == epic_id)\n    result = await db.execute(query)\n    epic = result.scalar_one_or_none()\n    \n    if not epic:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Epic not found\"\n        )\n    \n    # TODO: Integrate with Agno workflow\n    # await agno_service.trigger_workflow(\"epic_complete_analysis\", {\"epic_id\": epic_id})\n    \n    # Update epic status\n    epic.status = EpicStatus.ANALYSIS_PENDING\n    await db.commit()\n    \n    return {\n        \"message\": \"Analysis triggered successfully\",\n        \"epic_id\": epic_id,\n        \"status\": \"pending\"\n    }\n\n@router.get(\"/summary/by-status\", response_model=List[EpicSummary])\nasync def get_epics_summary_by_status(\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Get summary of epics grouped by status\"\"\"\n    query = select(\n        Epic.status,\n        func.count(Epic.id).label(\"count\")\n    ).group_by(Epic.status)\n    \n    result = await db.execute(query)\n    summaries = []\n    \n    for row in result:\n        summaries.append(EpicSummary(\n            status=row.status,\n            count=row.count\n        ))\n    \n    return summaries
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/backend/app/api/v1/epics.py b/backend/app/api/v1/epics.py
+--- a/backend/app/api/v1/epics.py	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/backend/app/api/v1/epics.py	(date 1754086129578)
+@@ -3,9 +3,10 @@
+ from sqlalchemy import select, func, or_
+ from typing import List, Optional
+ from uuid import UUID
++import logging
+ 
+ from app.core.database import get_db
+-from app.models import Epic, Feature, User
++from app.models import Epic, Feature, User, FeatureRequest
+ from app.schemas.epic import (
+     EpicCreate,
+     EpicUpdate,
+@@ -18,6 +19,7 @@
+ from app.models.enums import EpicStatus
+ 
+ router = APIRouter()
++logger = logging.getLogger(__name__)
+ 
+ @router.post("/", response_model=EpicResponse, status_code=status.HTTP_201_CREATED)
+ async def create_epic(
+@@ -187,17 +189,171 @@
+             detail="Epic not found"
+         )
+     
+-    # TODO: Integrate with Agno workflow
+-    # await agno_service.trigger_workflow("epic_complete_analysis", {"epic_id": epic_id})
++    # Integrate with Agno workflow
++    from app.services.agno_service import agno_service
+     
+-    # Update epic status
+-    epic.status = EpicStatus.ANALYSIS_PENDING
+-    await db.commit()
++    # Get all features for this epic
++    features_query = select(Feature).where(Feature.epic_id == epic_id)
++    features_result = await db.execute(features_query)
++    features = features_result.scalars().all()
++    
++    if not features:
++        raise HTTPException(
++            status_code=status.HTTP_400_BAD_REQUEST,
++            detail="Epic has no features to analyze"
++        )
++    
++    # Prepare epic and features data
++    epic_data = {
++        "id": str(epic_id),
++        "title": epic.title,
++        "description": epic.description or ""
++    }
++
++    features_data = []
++    for feature in features:
++        feature_dict = {
++            "id": str(feature.id),
++            "title": feature.title,
++            "description": feature.description or ""
++        }
++        
++        # Get customer requests for business impact
++        requests_query = select(FeatureRequest).where(FeatureRequest.feature_id == feature.id)
++        requests_result = await db.execute(requests_query)
++        feature_requests = requests_result.scalars().all()
++        
++        feature_dict["customer_requests"] = [
++            {
++                "customer_id": str(req.customer_id),
++                "urgency": req.urgency.value,
++                "estimated_deal_impact": req.estimated_deal_impact
++            }
++            for req in feature_requests
++        ]
++        
++        features_data.append(feature_dict)
++    
++    try:
++        # Update epic status
++        epic.status = EpicStatus.ANALYSIS_PENDING
++        await db.commit()
++        
++        # Run the analysis workflow
++        result = await agno_service.analyze_epic(
++            epic_id=epic_data["id"],
++            epic_data=epic_data,
++            features_data=features_data,
++            db_session=db
++        )
++        
++        if result["status"] == "completed":
++            # Update epic status to analyzed
++            epic.status = EpicStatus.ANALYZED
++            await db.commit()
++            
++            return {
++                "message": "Analysis completed successfully",
++                "epic_id": epic_id,
++                "status": "completed",
++                "features_analyzed": result["features_analyzed"],
++                "results": result.get("results", [])
++            }
++        else:
++            # Update epic status back to draft on failure
++            epic.status = EpicStatus.DRAFT
++            await db.commit()
++            
++            raise HTTPException(
++                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++                detail=f"Analysis failed: {result.get('error', 'Unknown error')}"
++            )
++            
++    except Exception as e:
++        # Log the error but don't expose internal details
++        logger.error(f"Failed to run epic analysis workflow: {str(e)}")
++        
++        # Update epic status back to draft on error
++        epic.status = EpicStatus.DRAFT
++        await db.commit()
++        
++        raise HTTPException(
++            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
++            detail="Analysis service temporarily unavailable"
++        )
++
++@router.get("/{epic_id}/analysis/results")
++async def get_epic_analysis_results(
++    epic_id: UUID,
++    db: AsyncSession = Depends(get_db)
++):
++    """Get the analysis results for all features in an epic"""
++    # Verify epic exists
++    query = select(Epic).where(Epic.id == epic_id)
++    result = await db.execute(query)
++    epic = result.scalar_one_or_none()
++    
++    if not epic:
++        raise HTTPException(
++            status_code=status.HTTP_404_NOT_FOUND,
++            detail="Epic not found"
++        )
++    
++    # Get all features for this epic
++    features_query = select(Feature).where(Feature.epic_id == epic_id)
++    features_result = await db.execute(features_query)
++    features = features_result.scalars().all()
++    
++    # Collect analysis results for each feature
++    features_with_analysis = []
++
++    for feature in features:
++        feature_results = {
++            "feature_id": str(feature.id),
++            "title": feature.title,
++            "description": feature.description,
++            "analyses": {}
++        }
++
++        # Get analysis report from FeatureAnalysisReport table
++        from app.models import FeatureAnalysisReport
++        report_query = select(FeatureAnalysisReport).where(
++            FeatureAnalysisReport.feature_id == feature.id
++        ).order_by(FeatureAnalysisReport.created_at.desc()).limit(1)
++        report_result = await db.execute(report_query)
++        analysis_report = report_result.scalar_one_or_none()
++
++        if analysis_report:
++            feature_results["priority_score"] = float(analysis_report.priority_score) if analysis_report.priority_score else 0
++            feature_results["analyses"]["report"] = {
++                "priority_score": float(analysis_report.priority_score) if analysis_report.priority_score else None,
++                "business_impact_score": analysis_report.business_impact_score,
++                "trend_alignment_status": analysis_report.trend_alignment_status,
++                "trend_keywords": analysis_report.trend_keywords or [],
++                "trend_justification": analysis_report.trend_justification,
++                "market_opportunity_score": float(analysis_report.market_opportunity_score) if analysis_report.market_opportunity_score else None,
++                "total_competitors_analyzed": analysis_report.total_competitors_analyzed,
++                "competitors_providing_count": analysis_report.competitors_providing_count,
++                "generated_by_workflow": analysis_report.generated_by_workflow,
++                "created_at": analysis_report.created_at.isoformat() if analysis_report.created_at else None
++            }
++        else:
++            feature_results["priority_score"] = 0
++
++        features_with_analysis.append(feature_results)
++    
++    # Sort features by priority score (highest first)
++    features_with_analysis.sort(
++        key=lambda x: x.get("priority_score", 0),
++        reverse=True
++    )
+     
+     return {
+-        "message": "Analysis triggered successfully",
+         "epic_id": epic_id,
+-        "status": "pending"
++        "epic_title": epic.title,
++        "epic_status": epic.status.value,
++        "features_count": len(features),
++        "features": features_with_analysis
+     }
+ 
+ @router.get("/summary/by-status", response_model=List[EpicSummary])
+Index: backend/pyproject.toml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>[project]\nname = \"backend\"\nversion = \"0.1.0\"\ndescription = \"Epic Analysis System Backend\"\nreadme = \"README.md\"\nrequires-python = \">=3.11\"\ndependencies = [\n    \"fastapi>=0.116.1\",\n    \"python-dotenv>=1.1.1\",\n    \"uvicorn>=0.35.0\",\n    \"sqlalchemy>=2.0.0\",\n    \"alembic>=1.13.0\",\n    \"asyncpg>=0.29.0\",\n    \"psycopg2-binary>=2.9.9\",\n    \"pgvector>=0.2.5\",\n    \"redis>=5.0.0\",\n    \"python-multipart>=0.0.9\",\n    \"pydantic>=2.5.0\",\n    \"pydantic-settings>=2.1.0\",\n    \"pandas>=2.1.0\",\n    \"openpyxl>=3.1.2\",\n    \"PyMuPDF>=1.23.0\",\n    \"python-jose[cryptography]>=3.3.0\",\n    \"passlib[bcrypt]>=1.7.4\",\n    \"httpx>=0.25.0\",\n    \"tenacity>=8.2.3\",\n    \"numpy>=1.24.0\",\n    \"agno>=1.6.3\",\n    \"openai>=1.88.0\",\n    \"ag-ui-protocol>=0.1.5\",\n]\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/backend/pyproject.toml b/backend/pyproject.toml
+--- a/backend/pyproject.toml	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/backend/pyproject.toml	(date 1754083060792)
+@@ -28,4 +28,6 @@
+     "agno>=1.6.3",
+     "openai>=1.88.0",
+     "ag-ui-protocol>=0.1.5",
++    "duckduckgo-search>=5.0"
++
+ ]
+Index: backend/app/api/v1/features.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Depends, HTTPException, Query, status\nfrom sqlalchemy.ext.asyncio import AsyncSession\nfrom sqlalchemy import select, func, or_, and_\nfrom typing import List, Optional\nfrom uuid import UUID\nimport numpy as np\n\nfrom app.core.database import get_db\nfrom app.models import Feature, Epic, FeatureRequest, Customer, PriorityScore\nfrom app.schemas.feature import (\n    FeatureCreate,\n    FeatureUpdate,\n    FeatureResponse,\n    FeatureWithAnalysis,\n    FeatureListResponse,\n    FeatureRequestCreate,\n    FeatureRequestResponse,\n    FeatureAnalysisRequest\n)\nfrom app.schemas.base import PaginationParams\nfrom app.services.embedding import EmbeddingService\n\nrouter = APIRouter()\n\n# Initialize embedding service\nembedding_service = EmbeddingService()\n\n@router.post(\"/\", response_model=FeatureResponse, status_code=status.HTTP_201_CREATED)\nasync def create_feature(\n    feature_data: FeatureCreate,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Create a new feature within an epic\"\"\"\n    # Verify epic exists\n    epic_query = select(Epic).where(Epic.id == feature_data.epic_id)\n    epic_result = await db.execute(epic_query)\n    epic = epic_result.scalar_one_or_none()\n    \n    if not epic:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Epic not found\"\n        )\n    \n    # Create normalized text and embedding\n    normalized_text = f\"{feature_data.title} {feature_data.description}\".lower()\n    # TODO: Re-enable when embedding service is active\n    # embedding = await embedding_service.generate_embedding(normalized_text)\n    \n    feature = Feature(\n        **feature_data.model_dump(),\n        normalized_text=normalized_text,\n        # embedding=embedding  # TODO: Enable after creating pgvector extension\n    )\n    \n    db.add(feature)\n    await db.commit()\n    await db.refresh(feature)\n    \n    return feature\n\n@router.get(\"/\", response_model=FeatureListResponse)\nasync def list_features(\n    pagination: PaginationParams = Depends(),\n    epic_id: Optional[UUID] = None,\n    search: Optional[str] = None,\n    has_priority_score: Optional[bool] = None,\n    min_request_count: Optional[int] = None,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"List features with filtering and pagination\"\"\"\n    query = select(Feature)\n    \n    # Apply filters\n    if epic_id:\n        query = query.where(Feature.epic_id == epic_id)\n    if search:\n        search_term = f\"%{search}%\"\n        query = query.where(\n            or_(\n                Feature.title.ilike(search_term),\n                Feature.description.ilike(search_term)\n            )\n        )\n    if min_request_count is not None:\n        query = query.where(Feature.customer_request_count >= min_request_count)\n    \n    if has_priority_score is not None:\n        if has_priority_score:\n            # Features with priority scores\n            subquery = select(PriorityScore.feature_id).distinct()\n            query = query.where(Feature.id.in_(subquery))\n        else:\n            # Features without priority scores\n            subquery = select(PriorityScore.feature_id).distinct()\n            query = query.where(Feature.id.notin_(subquery))\n    \n    # Get total count\n    count_query = select(func.count()).select_from(query.subquery())\n    total = await db.scalar(count_query)\n    \n    # Apply pagination\n    query = query.offset(pagination.skip).limit(pagination.limit)\n    query = query.order_by(Feature.created_at.desc())\n    \n    # Execute query\n    result = await db.execute(query)\n    features = result.scalars().all()\n    \n    return FeatureListResponse(\n        items=features,\n        total=total,\n        page=pagination.page,\n        size=pagination.limit,\n        pages=(total + pagination.limit - 1) // pagination.limit\n    )\n\n@router.get(\"/{feature_id}\", response_model=FeatureWithAnalysis)\nasync def get_feature(\n    feature_id: UUID,\n    include_analysis: bool = Query(default=False),\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Get a feature by ID with optional analysis data\"\"\"\n    query = select(Feature).where(Feature.id == feature_id)\n    result = await db.execute(query)\n    feature = result.scalar_one_or_none()\n    \n    if not feature:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Feature not found\"\n        )\n    \n    response_data = {\n        \"id\": feature.id,\n        \"epic_id\": feature.epic_id,\n        \"title\": feature.title,\n        \"description\": feature.description,\n        \"customer_request_count\": feature.customer_request_count,\n        \"created_at\": feature.created_at\n    }\n    \n    if include_analysis:\n        # Get latest priority score\n        priority_query = select(PriorityScore).where(\n            PriorityScore.feature_id == feature_id\n        ).order_by(PriorityScore.calculated_at.desc()).limit(1)\n        priority_result = await db.execute(priority_query)\n        priority_score = priority_result.scalar_one_or_none()\n        \n        if priority_score:\n            response_data[\"priority_score\"] = priority_score\n        \n        # Add more analysis data as needed\n    \n    return FeatureWithAnalysis(**response_data)\n\n@router.put(\"/{feature_id}\", response_model=FeatureResponse)\nasync def update_feature(\n    feature_id: UUID,\n    feature_update: FeatureUpdate,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Update a feature\"\"\"\n    query = select(Feature).where(Feature.id == feature_id)\n    result = await db.execute(query)\n    feature = result.scalar_one_or_none()\n    \n    if not feature:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Feature not found\"\n        )\n    \n    # Update fields\n    update_data = feature_update.model_dump(exclude_unset=True)\n    \n    # Regenerate embedding if title or description changed\n    if \"title\" in update_data or \"description\" in update_data:\n        title = update_data.get(\"title\", feature.title)\n        description = update_data.get(\"description\", feature.description)\n        normalized_text = f\"{title} {description}\".lower()\n        embedding = await embedding_service.generate_embedding(normalized_text)\n        \n        update_data[\"normalized_text\"] = normalized_text\n        # update_data[\"embedding\"] = embedding  # TODO: Enable after creating pgvector extension\n    \n    for field, value in update_data.items():\n        setattr(feature, field, value)\n    \n    await db.commit()\n    await db.refresh(feature)\n    \n    return feature\n\n@router.delete(\"/{feature_id}\", status_code=status.HTTP_204_NO_CONTENT)\nasync def delete_feature(\n    feature_id: UUID,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Delete a feature\"\"\"\n    query = select(Feature).where(Feature.id == feature_id)\n    result = await db.execute(query)\n    feature = result.scalar_one_or_none()\n    \n    if not feature:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Feature not found\"\n        )\n    \n    await db.delete(feature)\n    await db.commit()\n\n@router.post(\"/{feature_id}/requests\", response_model=FeatureRequestResponse, status_code=status.HTTP_201_CREATED)\nasync def create_feature_request(\n    feature_id: UUID,\n    request_data: FeatureRequestCreate,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Create a new feature request from a customer\"\"\"\n    # Verify feature exists\n    feature_query = select(Feature).where(Feature.id == feature_id)\n    feature_result = await db.execute(feature_query)\n    feature = feature_result.scalar_one_or_none()\n    \n    if not feature:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Feature not found\"\n        )\n    \n    # Verify customer exists\n    customer_query = select(Customer).where(Customer.id == request_data.customer_id)\n    customer_result = await db.execute(customer_query)\n    customer = customer_result.scalar_one_or_none()\n    \n    if not customer:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Customer not found\"\n        )\n    \n    # Create feature request\n    feature_request = FeatureRequest(\n        feature_id=feature_id,\n        **request_data.model_dump()\n    )\n    \n    db.add(feature_request)\n    \n    # Update feature request count\n    feature.customer_request_count += 1\n    \n    await db.commit()\n    await db.refresh(feature_request)\n    \n    return feature_request\n\n@router.get(\"/{feature_id}/requests\", response_model=List[FeatureRequestResponse])\nasync def get_feature_requests(\n    feature_id: UUID,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Get all feature requests for a specific feature\"\"\"\n    query = select(FeatureRequest).where(FeatureRequest.feature_id == feature_id)\n    result = await db.execute(query)\n    requests = result.scalars().all()\n    \n    return requests\n\n@router.post(\"/{feature_id}/analyze\", status_code=status.HTTP_202_ACCEPTED)\nasync def trigger_feature_analysis(\n    feature_id: UUID,\n    analysis_request: FeatureAnalysisRequest,\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Trigger analysis for a specific feature\"\"\"\n    query = select(Feature).where(Feature.id == feature_id)\n    result = await db.execute(query)\n    feature = result.scalar_one_or_none()\n    \n    if not feature:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Feature not found\"\n        )\n    \n    # TODO: Integrate with Agno workflow\n    # workflow_config = {\n    #     \"feature_id\": feature_id,\n    #     \"analysis_types\": analysis_request.analysis_types\n    # }\n    # await agno_service.trigger_workflow(\"feature_analysis\", workflow_config)\n    \n    return {\n        \"message\": \"Feature analysis triggered successfully\",\n        \"feature_id\": feature_id,\n        \"analysis_types\": analysis_request.analysis_types,\n        \"status\": \"pending\"\n    }\n\n@router.post(\"/search/similar\", response_model=List[FeatureResponse])\nasync def search_similar_features(\n    text: str = Query(..., description=\"Text to search for similar features\"),\n    threshold: float = Query(0.7, ge=0.0, le=1.0, description=\"Similarity threshold\"),\n    limit: int = Query(10, ge=1, le=100),\n    db: AsyncSession = Depends(get_db)\n):\n    \"\"\"Search for features similar to the given text using vector similarity\"\"\"\n    # TODO: Re-enable when embedding service is active\n    # Generate embedding for search text\n    # search_embedding = await embedding_service.generate_embedding(text.lower())\n\n    # TODO: Implement vector similarity search using pgvector\n    # For now, return empty list as placeholder\n    return []
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/backend/app/api/v1/features.py b/backend/app/api/v1/features.py
+--- a/backend/app/api/v1/features.py	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/backend/app/api/v1/features.py	(date 1754081279449)
+@@ -4,6 +4,7 @@
+ from typing import List, Optional
+ from uuid import UUID
+ import numpy as np
++import logging
+ 
+ from app.core.database import get_db
+ from app.models import Feature, Epic, FeatureRequest, Customer, PriorityScore
+@@ -21,6 +22,7 @@
+ from app.services.embedding import EmbeddingService
+ 
+ router = APIRouter()
++logger = logging.getLogger(__name__)
+ 
+ # Initialize embedding service
+ embedding_service = EmbeddingService()
+@@ -287,18 +289,134 @@
+             detail="Feature not found"
+         )
+     
+-    # TODO: Integrate with Agno workflow
+-    # workflow_config = {
+-    #     "feature_id": feature_id,
+-    #     "analysis_types": analysis_request.analysis_types
+-    # }
+-    # await agno_service.trigger_workflow("feature_analysis", workflow_config)
++    # Integrate with Agno workflow
++    from app.services.agno_service import agno_service
++    
++    # Prepare analysis types - if not specified, run all analysis types
++    analysis_types = analysis_request.analysis_types or [
++        "trend_analysis",
++        "business_impact",
++        "competitive_analysis",
++        "geographic_analysis",
++        "priority_scoring"
++    ]
+     
+-    return {
+-        "message": "Feature analysis triggered successfully",
++    # Get feature requests data if business impact analysis is requested
++    feature_data = {
++        "id": int(str(feature_id).replace("-", ""), 16) % (2**31),
++        "title": feature.title,
++        "description": feature.description or ""
++    }
++    
++    if "business_impact" in analysis_types:
++        # Get customer requests for this feature
++        requests_query = select(FeatureRequest).where(FeatureRequest.feature_id == feature_id)
++        requests_result = await db.execute(requests_query)
++        feature_requests = requests_result.scalars().all()
++        
++        feature_data["customer_requests"] = [
++            {
++                "customer_id": str(req.customer_id),
++                "urgency": req.urgency.value,
++                "estimated_deal_impact": req.estimated_deal_impact
++            }
++            for req in feature_requests
++        ]
++    
++    try:
++        # Run the analysis workflow
++        result = await agno_service.analyze_feature(
++            feature_id=feature_data["id"],
++            feature_data=feature_data,
++            analysis_types=analysis_types,
++            db_session=db
++        )
++        
++        if result["status"] == "completed":
++            return {
++                "message": "Feature analysis completed successfully",
++                "feature_id": feature_id,
++                "analysis_types": analysis_types,
++                "status": "completed",
++                "results": result.get("results", {})
++            }
++        else:
++            raise HTTPException(
++                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++                detail=f"Analysis failed: {result.get('error', 'Unknown error')}"
++            )
++            
++    except Exception as e:
++        # Log the error but don't expose internal details
++        logger.error(f"Failed to run feature analysis workflow: {str(e)}")
++        raise HTTPException(
++            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
++            detail="Analysis service temporarily unavailable"
++        )
++
++@router.get("/{feature_id}/analysis/results")
++async def get_feature_analysis_results(
++    feature_id: UUID,
++    db: AsyncSession = Depends(get_db)
++):
++    """Get the analysis results for a feature"""
++    # Verify feature exists
++    query = select(Feature).where(Feature.id == feature_id)
++    result = await db.execute(query)
++    feature = result.scalar_one_or_none()
++    
++    if not feature:
++        raise HTTPException(
++            status_code=status.HTTP_404_NOT_FOUND,
++            detail="Feature not found"
++        )
++    
++    # Get all analysis results for this feature
++    results = {}
++    
++    # Get trend analysis
++    trend_query = select(TrendAnalysis).where(TrendAnalysis.feature_id == feature_id).order_by(TrendAnalysis.created_at.desc()).limit(1)
++    trend_result = await db.execute(trend_query)
++    trend_analysis = trend_result.scalar_one_or_none()
++    if trend_analysis:
++        results["trend_analysis"] = {
++            "trend_keywords": trend_analysis.trend_keywords,
++            "alignment_score": trend_analysis.alignment_score,
++            "confidence_score": trend_analysis.confidence_score,
++            "created_at": trend_analysis.created_at.isoformat()
++        }
++    
++    # Get business impact analysis
++    impact_query = select(BusinessImpactAnalysis).where(BusinessImpactAnalysis.feature_id == feature_id).order_by(BusinessImpactAnalysis.created_at.desc()).limit(1)
++    impact_result = await db.execute(impact_query)
++    impact_analysis = impact_result.scalar_one_or_none()
++    if impact_analysis:
++        results["business_impact"] = {
++            "total_arr_impact": impact_analysis.total_arr_impact,
++            "customer_count": impact_analysis.customer_count,
++            "average_deal_size": impact_analysis.average_deal_size,
++            "created_at": impact_analysis.created_at.isoformat()
++        }
++    
++    # Get priority score
++    priority_query = select(PriorityScore).where(PriorityScore.feature_id == feature_id).order_by(PriorityScore.calculated_at.desc()).limit(1)
++    priority_result = await db.execute(priority_query)
++    priority_score = priority_result.scalar_one_or_none()
++    if priority_score:
++        results["priority_score"] = {
++            "final_score": priority_score.final_score,
++            "customer_impact_score": priority_score.customer_impact_score,
++            "trend_alignment_score": priority_score.trend_alignment_score,
++            "business_impact_score": priority_score.business_impact_score,
++            "market_opportunity_score": priority_score.market_opportunity_score,
++            "segment_diversity_score": priority_score.segment_diversity_score,
++            "calculated_at": priority_score.calculated_at.isoformat()
++        }
++    
++    return {
+         "feature_id": feature_id,
+-        "analysis_types": analysis_request.analysis_types,
+-        "status": "pending"
++        "results": results,
++        "has_results": len(results) > 0
+     }
+ 
+ @router.post("/search/similar", response_model=List[FeatureResponse])
+Index: frontend/src/pages/EpicDetail.tsx
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import { useState } from 'react';\nimport { useParams, useNavigate } from 'react-router-dom';\nimport { ArrowLeft, Edit, Trash2, PlayCircle, Plus } from 'lucide-react';\nimport { useEpic, useDeleteEpic, useAnalyzeEpic } from '@/hooks/useEpics';\nimport { useFeatures } from '@/hooks/useFeatures';\nimport { CreateFeatureDialog } from '@/components/features/CreateFeatureDialog';\nimport { Button } from '@/components/ui/button';\nimport { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';\nimport { Badge } from '@/components/ui/badge';\nimport { Skeleton } from '@/components/ui/skeleton';\nimport { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';\nimport { format } from 'date-fns';\nimport { EpicStatus } from '@/types';\n\nexport function EpicDetail() {\n  const { id } = useParams<{ id: string }>();\n  const navigate = useNavigate();\n  const [createFeatureOpen, setCreateFeatureOpen] = useState(false);\n  const { data: epic, isLoading } = useEpic(id!);\n  const { features, isLoading: featuresLoading } = useFeatures(id);\n  const deleteEpic = useDeleteEpic();\n  const analyzeEpic = useAnalyzeEpic();\n\n  if (isLoading) {\n    return (\n      <div className=\"space-y-6\">\n        <Skeleton className=\"h-12 w-1/3\" />\n        <Skeleton className=\"h-32 w-full\" />\n        <Skeleton className=\"h-64 w-full\" />\n      </div>\n    );\n  }\n\n  if (!epic) {\n    return (\n      <div className=\"text-center py-12\">\n        <h2 className=\"text-2xl font-semibold\">Epic not found</h2>\n        <Button onClick={() => navigate('/epics')} className=\"mt-4\">\n          Back to Epics\n        </Button>\n      </div>\n    );\n  }\n\n  const handleDelete = async () => {\n    if (confirm('Are you sure you want to delete this epic?')) {\n      await deleteEpic.mutateAsync(id!);\n      navigate('/epics');\n    }\n  };\n\n  const handleAnalyze = async () => {\n    await analyzeEpic.mutateAsync(id!);\n  };\n\n  return (\n    <div className=\"space-y-6\">\n      {/* Header */}\n      <div className=\"flex items-center justify-between\">\n        <div className=\"flex items-center gap-4\">\n          <Button variant=\"ghost\" size=\"icon\" onClick={() => navigate('/epics')}>\n            <ArrowLeft className=\"h-4 w-4\" />\n          </Button>\n          <div>\n            <h1 className=\"text-3xl font-bold\">{epic.title}</h1>\n            <p className=\"text-muted-foreground\">\n              Created {format(new Date(epic.created_at), 'MMMM dd, yyyy')}\n            </p>\n          </div>\n        </div>\n        <div className=\"flex items-center gap-2\">\n          {epic.status === EpicStatus.DRAFT && (\n            <Button onClick={handleAnalyze} variant=\"default\">\n              <PlayCircle className=\"mr-2 h-4 w-4\" />\n              Start Analysis\n            </Button>\n          )}\n          <Button variant=\"outline\" onClick={() => navigate(`/epics/${id}/edit`)}>\n            <Edit className=\"mr-2 h-4 w-4\" />\n            Edit\n          </Button>\n          <Button variant=\"outline\" onClick={handleDelete}>\n            <Trash2 className=\"mr-2 h-4 w-4\" />\n            Delete\n          </Button>\n        </div>\n      </div>\n\n      {/* Overview Card */}\n      <Card>\n        <CardHeader>\n          <div className=\"flex items-center justify-between\">\n            <CardTitle>Overview</CardTitle>\n            <Badge>{epic.status}</Badge>\n          </div>\n        </CardHeader>\n        <CardContent className=\"space-y-4\">\n          <div>\n            <h4 className=\"font-medium mb-1\">Description</h4>\n            <p className=\"text-muted-foreground\">\n              {epic.description || 'No description provided'}\n            </p>\n          </div>\n          <div>\n            <h4 className=\"font-medium mb-1\">Business Justification</h4>\n            <p className=\"text-muted-foreground\">\n              {epic.business_justification || 'No business justification provided'}\n            </p>\n          </div>\n          <div className=\"grid grid-cols-2 gap-4\">\n            <div>\n              <h4 className=\"font-medium mb-1\">Last Updated</h4>\n              <p className=\"text-muted-foreground\">\n                {format(new Date(epic.updated_at), 'MMMM dd, yyyy')}\n              </p>\n            </div>\n            <div>\n              <h4 className=\"font-medium mb-1\">Features</h4>\n              <p className=\"text-muted-foreground\">\n                {epic.features_count || 0} features\n              </p>\n            </div>\n          </div>\n        </CardContent>\n      </Card>\n\n      {/* Tabs */}\n      <Tabs defaultValue=\"features\" className=\"space-y-4\">\n        <TabsList>\n          <TabsTrigger value=\"features\">Features</TabsTrigger>\n          <TabsTrigger value=\"analysis\">Analysis</TabsTrigger>\n          <TabsTrigger value=\"timeline\">Timeline</TabsTrigger>\n        </TabsList>\n        \n        <TabsContent value=\"features\" className=\"space-y-4\">\n          <div className=\"flex items-center justify-between\">\n            <h3 className=\"text-lg font-semibold\">Features</h3>\n            <Button onClick={() => setCreateFeatureOpen(true)}>\n              <Plus className=\"mr-2 h-4 w-4\" />\n              Add Feature\n            </Button>\n          </div>\n          {featuresLoading ? (\n            <div className=\"space-y-3\">\n              <Skeleton className=\"h-20 w-full\" />\n              <Skeleton className=\"h-20 w-full\" />\n              <Skeleton className=\"h-20 w-full\" />\n            </div>\n          ) : features.length === 0 ? (\n            <Card>\n              <CardContent className=\"pt-6\">\n                <div className=\"text-center py-8 text-muted-foreground\">\n                  No features added yet. Add your first feature to get started.\n                </div>\n              </CardContent>\n            </Card>\n          ) : (\n            <div className=\"space-y-3\">\n              {features.map((feature) => (\n                <Card key={feature.id} className=\"hover:shadow-md transition-shadow\">\n                  <CardContent className=\"pt-6\">\n                    <div className=\"flex items-start justify-between\">\n                      <div className=\"space-y-1\">\n                        <h4 className=\"font-semibold\">{feature.title}</h4>\n                        {feature.description && (\n                          <p className=\"text-sm text-muted-foreground\">{feature.description}</p>\n                        )}\n                        <p className=\"text-xs text-muted-foreground\">\n                          {feature.customer_request_count} customer requests\n                        </p>\n                      </div>\n                      {feature.priority_score && (\n                        <Badge variant=\"secondary\">\n                          Score: {feature.priority_score.final_score.toFixed(2)}\n                        </Badge>\n                      )}\n                    </div>\n                  </CardContent>\n                </Card>\n              ))}\n            </div>\n          )}\n        </TabsContent>\n        \n        <TabsContent value=\"analysis\" className=\"space-y-4\">\n          <Card>\n            <CardHeader>\n              <CardTitle>Analysis Results</CardTitle>\n              <CardDescription>\n                AI-powered analysis of features in this epic\n              </CardDescription>\n            </CardHeader>\n            <CardContent>\n              <div className=\"text-center py-8 text-muted-foreground\">\n                {epic.status === EpicStatus.DRAFT\n                  ? 'Start analysis to see results'\n                  : 'Analysis results will appear here'}\n              </div>\n            </CardContent>\n          </Card>\n        </TabsContent>\n        \n        <TabsContent value=\"timeline\" className=\"space-y-4\">\n          <Card>\n            <CardHeader>\n              <CardTitle>Activity Timeline</CardTitle>\n              <CardDescription>\n                Track all changes and activities for this epic\n              </CardDescription>\n            </CardHeader>\n            <CardContent>\n              <div className=\"text-center py-8 text-muted-foreground\">\n                Timeline coming soon...\n              </div>\n            </CardContent>\n          </Card>\n        </TabsContent>\n      </Tabs>\n\n      {/* Create Feature Dialog */}\n      {epic && (\n        <CreateFeatureDialog\n          open={createFeatureOpen}\n          onOpenChange={setCreateFeatureOpen}\n          epicId={epic.id}\n        />\n      )}\n    </div>\n  );\n}
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/frontend/src/pages/EpicDetail.tsx b/frontend/src/pages/EpicDetail.tsx
+--- a/frontend/src/pages/EpicDetail.tsx	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/frontend/src/pages/EpicDetail.tsx	(date 1754086309746)
+@@ -1,8 +1,10 @@
+ import { useState } from 'react';
+ import { useParams, useNavigate } from 'react-router-dom';
+-import { ArrowLeft, Edit, Trash2, PlayCircle, Plus } from 'lucide-react';
++import { ArrowLeft, Edit, Trash2, PlayCircle, Plus, TrendingUp, Target, Users } from 'lucide-react';
+ import { useEpic, useDeleteEpic, useAnalyzeEpic } from '@/hooks/useEpics';
+ import { useFeatures } from '@/hooks/useFeatures';
++import { useQuery } from '@tanstack/react-query';
++import { epicApi } from '@/services/api';
+ import { CreateFeatureDialog } from '@/components/features/CreateFeatureDialog';
+ import { Button } from '@/components/ui/button';
+ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+@@ -21,6 +23,14 @@
+   const deleteEpic = useDeleteEpic();
+   const analyzeEpic = useAnalyzeEpic();
+ 
++  // Fetch analysis results
++  const { data: analysisResults, isLoading: analysisLoading } = useQuery({
++    queryKey: ['epic-analysis', id],
++    queryFn: () => epicApi.getAnalysisResults(id!),
++    enabled: !!id && epic?.status === EpicStatus.ANALYZED,
++    refetchOnWindowFocus: false,
++  });
++
+   if (isLoading) {
+     return (
+       <div className="space-y-6">
+@@ -183,21 +193,171 @@
+         </TabsContent>
+         
+         <TabsContent value="analysis" className="space-y-4">
+-          <Card>
+-            <CardHeader>
+-              <CardTitle>Analysis Results</CardTitle>
+-              <CardDescription>
+-                AI-powered analysis of features in this epic
+-              </CardDescription>
+-            </CardHeader>
+-            <CardContent>
+-              <div className="text-center py-8 text-muted-foreground">
+-                {epic.status === EpicStatus.DRAFT
+-                  ? 'Start analysis to see results'
+-                  : 'Analysis results will appear here'}
+-              </div>
+-            </CardContent>
+-          </Card>
++          {epic.status === EpicStatus.DRAFT ? (
++            <Card>
++              <CardHeader>
++                <CardTitle>Analysis Results</CardTitle>
++                <CardDescription>
++                  AI-powered analysis of features in this epic
++                </CardDescription>
++              </CardHeader>
++              <CardContent>
++                <div className="text-center py-8 text-muted-foreground">
++                  Start analysis to see results
++                </div>
++              </CardContent>
++            </Card>
++          ) : analysisLoading ? (
++            <div className="space-y-4">
++              <Skeleton className="h-32 w-full" />
++              <Skeleton className="h-32 w-full" />
++            </div>
++          ) : analysisResults && analysisResults.features.length > 0 ? (
++            <div className="space-y-6">
++              {/* Summary Card */}
++              <Card>
++                <CardHeader>
++                  <CardTitle className="flex items-center gap-2">
++                    <Target className="h-5 w-5" />
++                    Analysis Summary
++                  </CardTitle>
++                  <CardDescription>
++                    Overview of analysis results for {analysisResults.features_count} feature(s)
++                  </CardDescription>
++                </CardHeader>
++                <CardContent>
++                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
++                    <div className="text-center">
++                      <div className="text-2xl font-bold text-blue-600">
++                        {analysisResults.features_count}
++                      </div>
++                      <div className="text-sm text-muted-foreground">Features Analyzed</div>
++                    </div>
++                    <div className="text-center">
++                      <div className="text-2xl font-bold text-green-600">
++                        {Math.round(analysisResults.features.reduce((sum, f) => sum + f.priority_score, 0) / analysisResults.features.length)}
++                      </div>
++                      <div className="text-sm text-muted-foreground">Avg Priority Score</div>
++                    </div>
++                    <div className="text-center">
++                      <div className="text-2xl font-bold text-purple-600">
++                        {analysisResults.features.filter(f => f.analyses.report?.trend_alignment_status).length}
++                      </div>
++                      <div className="text-sm text-muted-foreground">Trend Aligned</div>
++                    </div>
++                  </div>
++                </CardContent>
++              </Card>
++
++              {/* Feature Analysis Results */}
++              {analysisResults.features.map((feature) => (
++                <Card key={feature.feature_id}>
++                  <CardHeader>
++                    <CardTitle className="flex items-center justify-between">
++                      <span>{feature.title}</span>
++                      <Badge variant={feature.priority_score >= 70 ? "default" : feature.priority_score >= 40 ? "secondary" : "outline"}>
++                        Priority: {feature.priority_score}
++                      </Badge>
++                    </CardTitle>
++                    <CardDescription>{feature.description}</CardDescription>
++                  </CardHeader>
++                  <CardContent>
++                    {feature.analyses.report ? (
++                      <div className="space-y-4">
++                        {/* Priority & Trend Status */}
++                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
++                          <div className="flex items-center gap-2">
++                            <TrendingUp className="h-4 w-4" />
++                            <span className="text-sm font-medium">Trend Alignment:</span>
++                            <Badge variant={feature.analyses.report.trend_alignment_status ? "default" : "secondary"}>
++                              {feature.analyses.report.trend_alignment_status ? "Aligned" : "Not Aligned"}
++                            </Badge>
++                          </div>
++                          <div className="flex items-center gap-2">
++                            <Users className="h-4 w-4" />
++                            <span className="text-sm font-medium">Business Impact:</span>
++                            <span className="text-sm">{feature.analyses.report.business_impact_score || "N/A"}</span>
++                          </div>
++                        </div>
++
++                        {/* Trend Keywords */}
++                        {feature.analyses.report.trend_keywords && feature.analyses.report.trend_keywords.length > 0 && (
++                          <div>
++                            <span className="text-sm font-medium">Trend Keywords:</span>
++                            <div className="flex flex-wrap gap-1 mt-1">
++                              {feature.analyses.report.trend_keywords.map((keyword, idx) => (
++                                <Badge key={idx} variant="outline" className="text-xs">
++                                  {keyword}
++                                </Badge>
++                              ))}
++                            </div>
++                          </div>
++                        )}
++
++                        {/* Analysis Insights */}
++                        {feature.analyses.report.trend_justification && (
++                          <div>
++                            <span className="text-sm font-medium">Analysis Insights:</span>
++                            <div className="mt-1 p-3 bg-muted rounded-md text-sm">
++                              {(() => {
++                                try {
++                                  const insights = JSON.parse(feature.analyses.report.trend_justification);
++                                  return (
++                                    <div className="space-y-3">
++                                      {Object.entries(insights).map(([key, value]) => (
++                                        <div key={key} className="border-l-2 border-blue-200 pl-3">
++                                          <div className="font-medium text-blue-700 capitalize mb-1">
++                                            {key.replace('_', ' ')}:
++                                          </div>
++                                          <div className="text-gray-700 leading-relaxed">
++                                            {String(value)}
++                                          </div>
++                                        </div>
++                                      ))}
++                                    </div>
++                                  );
++                                } catch {
++                                  return (
++                                    <div className="text-gray-700">
++                                      {feature.analyses.report.trend_justification}
++                                    </div>
++                                  );
++                                }
++                              })()}
++                            </div>
++                          </div>
++                        )}
++
++                        {/* Analysis Metadata */}
++                        <div className="text-xs text-muted-foreground pt-2 border-t">
++                          Generated by {feature.analyses.report.generated_by_workflow} on{' '}
++                          {format(new Date(feature.analyses.report.created_at), 'PPp')}
++                        </div>
++                      </div>
++                    ) : (
++                      <div className="text-center py-4 text-muted-foreground">
++                        No analysis data available for this feature
++                      </div>
++                    )}
++                  </CardContent>
++                </Card>
++              ))}
++            </div>
++          ) : (
++            <Card>
++              <CardHeader>
++                <CardTitle>Analysis Results</CardTitle>
++                <CardDescription>
++                  AI-powered analysis of features in this epic
++                </CardDescription>
++              </CardHeader>
++              <CardContent>
++                <div className="text-center py-8 text-muted-foreground">
++                  No analysis results available. Try running the analysis again.
++                </div>
++              </CardContent>
++            </Card>
++          )}
+         </TabsContent>
+         
+         <TabsContent value="timeline" className="space-y-4">
+Index: frontend/src/components/ag-ui/AgentChat.tsx
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import React, { useState, useEffect, useRef } from 'react';\nimport { HttpAgent } from '@ag-ui/client';\nimport { Button } from '@/components/ui/button';\nimport { Input } from '@/components/ui/input';\nimport { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';\nimport { ScrollArea } from '@/components/ui/scroll-area';\nimport { Send, Bot, User } from 'lucide-react';\n\ninterface Message {\n  id: string;\n  role: 'user' | 'assistant';\n  content: string;\n  timestamp: Date;\n}\n\ninterface AgentChatProps {\n  agentUrl?: string;\n  title?: string;\n}\n\nexport function AgentChat({\n  agentUrl = 'http://localhost:8000/agent',\n  title = 'AI Assistant'\n}: AgentChatProps) {\n  const [messages, setMessages] = useState<Message[]>([]);\n  const [input, setInput] = useState('');\n  const [isLoading, setIsLoading] = useState(false);\n  const [agent, setAgent] = useState<HttpAgent | null>(null);\n  const scrollAreaRef = useRef<HTMLDivElement>(null);\n  const currentAssistantMessageRef = useRef<Message | null>(null);\n\n  useEffect(() => {\n    // Initialize AG-UI HttpAgent - connects to AG-UI compatible backend\n    const agentInstance = new HttpAgent({\n      url: agentUrl,\n    });\n\n    // Set up event handlers ONCE when agent is created\n    agentInstance.subscribe({\n      onTextMessageStartEvent: ({ event }) => {\n        // Create new assistant message when text starts\n        const newAssistantMessage: Message = {\n          id: event.messageId || Date.now().toString(),\n          role: 'assistant',\n          content: '',\n          timestamp: new Date(),\n        };\n\n        currentAssistantMessageRef.current = newAssistantMessage;\n        setMessages(prev => [...prev, newAssistantMessage]);\n      },\n\n      onTextMessageContentEvent: ({ event }) => {\n        // Stream content to the current assistant message\n        if (currentAssistantMessageRef.current && event.messageId === currentAssistantMessageRef.current.id) {\n          setMessages(prev =>\n            prev.map(msg =>\n              msg.id === event.messageId\n                ? { ...msg, content: msg.content + event.delta }\n                : msg\n            )\n          );\n        }\n      },\n\n      onTextMessageEndEvent: ({ event }) => {\n        // Message is complete, clear the reference\n        if (currentAssistantMessageRef.current?.id === event.messageId) {\n          currentAssistantMessageRef.current = null;\n        }\n      },\n\n      onRunFinishedEvent: () => {\n        setIsLoading(false);\n        currentAssistantMessageRef.current = null;\n      },\n\n      onRunErrorEvent: ({ event }) => {\n        console.error('Agent error:', event);\n        setIsLoading(false);\n        currentAssistantMessageRef.current = null;\n        setMessages(prev => [...prev, {\n          id: Date.now().toString(),\n          role: 'assistant',\n          content: 'Sorry, I encountered an error. Please try again.',\n          timestamp: new Date(),\n        }]);\n      },\n    });\n\n    setAgent(agentInstance);\n  }, [agentUrl]);\n\n  useEffect(() => {\n    // Auto-scroll to bottom when new messages arrive\n    if (scrollAreaRef.current) {\n      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;\n    }\n  }, [messages]);\n\n  const sendMessage = async () => {\n    if (!input.trim() || !agent || isLoading) return;\n\n    const userMessage: Message = {\n      id: Date.now().toString(),\n      role: 'user',\n      content: input.trim(),\n      timestamp: new Date(),\n    };\n\n    setMessages(prev => [...prev, userMessage]);\n    setInput('');\n    setIsLoading(true);\n\n    try {\n      // Clear the current assistant message reference for new conversation turn\n      currentAssistantMessageRef.current = null;\n\n      // Add user message to agent's message history\n      agent.messages = [\n        ...agent.messages,\n        {\n          id: userMessage.id,\n          role: 'user',\n          content: userMessage.content,\n        },\n      ];\n\n      // Run the agent - event handlers are already set up in useEffect\n      await agent.runAgent({\n        tools: [], // Can add tools here for enhanced functionality\n      });\n\n    } catch (error) {\n      console.error('Error sending message:', error);\n      setIsLoading(false);\n      currentAssistantMessageRef.current = null;\n      setMessages(prev => [...prev, {\n        id: Date.now().toString(),\n        role: 'assistant',\n        content: 'Sorry, I encountered an error. Please try again.',\n        timestamp: new Date(),\n      }]);\n    }\n  };\n\n  const handleKeyDown = (e: React.KeyboardEvent) => {\n    if (e.key === 'Enter' && !e.shiftKey) {\n      e.preventDefault();\n      sendMessage();\n    }\n  };\n\n  return (\n    <Card className=\"w-full max-w-2xl mx-auto h-[600px] flex flex-col\">\n      <CardHeader>\n        <CardTitle className=\"flex items-center gap-2\">\n          <Bot className=\"h-5 w-5\" />\n          {title}\n        </CardTitle>\n      </CardHeader>\n      <CardContent className=\"flex-1 flex flex-col gap-4\">\n        <ScrollArea className=\"flex-1 pr-4\" ref={scrollAreaRef}>\n          <div className=\"space-y-4\">\n            {messages.length === 0 && (\n              <div className=\"text-center text-muted-foreground py-8\">\n                Start a conversation with the AI assistant\n              </div>\n            )}\n            {messages.map((message) => (\n              <div\n                key={message.id}\n                className={`flex gap-3 ${\n                  message.role === 'user' ? 'justify-end' : 'justify-start'\n                }`}\n              >\n                <div\n                  className={`flex gap-2 max-w-[80%] ${\n                    message.role === 'user' ? 'flex-row-reverse' : 'flex-row'\n                  }`}\n                >\n                  <div className=\"flex-shrink-0\">\n                    {message.role === 'user' ? (\n                      <User className=\"h-6 w-6 mt-1\" />\n                    ) : (\n                      <Bot className=\"h-6 w-6 mt-1\" />\n                    )}\n                  </div>\n                  <div\n                    className={`rounded-lg px-3 py-2 ${\n                      message.role === 'user'\n                        ? 'bg-primary text-primary-foreground'\n                        : 'bg-muted'\n                    }`}\n                  >\n                    <p className=\"text-sm whitespace-pre-wrap\">{message.content}</p>\n                    <p className=\"text-xs opacity-70 mt-1\">\n                      {message.timestamp.toLocaleTimeString()}\n                    </p>\n                  </div>\n                </div>\n              </div>\n            ))}\n            {isLoading && (\n              <div className=\"flex gap-3 justify-start\">\n                <div className=\"flex gap-2\">\n                  <Bot className=\"h-6 w-6 mt-1\" />\n                  <div className=\"bg-muted rounded-lg px-3 py-2\">\n                    <div className=\"flex gap-1\">\n                      <div className=\"w-2 h-2 bg-current rounded-full animate-bounce\" />\n                      <div className=\"w-2 h-2 bg-current rounded-full animate-bounce\" style={{ animationDelay: '0.1s' }} />\n                      <div className=\"w-2 h-2 bg-current rounded-full animate-bounce\" style={{ animationDelay: '0.2s' }} />\n                    </div>\n                  </div>\n                </div>\n              </div>\n            )}\n          </div>\n        </ScrollArea>\n        <div className=\"flex gap-2\">\n          <Input\n            value={input}\n            onChange={(e) => setInput(e.target.value)}\n            onKeyDown={handleKeyDown}\n            placeholder=\"Type your message...\"\n            disabled={isLoading}\n            className=\"flex-1\"\n          />\n          <Button \n            onClick={sendMessage} \n            disabled={!input.trim() || isLoading}\n            size=\"icon\"\n          >\n            <Send className=\"h-4 w-4\" />\n          </Button>\n        </div>\n      </CardContent>\n    </Card>\n  );\n}\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/frontend/src/components/ag-ui/AgentChat.tsx b/frontend/src/components/ag-ui/AgentChat.tsx
+--- a/frontend/src/components/ag-ui/AgentChat.tsx	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/frontend/src/components/ag-ui/AgentChat.tsx	(date 1754079661138)
+@@ -27,67 +27,12 @@
+   const [isLoading, setIsLoading] = useState(false);
+   const [agent, setAgent] = useState<HttpAgent | null>(null);
+   const scrollAreaRef = useRef<HTMLDivElement>(null);
+-  const currentAssistantMessageRef = useRef<Message | null>(null);
+ 
+   useEffect(() => {
+     // Initialize AG-UI HttpAgent - connects to AG-UI compatible backend
+     const agentInstance = new HttpAgent({
+       url: agentUrl,
+     });
+-
+-    // Set up event handlers ONCE when agent is created
+-    agentInstance.subscribe({
+-      onTextMessageStartEvent: ({ event }) => {
+-        // Create new assistant message when text starts
+-        const newAssistantMessage: Message = {
+-          id: event.messageId || Date.now().toString(),
+-          role: 'assistant',
+-          content: '',
+-          timestamp: new Date(),
+-        };
+-
+-        currentAssistantMessageRef.current = newAssistantMessage;
+-        setMessages(prev => [...prev, newAssistantMessage]);
+-      },
+-
+-      onTextMessageContentEvent: ({ event }) => {
+-        // Stream content to the current assistant message
+-        if (currentAssistantMessageRef.current && event.messageId === currentAssistantMessageRef.current.id) {
+-          setMessages(prev =>
+-            prev.map(msg =>
+-              msg.id === event.messageId
+-                ? { ...msg, content: msg.content + event.delta }
+-                : msg
+-            )
+-          );
+-        }
+-      },
+-
+-      onTextMessageEndEvent: ({ event }) => {
+-        // Message is complete, clear the reference
+-        if (currentAssistantMessageRef.current?.id === event.messageId) {
+-          currentAssistantMessageRef.current = null;
+-        }
+-      },
+-
+-      onRunFinishedEvent: () => {
+-        setIsLoading(false);
+-        currentAssistantMessageRef.current = null;
+-      },
+-
+-      onRunErrorEvent: ({ event }) => {
+-        console.error('Agent error:', event);
+-        setIsLoading(false);
+-        currentAssistantMessageRef.current = null;
+-        setMessages(prev => [...prev, {
+-          id: Date.now().toString(),
+-          role: 'assistant',
+-          content: 'Sorry, I encountered an error. Please try again.',
+-          timestamp: new Date(),
+-        }]);
+-      },
+-    });
+-
+     setAgent(agentInstance);
+   }, [agentUrl]);
+ 
+@@ -113,8 +58,7 @@
+     setIsLoading(true);
+ 
+     try {
+-      // Clear the current assistant message reference for new conversation turn
+-      currentAssistantMessageRef.current = null;
++      let currentAssistantMessage: Message | null = null;
+ 
+       // Add user message to agent's message history
+       agent.messages = [
+@@ -126,7 +70,49 @@
+         },
+       ];
+ 
+-      // Run the agent - event handlers are already set up in useEffect
++      // Subscribe to agent events and run
++      agent.subscribe({
++        onTextMessageStartEvent: ({ event }) => {
++          // Create new assistant message when text starts
++          currentAssistantMessage = {
++            id: event.messageId || Date.now().toString(),
++            role: 'assistant',
++            content: '',
++            timestamp: new Date(),
++          };
++          setMessages(prev => [...prev, currentAssistantMessage!]);
++        },
++
++        onTextMessageContentEvent: ({ event }) => {
++          // Stream content to the current assistant message
++          if (currentAssistantMessage) {
++            setMessages(prev =>
++              prev.map(msg =>
++                msg.id === currentAssistantMessage!.id
++                  ? { ...msg, content: msg.content + event.delta }
++                  : msg
++              )
++            );
++          }
++        },
++
++        onRunFinishedEvent: () => {
++          setIsLoading(false);
++        },
++
++        onRunErrorEvent: ({ event }) => {
++          console.error('Agent error:', event);
++          setIsLoading(false);
++          setMessages(prev => [...prev, {
++            id: Date.now().toString(),
++            role: 'assistant',
++            content: 'Sorry, I encountered an error. Please try again.',
++            timestamp: new Date(),
++          }]);
++        },
++      });
++
++      // Run the agent
+       await agent.runAgent({
+         tools: [], // Can add tools here for enhanced functionality
+       });
+@@ -134,7 +120,6 @@
+     } catch (error) {
+       console.error('Error sending message:', error);
+       setIsLoading(false);
+-      currentAssistantMessageRef.current = null;
+       setMessages(prev => [...prev, {
+         id: Date.now().toString(),
+         role: 'assistant',
+Index: frontend/src/services/api.ts
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import axios, { AxiosError } from 'axios';\nimport type { \n  Epic, \n  Feature, \n  PaginatedResponse, \n  EpicCreateInput, \n  FeatureCreateInput,\n  EpicSummary,\n  FeatureRanking,\n  ApiError\n} from '@/types';\n\nconst API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';\nconst API_PREFIX = '/api/v1';\n\n// Create axios instance with default config\nconst api = axios.create({\n  baseURL: `${API_BASE_URL}${API_PREFIX}`,\n  headers: {\n    'Content-Type': 'application/json',\n  },\n});\n\n// Add auth token to requests\napi.interceptors.request.use((config) => {\n  const token = localStorage.getItem('auth_token');\n  if (token) {\n    config.headers.Authorization = `Bearer ${token}`;\n  }\n  return config;\n});\n\n// Handle errors\napi.interceptors.response.use(\n  (response) => response,\n  (error: AxiosError<ApiError>) => {\n    if (error.response?.status === 401) {\n      // Handle unauthorized\n      localStorage.removeItem('auth_token');\n      window.location.href = '/login';\n    }\n    return Promise.reject(error);\n  }\n);\n\n// Epic API\nexport const epicApi = {\n  // List epics with pagination and filters\n  list: async (params?: {\n    page?: number;\n    size?: number;\n    status?: string;\n    search?: string;\n    created_by?: string;\n    assigned_to?: string;\n  }): Promise<PaginatedResponse<Epic>> => {\n    const response = await api.get('/epics', { params });\n    return response.data;\n  },\n\n  // Get single epic\n  get: async (id: string): Promise<Epic> => {\n    const response = await api.get(`/epics/${id}`);\n    return response.data;\n  },\n\n  // Create epic\n  create: async (data: EpicCreateInput): Promise<Epic> => {\n    const response = await api.post('/epics', data);\n    return response.data;\n  },\n\n  // Update epic\n  update: async (id: string, data: Partial<EpicCreateInput>): Promise<Epic> => {\n    const response = await api.put(`/epics/${id}`, data);\n    return response.data;\n  },\n\n  // Delete epic\n  delete: async (id: string): Promise<void> => {\n    await api.delete(`/epics/${id}`);\n  },\n\n  // Trigger analysis\n  analyze: async (id: string): Promise<{ message: string; epic_id: string; status: string }> => {\n    const response = await api.post(`/epics/${id}/analyze`);\n    return response.data;\n  },\n\n  // Get summary by status\n  getSummaryByStatus: async (): Promise<EpicSummary[]> => {\n    const response = await api.get('/epics/summary/by-status');\n    return response.data;\n  },\n};\n\n// Feature API\nexport const featureApi = {\n  // List features\n  list: async (params?: {\n    page?: number;\n    size?: number;\n    epic_id?: string;\n    search?: string;\n    has_priority_score?: boolean;\n    min_request_count?: number;\n  }): Promise<PaginatedResponse<Feature>> => {\n    const response = await api.get('/features', { params });\n    return response.data;\n  },\n\n  // Get single feature\n  get: async (id: string, include_analysis = false): Promise<Feature> => {\n    const response = await api.get(`/features/${id}`, {\n      params: { include_analysis }\n    });\n    return response.data;\n  },\n\n  // Create feature\n  create: async (data: FeatureCreateInput): Promise<Feature> => {\n    const response = await api.post('/features', data);\n    return response.data;\n  },\n\n  // Update feature\n  update: async (id: string, data: Partial<FeatureCreateInput>): Promise<Feature> => {\n    const response = await api.put(`/features/${id}`, data);\n    return response.data;\n  },\n\n  // Delete feature\n  delete: async (id: string): Promise<void> => {\n    await api.delete(`/features/${id}`);\n  },\n\n  // Trigger analysis\n  analyze: async (id: string, analysis_types?: string[]): Promise<{ \n    message: string; \n    feature_id: string; \n    analysis_types: string[];\n    status: string;\n  }> => {\n    const response = await api.post(`/features/${id}/analyze`, { analysis_types });\n    return response.data;\n  },\n\n  // Search similar features\n  searchSimilar: async (text: string, threshold = 0.7, limit = 10): Promise<Feature[]> => {\n    const response = await api.post('/features/search/similar', null, {\n      params: { text, threshold, limit }\n    });\n    return response.data;\n  },\n};\n\n// Analysis API\nexport const analysisApi = {\n  // Get feature rankings\n  getFeatureRankings: async (epic_id?: string, limit = 10): Promise<FeatureRanking[]> => {\n    const response = await api.get('/analysis/rankings', {\n      params: { epic_id, limit }\n    });\n    return response.data;\n  },\n\n  // Recalculate priority scores\n  recalculatePriorityScores: async (epic_id?: string): Promise<{ \n    message: string; \n    updated_count: number;\n  }> => {\n    const response = await api.post('/analysis/recalculate-scores', { epic_id });\n    return response.data;\n  },\n};\n\n// Export the api instance for custom requests\nexport default api;
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/frontend/src/services/api.ts b/frontend/src/services/api.ts
+--- a/frontend/src/services/api.ts	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/frontend/src/services/api.ts	(date 1754086156274)
+@@ -92,6 +92,37 @@
+     const response = await api.get('/epics/summary/by-status');
+     return response.data;
+   },
++
++  // Get analysis results
++  getAnalysisResults: async (id: string): Promise<{
++    epic_id: string;
++    epic_title: string;
++    epic_status: string;
++    features_count: number;
++    features: Array<{
++      feature_id: string;
++      title: string;
++      description: string;
++      priority_score: number;
++      analyses: {
++        report?: {
++          priority_score: number;
++          business_impact_score: number;
++          trend_alignment_status: boolean;
++          trend_keywords: string[];
++          trend_justification: string;
++          market_opportunity_score: number;
++          total_competitors_analyzed: number;
++          competitors_providing_count: number;
++          generated_by_workflow: string;
++          created_at: string;
++        };
++      };
++    }>;
++  }> => {
++    const response = await api.get(`/epics/${id}/analysis/results`);
++    return response.data;
++  },
+ };
+ 
+ // Feature API
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<project version=\"4\">\n  <component name=\"AutoImportSettings\">\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\n  </component>\n  <component name=\"ChangeListManager\">\n    <list default=\"true\" id=\"2ac56081-200c-4ce1-bd46-531bc7a1c71c\" name=\"Changes\" comment=\"0.0.1\" />\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\n  </component>\n  <component name=\"ChangesViewManager\">\n    <option name=\"groupingKeys\">\n      <option value=\"directory\" />\n      <option value=\"repository\" />\n    </option>\n  </component>\n  <component name=\"Git.Settings\">\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\n  </component>\n  <component name=\"ProjectColorInfo\">{\n  &quot;associatedIndex&quot;: 4\n}</component>\n  <component name=\"ProjectId\" id=\"30fmuFOXCos8kGwdgjIHLUGj5N9\" />\n  <component name=\"ProjectViewState\">\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\n    <option name=\"showLibraryContents\" value=\"true\" />\n    <option name=\"showVisibilityIcons\" value=\"true\" />\n  </component>\n  <component name=\"PropertiesComponent\">{\n  &quot;keyToString&quot;: {\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\n    &quot;last_opened_file_path&quot;: &quot;/home/dipendra-sharma/ai&quot;,\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\n    &quot;ts.external.directory.path&quot;: &quot;/home/dipendra-sharma/.local/share/JetBrains/Toolbox/apps/pycharm/plugins/javascript-plugin/jsLanguageServicesImpl/external&quot;,\n    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;\n  }\n}</component>\n  <component name=\"RunManager\">\n    <configuration name=\"main\" type=\"PythonConfigurationType\" factoryName=\"Python\" nameIsGenerated=\"true\">\n      <module name=\"onelens\" />\n      <option name=\"ENV_FILES\" value=\"\" />\n      <option name=\"INTERPRETER_OPTIONS\" value=\"\" />\n      <option name=\"PARENT_ENVS\" value=\"true\" />\n      <envs>\n        <env name=\"PYTHONUNBUFFERED\" value=\"1\" />\n      </envs>\n      <option name=\"SDK_HOME\" value=\"\" />\n      <option name=\"WORKING_DIRECTORY\" value=\"$PROJECT_DIR$\" />\n      <option name=\"IS_MODULE_SDK\" value=\"true\" />\n      <option name=\"ADD_CONTENT_ROOTS\" value=\"true\" />\n      <option name=\"ADD_SOURCE_ROOTS\" value=\"true\" />\n      <EXTENSION ID=\"PythonCoverageRunConfigurationExtension\" runner=\"coverage.py\" />\n      <option name=\"SCRIPT_NAME\" value=\"$PROJECT_DIR$/main.py\" />\n      <option name=\"PARAMETERS\" value=\"\" />\n      <option name=\"SHOW_COMMAND_LINE\" value=\"false\" />\n      <option name=\"EMULATE_TERMINAL\" value=\"false\" />\n      <option name=\"MODULE_MODE\" value=\"false\" />\n      <option name=\"REDIRECT_INPUT\" value=\"false\" />\n      <option name=\"INPUT_FILE\" value=\"\" />\n      <method v=\"2\" />\n    </configuration>\n  </component>\n  <component name=\"SharedIndexes\">\n    <attachedChunks>\n      <set>\n        <option value=\"bundled-js-predefined-d6986cc7102b-b26f3e71634d-JavaScript-PY-251.26094.141\" />\n        <option value=\"bundled-python-sdk-9f8e2b94138c-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.26094.141\" />\n      </set>\n    </attachedChunks>\n  </component>\n  <component name=\"TaskManager\">\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\n      <changelist id=\"2ac56081-200c-4ce1-bd46-531bc7a1c71c\" name=\"Changes\" comment=\"\" />\n      <created>1754027221690</created>\n      <option name=\"number\" value=\"Default\" />\n      <option name=\"presentableId\" value=\"Default\" />\n      <updated>1754027221690</updated>\n      <workItem from=\"1754027223199\" duration=\"55000\" />\n      <workItem from=\"1754028809274\" duration=\"18913000\" />\n    </task>\n    <task id=\"LOCAL-00001\" summary=\"init\">\n      <option name=\"closed\" value=\"true\" />\n      <created>1754046955367</created>\n      <option name=\"number\" value=\"00001\" />\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\n      <option name=\"project\" value=\"LOCAL\" />\n      <updated>1754046955367</updated>\n    </task>\n    <task id=\"LOCAL-00002\" summary=\"init\">\n      <option name=\"closed\" value=\"true\" />\n      <created>1754048567679</created>\n      <option name=\"number\" value=\"00002\" />\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\n      <option name=\"project\" value=\"LOCAL\" />\n      <updated>1754048567679</updated>\n    </task>\n    <task id=\"LOCAL-00003\" summary=\"init\">\n      <option name=\"closed\" value=\"true\" />\n      <created>1754050681726</created>\n      <option name=\"number\" value=\"00003\" />\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\n      <option name=\"project\" value=\"LOCAL\" />\n      <updated>1754050681726</updated>\n    </task>\n    <task id=\"LOCAL-00004\" summary=\"0.0.1\">\n      <option name=\"closed\" value=\"true\" />\n      <created>1754072205317</created>\n      <option name=\"number\" value=\"00004\" />\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\n      <option name=\"project\" value=\"LOCAL\" />\n      <updated>1754072205317</updated>\n    </task>\n    <option name=\"localTasksCounter\" value=\"5\" />\n    <servers />\n  </component>\n  <component name=\"TypeScriptGeneratedFilesManager\">\n    <option name=\"version\" value=\"3\" />\n    <option name=\"exactExcludedFiles\">\n      <list>\n        <option value=\"$PROJECT_DIR$/frontend/src/App.jsx\" />\n      </list>\n    </option>\n  </component>\n  <component name=\"VcsManagerConfiguration\">\n    <MESSAGE value=\"init\" />\n    <MESSAGE value=\"0.0.1\" />\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"0.0.1\" />\n  </component>\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision ba1d440a8390ed8c3b2370f5959b14037d8a9ee3)
++++ b/.idea/workspace.xml	(date 1754086413265)
+@@ -4,7 +4,18 @@
+     <option name="autoReloadType" value="SELECTIVE" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="2ac56081-200c-4ce1-bd46-531bc7a1c71c" name="Changes" comment="0.0.1" />
++    <list default="true" id="2ac56081-200c-4ce1-bd46-531bc7a1c71c" name="Changes" comment="0.0.1">
++      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/agno-config/workflows.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/agno-config/workflows.yaml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/backend/app/api/v1/epics.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/api/v1/epics.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/backend/app/api/v1/features.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/api/v1/features.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/backend/app/services/priority_scoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/services/priority_scoring.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/backend/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/backend/pyproject.toml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/backend/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/backend/uv.lock" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/frontend/src/components/ag-ui/AgentChat.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/components/ag-ui/AgentChat.tsx" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/frontend/src/pages/EpicDetail.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/pages/EpicDetail.tsx" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/frontend/src/services/api.ts" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/services/api.ts" afterDir="false" />
++    </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+@@ -83,7 +94,7 @@
+       <option name="presentableId" value="Default" />
+       <updated>1754027221690</updated>
+       <workItem from="1754027223199" duration="55000" />
+-      <workItem from="1754028809274" duration="18913000" />
++      <workItem from="1754028809274" duration="29146000" />
+     </task>
+     <task id="LOCAL-00001" summary="init">
+       <option name="closed" value="true" />
+@@ -117,7 +128,23 @@
+       <option name="project" value="LOCAL" />
+       <updated>1754072205317</updated>
+     </task>
+-    <option name="localTasksCounter" value="5" />
++    <task id="LOCAL-00005" summary="0.0.1">
++      <option name="closed" value="true" />
++      <created>1754078346927</created>
++      <option name="number" value="00005" />
++      <option name="presentableId" value="LOCAL-00005" />
++      <option name="project" value="LOCAL" />
++      <updated>1754078346927</updated>
++    </task>
++    <task id="LOCAL-00006" summary="0.0.1">
++      <option name="closed" value="true" />
++      <created>1754078352873</created>
++      <option name="number" value="00006" />
++      <option name="presentableId" value="LOCAL-00006" />
++      <option name="project" value="LOCAL" />
++      <updated>1754078352873</updated>
++    </task>
++    <option name="localTasksCounter" value="7" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">

@@ -4,6 +4,7 @@ from sqlalchemy import select, func, or_, and_
 from typing import List, Optional
 from uuid import UUID
 import numpy as np
+import logging
 
 from app.core.database import get_db
 from app.models import Feature, Epic, FeatureRequest, Customer, PriorityScore
@@ -21,6 +22,7 @@ from app.schemas.base import PaginationParams
 from app.services.embedding import EmbeddingService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Initialize embedding service
 embedding_service = EmbeddingService()
@@ -288,18 +290,134 @@ async def trigger_feature_analysis(
             detail="Feature not found"
         )
     
-    # TODO: Integrate with Agno workflow
-    # workflow_config = {
-    #     "feature_id": feature_id,
-    #     "analysis_types": analysis_request.analysis_types
-    # }
-    # await agno_service.trigger_workflow("feature_analysis", workflow_config)
+    # Integrate with Agno workflow
+    from app.services.agno_service import agno_service_v2 as agno_service
+    
+    # Prepare analysis types - if not specified, run all analysis types
+    analysis_types = analysis_request.analysis_types or [
+        "trend_analysis",
+        "business_impact",
+        "competitive_analysis",
+        "geographic_analysis",
+        "priority_scoring"
+    ]
+    
+    # Get feature requests data if business impact analysis is requested
+    feature_data = {
+        "id": str(feature_id),  # Keep as UUID string
+        "title": feature.title,
+        "description": feature.description or ""
+    }
+    
+    if "business_impact" in analysis_types:
+        # Get customer requests for this feature
+        requests_query = select(FeatureRequest).where(FeatureRequest.feature_id == feature_id)
+        requests_result = await db.execute(requests_query)
+        feature_requests = requests_result.scalars().all()
+        
+        feature_data["customer_requests"] = [
+            {
+                "customer_id": str(req.customer_id),
+                "urgency": req.urgency.value,
+                "estimated_deal_impact": req.estimated_deal_impact
+            }
+            for req in feature_requests
+        ]
+    
+    try:
+        # Run the analysis workflow
+        result = await agno_service.analyze_feature(
+            feature_id=feature_data["id"],
+            feature_data=feature_data,
+            analysis_types=analysis_types,
+            db_session=db
+        )
+        
+        if result["status"] == "completed":
+            return {
+                "message": "Feature analysis completed successfully",
+                "feature_id": feature_id,
+                "analysis_types": analysis_types,
+                "status": "completed",
+                "results": result.get("results", {})
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Analysis failed: {result.get('error', 'Unknown error')}"
+            )
+            
+    except Exception as e:
+        # Log the error but don't expose internal details
+        logger.error(f"Failed to run feature analysis workflow: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analysis service temporarily unavailable"
+        )
+
+@router.get("/{feature_id}/analysis/results")
+async def get_feature_analysis_results(
+    feature_id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the analysis results for a feature"""
+    # Verify feature exists
+    query = select(Feature).where(Feature.id == feature_id)
+    result = await db.execute(query)
+    feature = result.scalar_one_or_none()
+    
+    if not feature:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Feature not found"
+        )
+    
+    # Get all analysis results for this feature
+    results = {}
+    
+    # Get trend analysis
+    trend_query = select(TrendAnalysis).where(TrendAnalysis.feature_id == feature_id).order_by(TrendAnalysis.created_at.desc()).limit(1)
+    trend_result = await db.execute(trend_query)
+    trend_analysis = trend_result.scalar_one_or_none()
+    if trend_analysis:
+        results["trend_analysis"] = {
+            "trend_keywords": trend_analysis.trend_keywords,
+            "alignment_score": trend_analysis.alignment_score,
+            "confidence_score": trend_analysis.confidence_score,
+            "created_at": trend_analysis.created_at.isoformat()
+        }
+    
+    # Get business impact analysis
+    impact_query = select(BusinessImpactAnalysis).where(BusinessImpactAnalysis.feature_id == feature_id).order_by(BusinessImpactAnalysis.created_at.desc()).limit(1)
+    impact_result = await db.execute(impact_query)
+    impact_analysis = impact_result.scalar_one_or_none()
+    if impact_analysis:
+        results["business_impact"] = {
+            "total_arr_impact": impact_analysis.total_arr_impact,
+            "customer_count": impact_analysis.customer_count,
+            "average_deal_size": impact_analysis.average_deal_size,
+            "created_at": impact_analysis.created_at.isoformat()
+        }
+    
+    # Get priority score
+    priority_query = select(PriorityScore).where(PriorityScore.feature_id == feature_id).order_by(PriorityScore.calculated_at.desc()).limit(1)
+    priority_result = await db.execute(priority_query)
+    priority_score = priority_result.scalar_one_or_none()
+    if priority_score:
+        results["priority_score"] = {
+            "final_score": priority_score.final_score,
+            "customer_impact_score": priority_score.customer_impact_score,
+            "trend_alignment_score": priority_score.trend_alignment_score,
+            "business_impact_score": priority_score.business_impact_score,
+            "market_opportunity_score": priority_score.market_opportunity_score,
+            "segment_diversity_score": priority_score.segment_diversity_score,
+            "calculated_at": priority_score.calculated_at.isoformat()
+        }
     
     return {
-        "message": "Feature analysis triggered successfully",
         "feature_id": feature_id,
-        "analysis_types": analysis_request.analysis_types,
-        "status": "pending"
+        "results": results,
+        "has_results": len(results) > 0
     }
 
 @router.post("/search/similar", response_model=List[FeatureResponse])

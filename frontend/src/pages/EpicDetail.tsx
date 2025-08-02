@@ -1,10 +1,15 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit, Trash2, PlayCircle, Plus, MoreVertical } from 'lucide-react';
+import { TrendingUp, Target, Users } from 'lucide-react';
 import { useEpic, useDeleteEpic, useAnalyzeEpic } from '@/hooks/useEpics';
-import { useFeatures, useDeleteFeature } from '@/hooks/useFeatures';
+import {useDeleteFeature } from '@/hooks/useFeatures';
+import { useFeatures } from '@/hooks/useFeatures';
+import { useQuery } from '@tanstack/react-query';
+import { epicApi } from '@/services/api';
 import { CreateFeatureDialog } from '@/components/features/CreateFeatureDialog';
 import { EditFeatureDialog } from '@/components/features/EditFeatureDialog';
+import { FeatureAnalysisCard } from '@/components/analysis/FeatureAnalysisCard';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -43,6 +48,14 @@ export function EpicDetail() {
   const deleteEpic = useDeleteEpic();
   const analyzeEpic = useAnalyzeEpic();
   const deleteFeature = useDeleteFeature();
+
+  // Fetch analysis results
+  const { data: analysisResults, isLoading: analysisLoading } = useQuery({
+    queryKey: ['epic-analysis', id],
+    queryFn: () => epicApi.getAnalysisResults(id!),
+    enabled: !!id && epic?.status === EpicStatus.ANALYZED,
+    refetchOnWindowFocus: false,
+  });
 
   if (isLoading) {
     return (
@@ -242,21 +255,85 @@ export function EpicDetail() {
         </TabsContent>
         
         <TabsContent value="analysis" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Analysis Results</CardTitle>
-              <CardDescription>
-                AI-powered analysis of features in this epic
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="text-center py-8 text-muted-foreground">
-                {epic.status === EpicStatus.DRAFT
-                  ? 'Start analysis to see results'
-                  : 'Analysis results will appear here'}
+
+          {epic.status === EpicStatus.DRAFT ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Analysis Results</CardTitle>
+                <CardDescription>
+                  AI-powered analysis of features in this epic
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="text-center py-8 text-muted-foreground">
+                  Start analysis to see results
+                </div>
+              </CardContent>
+            </Card>
+          ) : analysisLoading ? (
+            <div className="space-y-4">
+              <Skeleton className="h-32 w-full" />
+              <Skeleton className="h-32 w-full" />
+            </div>
+          ) : analysisResults && analysisResults.features.length > 0 ? (
+            <div className="space-y-6">
+              {/* Summary Card */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Target className="h-5 w-5" />
+                    Analysis Summary
+                  </CardTitle>
+                  <CardDescription>
+                    Overview of analysis results for {analysisResults.features_count} feature(s)
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-blue-600">
+                        {analysisResults.features_count}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Features Analyzed</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-600">
+                        {Math.round(analysisResults.features.reduce((sum, f) => sum + f.priority_score, 0) / analysisResults.features.length)}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Avg Priority Score</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-purple-600">
+                        {analysisResults.features.filter(f => f.analyses.report?.trend_alignment_status).length}
+                      </div>
+                      <div className="text-sm text-muted-foreground">Trend Aligned</div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Feature Analysis Results */}
+              <div className="space-y-4">
+                {analysisResults.features.map((feature) => (
+                  <FeatureAnalysisCard key={feature.feature_id} feature={feature} />
+                ))}
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Analysis Results</CardTitle>
+                <CardDescription>
+                  AI-powered analysis of features in this epic
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="text-center py-8 text-muted-foreground">
+                  No analysis results available. Try running the analysis again.
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
         
         <TabsContent value="timeline" className="space-y-4">
@@ -304,8 +381,8 @@ export function EpicDetail() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={handleDeleteFeature} 
+            <AlertDialogAction
+              onClick={handleDeleteFeature}
               className="bg-destructive text-destructive-foreground"
             >
               Delete

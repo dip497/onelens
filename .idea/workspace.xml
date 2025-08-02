@@ -4,7 +4,22 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="2ac56081-200c-4ce1-bd46-531bc7a1c71c" name="Changes" comment="0.0.1" />
+    <list default="true" id="2ac56081-200c-4ce1-bd46-531bc7a1c71c" name="Changes" comment="0.0.1">
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/onelens.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/onelens.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agno-config/workflows.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/agno-config/workflows.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/app/api/v1/epics.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/api/v1/epics.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/app/api/v1/features.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/app/api/v1/features.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/backend/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/backend/uv.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/components/ag-ui/AgentChat.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/components/ag-ui/AgentChat.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/lib/utils.ts" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/lib/utils.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/pages/EpicDetail.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/pages/EpicDetail.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/services/api.ts" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/services/api.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/types/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/types/index.ts" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -38,7 +53,7 @@
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;ts.external.directory.path&quot;: &quot;/home/dipendra-sharma/.local/share/JetBrains/Toolbox/apps/pycharm/plugins/javascript-plugin/jsLanguageServicesImpl/external&quot;,
+    &quot;ts.external.directory.path&quot;: &quot;/home/dipendra-sharma/Development/hacathon/onelens/frontend/node_modules/typescript/lib&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
@@ -83,7 +98,7 @@
       <option name="presentableId" value="Default" />
       <updated>1754027221690</updated>
       <workItem from="1754027223199" duration="55000" />
-      <workItem from="1754028809274" duration="18913000" />
+      <workItem from="1754028809274" duration="37196000" />
     </task>
     <task id="LOCAL-00001" summary="init">
       <option name="closed" value="true" />
@@ -117,7 +132,23 @@
       <option name="project" value="LOCAL" />
       <updated>1754072205317</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="0.0.1">
+      <option name="closed" value="true" />
+      <created>1754078346927</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1754078346927</updated>
+    </task>
+    <task id="LOCAL-00006" summary="0.0.1">
+      <option name="closed" value="true" />
+      <created>1754078352873</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1754078352873</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

@@ -152,3 +152,99 @@ workflows:
         depends_on: ["recalculate_scores"]
         description: "Update feature rankings"
         timeout: 60
+
+  feature_analysis:
+    name: "Feature Analysis"
+    description: "Individual feature analysis with selective analysis types"
+    trigger_events: ["feature_created", "manual_trigger"]
+    
+    data_requirements:
+      - table: "features"
+        fields: ["id", "title", "description", "epic_id"]
+      - table: "customers"
+        fields: ["segment", "arr", "geographic_region"]
+      - table: "feature_requests"
+        fields: ["feature_id", "customer_id", "urgency", "estimated_deal_impact"]
+      - table: "competitors"
+        fields: ["name", "market_position", "primary_markets"]
+      - table: "competitor_features"
+        fields: ["competitor_id", "feature_name", "availability", "strengths", "weaknesses"]
+    
+    configuration:
+      analysis_types:
+        required: true
+        type: "array"
+        allowed_values: ["trend_analysis", "business_impact", "competitive_analysis", "geographic_analysis", "priority_scoring"]
+    
+    steps:
+      - step: "validate_feature_data"
+        agent: "data_validation_agent"
+        description: "Ensure feature exists and has required data"
+        input_validation:
+          - feature_exists: true
+        timeout: 60
+        
+      - step: "trend_alignment_analysis"
+        agent: "trend_analysis_agent"
+        depends_on: ["validate_feature_data"]
+        condition: "trend_analysis in analysis_types"
+        data_sources:
+          - database: "features table"
+          - external: "trend research APIs"
+        output_target: "trend_analysis table"
+        timeout: 300
+        
+      - step: "business_impact_calculation"
+        agent: "business_impact_agent"
+        depends_on: ["validate_feature_data"]
+        condition: "business_impact in analysis_types"
+        data_sources:
+          - database: "feature_requests + customers tables"
+          - calculated: "customer_request_count, arr_weighted_score"
+        output_target: "business_impact_analysis table"
+        timeout: 240
+        
+      - step: "competitive_gap_analysis"
+        agent: "competitive_analysis_agent"
+        depends_on: ["validate_feature_data"]
+        condition: "competitive_analysis in analysis_types"
+        data_sources:
+          - database: "competitors + competitor_features tables"
+          - external: "competitor research APIs"
+        output_target: "market_opportunity_analysis table"
+        timeout: 600
+        
+      - step: "geographic_market_assessment"
+        agent: "market_opportunity_agent"
+        depends_on: ["validate_feature_data"]
+        condition: "geographic_analysis in analysis_types"
+        data_sources:
+          - database: "customer geographic data"
+          - external: "geographic market data APIs"
+          - static: "top_5_countries configuration"
+        output_target: "geographic_analysis table"
+        timeout: 480
+        
+      - step: "priority_score_calculation"
+        agent: "priority_scoring_agent"
+        depends_on: [
+          "trend_alignment_analysis",
+          "business_impact_calculation",
+          "competitive_gap_analysis",
+          "geographic_market_assessment"
+        ]
+        condition: "priority_scoring in analysis_types"
+        data_sources:
+          - database: "all available analysis results"
+          - algorithm: "priority_scoring_algorithm"
+        output_target: "priority_scores table"
+        timeout: 120
+        
+      - step: "generate_analysis_report"
+        agent: "report_generation_agent"
+        depends_on: ["priority_score_calculation"]
+        condition: "any analysis completed"
+        data_sources:
+          - database: "all analysis tables for this feature"
+        output_target: "feature_analysis_reports table"
+        timeout: 180

@@ -92,6 +92,73 @@ export const epicApi = {
     const response = await api.get('/epics/summary/by-status');
     return response.data;
   },
+
+  // Get analysis results
+  getAnalysisResults: async (id: string): Promise<{
+    epic_id: string;
+    epic_title: string;
+    epic_status: string;
+    features_count: number;
+    features: Array<{
+      feature_id: string;
+      title: string;
+      description: string;
+      priority_score: number;
+      analyses: {
+        report?: {
+          // Core scores
+          priority_score: number | null;
+          business_impact_score: number | null;
+          
+          // Trend Analysis
+          trend_alignment_status: boolean;
+          trend_keywords: string[];
+          trend_justification: string | null;
+          
+          // Business Impact
+          revenue_potential: 'HIGH' | 'MEDIUM' | 'LOW' | null;
+          user_adoption_forecast: 'HIGH' | 'MEDIUM' | 'LOW' | null;
+          
+          // Market Opportunity
+          market_opportunity_score: number | null;
+          total_competitors_analyzed: number | null;
+          competitors_providing_count: number | null;
+          
+          // Geographic Insights
+          geographic_insights: {
+            top_markets: Array<{
+              country: string;
+              market_size: number;
+              opportunity_rating: string;
+              regulatory_factors: string[];
+            }>;
+            total_market_size: number;
+            regulatory_considerations: string[];
+          } | null;
+          
+          // Competitive Analysis
+          competitor_pros_cons: {
+            main_competitors: Array<{
+              name: string;
+              strengths: string[];
+              weaknesses: string[];
+            }>;
+            market_gaps: string[];
+            competitive_advantages: string[];
+          } | null;
+          competitive_positioning: string | null;
+          
+          // Metadata
+          generated_by_workflow: string;
+          created_at: string;
+          updated_at: string;
+        };
+      };
+    }>;
+  }> => {
+    const response = await api.get(`/epics/${id}/analysis/results`);
+    return response.data;
+  },
 };
 
 // Feature API
