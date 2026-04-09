@@ -16,6 +16,8 @@ plugin/build/
 plugin/.gradle/
 plugin/.idea/
 plugin/out/
+plugin/.intellijPlatform/
+plugin/.kotlin/
 
 # Gradle
 .gradle/

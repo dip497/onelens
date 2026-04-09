@@ -48,7 +48,7 @@ Subsequent syncs detect changes and do delta imports (seconds).
 ### 4. Query
 
 ```bash
-# What calls RequestServiceImpl?
+# What calls UserServiceImpl?
 ~/.onelens/venv/bin/onelens query \
   "MATCH (c:Class {name: 'MyService'})-[:HAS_METHOD]->(m) MATCH (caller:Method)-[:CALLS]->(m) RETURN caller.classFqn, m.name LIMIT 10" \
   --graph my-project
@@ -61,10 +61,10 @@ Subsequent syncs detect changes and do delta imports (seconds).
 
 Copy the skill from `skills/onelens/` to `~/.claude/skills/onelens/` and ask naturally:
 
-- "what calls RequestServiceImpl?"
-- "blast radius of changing AssetServiceImpl"
-- "trace the /request endpoint"
-- "what depends on FlotoMspServiceImpl?"
+- "what calls UserServiceImpl?"
+- "blast radius of changing OrderService"
+- "trace the /api/orders endpoint"
+- "what depends on BaseServiceImpl?"
 
 ## What gets exported
 
