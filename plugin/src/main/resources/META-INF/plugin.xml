@@ -1,0 +1,34 @@
+<idea-plugin>
+    <id>com.onelens.plugin</id>
+    <name>OneLens Graph Builder</name>
+    <vendor>OneLens</vendor>
+    <description><![CDATA[
+        Export your Java/Spring Boot project's complete code intelligence to a knowledge graph.
+        Uses IntelliJ's PSI APIs for 100% accurate type resolution, call graphs, and Spring bean wiring.
+    ]]></description>
+
+    <!-- Required: platform + Java -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+
+    <!-- Optional: Spring support (exports beans, wiring, endpoints when available) -->
+    <depends optional="true" config-file="spring-features.xml">com.intellij.spring</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationService
+            serviceImplementation="com.onelens.plugin.settings.OneLensSettings"/>
+        <projectService
+            serviceImplementation="com.onelens.plugin.export.ExportState"/>
+        <notificationGroup id="OneLens" displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <group id="OneLens.Actions" text="OneLens" popup="true">
+            <action id="OneLens.SyncGraph"
+                class="com.onelens.plugin.actions.ExportFullAction"
+                text="Sync Graph"
+                description="Smart sync — auto-detects changes, exports full or delta as needed"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </group>
+    </actions>
+</idea-plugin>

@@ -1,0 +1,45 @@
+[project]
+name = "onelens"
+version = "0.2.0"
+description = "Code knowledge graph for Java/Spring Boot — imports IntelliJ exports into a graph DB"
+requires-python = ">=3.10"
+dependencies = [
+    "falkordb>=1.6.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "fastmcp>=0.1.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+lite = ["falkordblite>=0.9.0"]
+neo4j = ["neo4j>=5.0.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+onelens = "onelens.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true

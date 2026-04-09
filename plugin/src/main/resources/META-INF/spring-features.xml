@@ -1,0 +1,4 @@
+<idea-plugin>
+    <!-- Spring-specific features loaded only when com.intellij.spring is available -->
+    <!-- SpringCollector will check for Spring plugin availability at runtime -->
+</idea-plugin>

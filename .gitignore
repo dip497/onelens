@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IntelliJ Plugin
+plugin/build/
+plugin/.gradle/
+plugin/.idea/
+plugin/out/
+
+# Gradle
+.gradle/
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# OneLens local data
+.onelens/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Misc
+*.log
+.bg-shell/
