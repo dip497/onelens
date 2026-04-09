@@ -99,10 +99,97 @@ class GraphLoader:
                     "path", "httpMethod", "controllerFqn", "handlerMethodFqn",
                 ])
 
+            # --- EXTERNAL STUB NODES ---
+            # Create stub nodes for external (library) classes/methods referenced in edges.
+            # The plugin already resolves calls to library methods — we just need nodes for them.
+            project_class_fqns = {c["fqn"] for c in classes}
+            project_method_fqns = {m["fqn"] for m in methods}
+
+            ext_class_fqns = set()
+            ext_method_fqns = set()
+
+            # From call graph: callee methods not in project
+            for c in data.get("callGraph", []):
+                callee = c.get("calleeFqn", "")
+                if callee and callee not in project_method_fqns:
+                    ext_method_fqns.add(callee)
+                    # Extract class FQN from method FQN (before #)
+                    if "#" in callee:
+                        ext_class_fqns.add(callee.split("#")[0])
+
+            # From inheritance: parent classes not in project
+            for e in data.get("inheritance", []):
+                parent = e.get("parentFqn", "")
+                if parent and parent not in project_class_fqns:
+                    ext_class_fqns.add(parent)
+
+            # From overrides: parent methods not in project
+            for o in data.get("methodOverrides", []):
+                parent = o.get("overridesFqn", "")
+                if parent and parent not in project_method_fqns:
+                    ext_method_fqns.add(parent)
+                    if "#" in parent:
+                        ext_class_fqns.add(parent.split("#")[0])
+
+            # Remove any external classes that are actually project classes
+            ext_class_fqns -= project_class_fqns
+
+            # Create external class stubs
+            ext_class_nodes = []
+            for fqn in ext_class_fqns:
+                name = fqn.split(".")[-1] if "." in fqn else fqn
+                pkg = fqn.rsplit(".", 1)[0] if "." in fqn else ""
+                ext_class_nodes.append({
+                    "fqn": fqn, "name": name, "kind": "CLASS",
+                    "filePath": "", "lineStart": 0, "lineEnd": 0,
+                    "packageName": pkg, "enclosingClass": "", "superClass": "",
+                    "external": True,
+                })
+            self._batch_nodes(progress, "External Classes", ext_class_nodes, "Class", "fqn", [
+                "name", "kind", "filePath", "lineStart", "lineEnd",
+                "packageName", "enclosingClass", "superClass", "external",
+            ])
+
+            # Split method stubs into truly external vs project implicit constructors.
+            # Project classes may have implicit default constructors that PSI doesn't export
+            # but are referenced in call edges — these should NOT be marked external.
+            ext_method_nodes = []
+            implicit_method_nodes = []
+            for fqn in ext_method_fqns:
+                class_fqn = fqn.split("#")[0] if "#" in fqn else ""
+                name = fqn.split("#")[1].split("(")[0] if "#" in fqn else fqn
+                is_constructor = name == class_fqn.split(".")[-1] if class_fqn else False
+                is_project_class = class_fqn in project_class_fqns
+                node = {
+                    "fqn": fqn, "name": name, "classFqn": class_fqn,
+                    "returnType": "", "isConstructor": is_constructor,
+                    "filePath": "", "lineStart": 0, "lineEnd": 0,
+                    "external": not is_project_class,
+                }
+                if is_project_class:
+                    implicit_method_nodes.append(node)
+                else:
+                    ext_method_nodes.append(node)
+
+            self._batch_nodes(progress, "External Methods", ext_method_nodes, "Method", "fqn", [
+                "name", "classFqn", "returnType", "isConstructor",
+                "filePath", "lineStart", "lineEnd", "external",
+            ])
+            if implicit_method_nodes:
+                self._batch_nodes(progress, "Implicit Methods", implicit_method_nodes, "Method", "fqn", [
+                    "name", "classFqn", "returnType", "isConstructor",
+                    "filePath", "lineStart", "lineEnd", "external",
+                ])
+
+            # HAS_METHOD for external + implicit methods → their classes
+            ext_has_method = [{"src": m["classFqn"], "dst": m["fqn"]}
+                              for m in ext_method_nodes + implicit_method_nodes if m["classFqn"]]
+
             # --- EDGES ---
 
             # HAS_METHOD (Class → Method)
             has_method = [{"src": m["classFqn"], "dst": m["fqn"]} for m in methods]
+            has_method.extend(ext_has_method)
             self._batch_edges(progress, "HAS_METHOD", has_method, "Class", "fqn", "Method", "fqn")
 
             # HAS_FIELD (Class → Field)

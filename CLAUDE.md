@@ -56,6 +56,11 @@ pip install -e .
 Nodes: Class, Method, Field, SpringBean, Endpoint, Module, Annotation
 Edges: CALLS, EXTENDS, IMPLEMENTS, HAS_METHOD, HAS_FIELD, OVERRIDES, ANNOTATED_WITH, HANDLES, INJECTS
 
+Class and Method nodes have an `external` property:
+- `external: true` — library/JDK stubs (auto-created from resolved call targets, no source file)
+- `external: false` — implicit project constructors (class exists but default constructor wasn't exported by PSI)
+- unset — normal project code
+
 FQN formats:
 - Class: `com.example.MyService`
 - Method: `com.example.MyService#doWork(java.lang.String)`

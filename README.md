@@ -80,6 +80,7 @@ Copy the skill from `skills/onelens/` to `~/.claude/skills/onelens/` and ask nat
 | REST endpoints | 2,320 | `@RequestMapping/@GetMapping` etc. |
 | Spring injections | 7,854 | `@Autowired` + constructor injection |
 | Annotation usages | 68,396 | `PsiModifierList.getAnnotations()` |
+| External library stubs | 1,609 classes / 5,403 methods | Auto-created from resolved call targets |
 
 ## Architecture
 

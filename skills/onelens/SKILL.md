@@ -5,10 +5,11 @@ description: >
   Use this skill whenever the user asks about code impact, dependencies, call chains,
   blast radius, Spring bean wiring, REST endpoint tracing, inheritance hierarchies,
   or "what calls/uses this class/method". Also use when the user asks "what breaks if
-  I change X", "who depends on X", "trace this endpoint", or any question about code
-  relationships. Even if the user doesn't mention OneLens or graphs — if the question
-  is about understanding relationships between classes, methods, services, or endpoints
-  in the codebase, use this skill.
+  I change X", "who depends on X", "trace this endpoint", "what uses library X",
+  "blast radius of upgrading X", or any question about code relationships and external
+  library dependencies. Even if the user doesn't mention OneLens or graphs — if the
+  question is about understanding relationships between classes, methods, services,
+  endpoints, or library usage in the codebase, use this skill.
 ---
 
 # OneLens: Code Knowledge Graph
@@ -32,8 +33,8 @@ To find available graphs: `~/.onelens/venv/bin/onelens stats --graph <name>`
 
 | Label | Key Properties | Description |
 |-------|---------------|-------------|
-| Class | fqn, name, kind, filePath, packageName, superClass | Classes, interfaces, enums, records |
-| Method | fqn, name, classFqn, returnType, isConstructor, filePath, lineStart | Methods and constructors |
+| Class | fqn, name, kind, filePath, packageName, superClass, external | Classes, interfaces, enums, records. `external=true` for library classes |
+| Method | fqn, name, classFqn, returnType, isConstructor, filePath, lineStart, external | Methods and constructors. `external=true` for library methods |
 | Field | fqn, name, classFqn, type, filePath | Fields |
 | SpringBean | name, classFqn, scope, type | Spring-managed beans (SERVICE, COMPONENT, REPOSITORY, REST_CONTROLLER) |
 | Endpoint | id, path, httpMethod, handlerMethodFqn | REST API endpoints |
@@ -128,6 +129,43 @@ MATCH (target)-[:ANNOTATED_WITH]->(a)
 RETURN labels(target)[0] AS type, target.fqn AS element LIMIT 20
 ```
 
+### 9. External Library Usage — "What uses library X?" / "Blast radius of upgrading X?"
+
+Find all your code that calls a specific external library:
+
+```cypher
+MATCH (m:Method {external: true}) WHERE m.classFqn CONTAINS "quartz"
+MATCH (caller:Method)-[:CALLS]->(m)
+RETURN DISTINCT caller.classFqn AS your_class, m.classFqn + "#" + m.name AS library_api
+ORDER BY your_class LIMIT 30
+```
+
+List all external libraries indexed:
+
+```cypher
+MATCH (c:Class {external: true})
+WITH split(c.packageName, '.')[0] + '.' + split(c.packageName, '.')[1] AS lib, count(c) AS classes
+RETURN lib, classes ORDER BY classes DESC LIMIT 30
+```
+
+Find distinct project classes affected by a library:
+
+```cypher
+MATCH (m:Method {external: true}) WHERE m.classFqn CONTAINS "elasticsearch"
+MATCH (caller:Method)-[:CALLS]->(m)
+RETURN DISTINCT caller.classFqn AS affected_class ORDER BY affected_class
+```
+
+### 10. Unused Methods
+
+```cypher
+MATCH (m:Method)
+WHERE NOT EXISTS { MATCH ()-[:CALLS]->(m) }
+AND m.isConstructor = false AND m.external IS NULL
+AND m.name <> "toString" AND m.name <> "hashCode" AND m.name <> "equals"
+RETURN m.classFqn + "#" + m.name AS unused_method, m.filePath LIMIT 30
+```
+
 ## Approach
 
 1. Identify the question type from the patterns above
@@ -145,3 +183,5 @@ For broad questions like "tell me about X", combine multiple queries: class info
 - Exclude self-calls: `WHERE caller.classFqn <> c.fqn`
 - LIMIT results to 20-30 by default
 - FalkorDB variable-length paths (`[:EXTENDS*1..3]`) can be slow — use explicit multi-hop MATCH instead
+- External library nodes have `external: true` — filter them out when looking for project-only results
+- For library upgrade blast radius, search by library package name using `CONTAINS` on `classFqn`

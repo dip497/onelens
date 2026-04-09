@@ -70,6 +70,17 @@ What was tried, what failed, and what to avoid. Read this before making changes.
 - **Fix**: `content.encode('utf-8')[start:end].decode('utf-8')`
 - **Note**: No longer relevant since we moved to IntelliJ PSI, but important if tree-sitter is used elsewhere.
 
+### External library call targets need stub nodes
+- **Problem**: Call edges like `YourMethod → jersey.Client#target()` existed in the export JSON, but the library method had no node in the graph. FalkorDB's MATCH silently skipped them — 216K out of 605K CALLS edges were lost.
+- **Fix**: During Python import, scan all callee FQNs not in project methods. Create stub Class/Method nodes with `external: true`. Now all 605K edges connect.
+- **Gotcha**: Some "missing" callees are actually project classes with implicit default constructors that PSI doesn't export. These should be `external: false`, not `true`. Split by checking if the class FQN exists in the project class set.
+- **Rule**: After import, verify `MATCH ()-[r:CALLS]->() RETURN count(r)` matches the export's `callEdgeCount`. If not, stubs are missing.
+
+### Don't try to index transitive library dependencies in the graph
+- **Tried**: User asked "blast radius of upgrading Jersey?" — graph showed zero usage. But Jira SDK uses Jersey internally, and the project overrides the Jersey version in pom.xml.
+- **Problem**: The graph only sees your code → library calls. It can't see library → library dependencies (Jira → Jersey).
+- **Lesson**: This is a dependency management problem, not a code graph problem. Use `mvn dependency:tree` for transitive deps. Don't bolt dependency resolution onto the graph — Maven/Gradle already solve it. Stay focused: OneLens = code intelligence, not dependency management.
+
 ## What NOT to do
 
 1. **Don't query 57K methods one-by-one over HTTP/MCP**. We tried calling JetBrains MCP plugin's `ide_call_hierarchy` for each method. It crashed after hours. The MCP plugin is designed for interactive use, not bulk export.
