@@ -55,8 +55,13 @@ object ModuleCollector {
     }
 
     private fun detectBuildSystem(module: com.intellij.openapi.module.Module, basePath: String): String {
-        val modulePath = module.moduleFilePath
+        // Check at the module's own directory first, fall back to project root
+        val moduleDir = module.moduleFile?.parent?.path ?: basePath
         return when {
+            java.io.File("$moduleDir/build.gradle").exists() ||
+                java.io.File("$moduleDir/build.gradle.kts").exists() -> "GRADLE"
+            java.io.File("$moduleDir/pom.xml").exists() -> "MAVEN"
+            // Fall back to project root
             java.io.File("$basePath/build.gradle").exists() ||
                 java.io.File("$basePath/build.gradle.kts").exists() -> "GRADLE"
             java.io.File("$basePath/pom.xml").exists() -> "MAVEN"

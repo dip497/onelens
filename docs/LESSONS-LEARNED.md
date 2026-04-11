@@ -92,3 +92,15 @@ What was tried, what failed, and what to avoid. Read this before making changes.
 4. **Don't use `psiClass.interfaces`** for "directly implemented interfaces". It returns ALL interfaces including inherited ones. Use `psiClass.implementsListTypes` and resolve each.
 
 5. **Don't rely on `ChangeListManager` alone for delta detection**. It only shows uncommitted changes. Use `git diff` for committed changes since last export, plus ChangeListManager for uncommitted ones.
+
+6. **Don't use snake_case property names in Cypher queries**. The JSON export uses camelCase (`classFqn`, `filePath`, `httpMethod`, `lineStart`). FalkorDB stores properties exactly as imported. `m.class_fqn` returns null — use `m.classFqn`.
+
+7. **Don't use variable-length paths in FalkorDB queries** (e.g., `[:CALLS*1..3]`). It throws `Type mismatch: expected Path or Null but was List`. Use explicit multi-hop with UNION instead.
+
+8. **Don't use f-string interpolation in Cypher queries**. Use parameterized queries (`$param`) to prevent Cypher injection. Class names with quotes will break f-string queries.
+
+9. **Don't forget external stubs in delta imports**. Full import creates stub nodes for library methods. Delta import must also create stubs for any new external call targets, otherwise CALLS edges silently fail.
+
+10. **Don't append to file→class mapping in delta state**. When a file is re-exported, clear its old mapping first, then rebuild from the fresh collection. Otherwise stale FQNs accumulate and cause wrong deletions.
+
+11. **Inner class constructors**: `com.example.Outer$Inner` has constructor named `Inner`, not `Outer$Inner`. Split on `$` to get the simple name when checking `is_constructor`.

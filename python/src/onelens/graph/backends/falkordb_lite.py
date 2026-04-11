@@ -19,7 +19,7 @@ class FalkorDBLiteBackend(GraphDB):
         result = self._graph.query(cypher, params=params or {})
         rows = []
         if result.result_set:
-            columns = result.header
+            columns = [h[1] if isinstance(h, list) else h for h in result.header]
             for row in result.result_set:
                 rows.append(dict(zip(columns, row)))
         return rows

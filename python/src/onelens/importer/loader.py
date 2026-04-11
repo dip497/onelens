@@ -158,7 +158,11 @@ class GraphLoader:
             for fqn in ext_method_fqns:
                 class_fqn = fqn.split("#")[0] if "#" in fqn else ""
                 name = fqn.split("#")[1].split("(")[0] if "#" in fqn else fqn
-                is_constructor = name == class_fqn.split(".")[-1] if class_fqn else False
+                # Handle inner classes: com.example.Outer$Inner → constructor name is "Inner"
+                class_simple = class_fqn.split(".")[-1] if class_fqn else ""
+                if "$" in class_simple:
+                    class_simple = class_simple.split("$")[-1]
+                is_constructor = (name == class_simple) if class_fqn else False
                 is_project_class = class_fqn in project_class_fqns
                 node = {
                     "fqn": fqn, "name": name, "classFqn": class_fqn,
@@ -216,17 +220,14 @@ class GraphLoader:
                          for o in data.get("methodOverrides", [])]
             self._batch_edges(progress, "OVERRIDES", overrides, "Method", "fqn", "Method", "fqn")
 
-            # ANNOTATED_WITH
-            ann_edges = []
+            # ANNOTATED_WITH — group by source label in single pass
+            ann_groups = {"Class": [], "Method": [], "Field": []}
             for a in data.get("annotations", []):
                 kind = a.get("targetKind", "CLASS")
                 label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
-                ann_edges.append({"src": a["targetFqn"], "dst": a["annotationFqn"], "label": label})
-            # Group by source label for correct MATCH
-            for label in ["Class", "Method", "Field"]:
-                group = [e for e in ann_edges if e["label"] == label]
-                if group:
-                    edges = [{"src": e["src"], "dst": e["dst"]} for e in group]
+                ann_groups[label].append({"src": a["targetFqn"], "dst": a["annotationFqn"]})
+            for label, edges in ann_groups.items():
+                if edges:
                     self._batch_edges(progress, f"ANNOTATED_WITH ({label})", edges, label, "fqn", "Annotation", "fqn",
                                       rel_type="ANNOTATED_WITH")
 
@@ -305,14 +306,27 @@ class GraphLoader:
             CREATE (a)-[:{rt}]->(b)
         """
 
+        failed_count = 0
         task = progress.add_task(f"{desc}...", total=len(edges))
         for i in range(0, len(edges), EDGE_BATCH):
             batch = edges[i:i + EDGE_BATCH]
             try:
                 self.db.execute(query, {"batch": batch})
             except Exception as e:
-                logger.warning(f"Batch {desc} failed: {e}")
+                logger.warning(f"Batch {desc} failed, retrying individually: {e}")
+                for edge in batch:
+                    try:
+                        single_q = f"""
+                            MATCH (a:{src_label} {{{src_key}: $src}})
+                            MATCH (b:{dst_label} {{{dst_key}: $dst}})
+                            CREATE (a)-[:{rt}]->(b)
+                        """
+                        self.db.execute(single_q, {"src": edge["src"], "dst": edge["dst"]})
+                    except Exception:
+                        failed_count += 1
             progress.update(task, advance=len(batch))
+        if failed_count > 0:
+            logger.warning(f"{desc}: {failed_count} edges failed (missing nodes)")
 
     def _batch_edges_with_props(self, progress, desc: str, edges: list,
                                 src_label: str, src_key: str, dst_label: str, dst_key: str,
@@ -330,11 +344,26 @@ class GraphLoader:
             CREATE (a)-[:{rt} {{{prop_clause}}}]->(b)
         """
 
+        failed_count = 0
         task = progress.add_task(f"{desc}...", total=len(edges))
         for i in range(0, len(edges), EDGE_BATCH):
             batch = edges[i:i + EDGE_BATCH]
             try:
                 self.db.execute(query, {"batch": batch})
             except Exception as e:
-                logger.warning(f"Batch {desc} failed: {e}")
+                logger.warning(f"Batch {desc} failed, retrying individually: {e}")
+                for edge in batch:
+                    try:
+                        props_set = ", ".join(f"{p}: ${p}" for p in prop_names)
+                        single_q = f"""
+                            MATCH (a:{src_label} {{{src_key}: $src}})
+                            MATCH (b:{dst_label} {{{dst_key}: $dst}})
+                            CREATE (a)-[:{rt} {{{props_set}}}]->(b)
+                        """
+                        self.db.execute(single_q, {"src": edge["src"], "dst": edge["dst"],
+                                                    **{p: edge.get(p, "") for p in prop_names}})
+                    except Exception:
+                        failed_count += 1
             progress.update(task, advance=len(batch))
+        if failed_count > 0:
+            logger.warning(f"{desc}: {failed_count} edges failed (missing nodes)")

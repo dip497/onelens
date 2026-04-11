@@ -2,7 +2,7 @@ package com.onelens.plugin.export.collectors
 
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.logger
-import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
 import com.intellij.psi.search.GlobalSearchScope
@@ -53,18 +53,19 @@ object SpringCollector {
     )
 
     fun collect(project: Project): SpringData? {
-        return ReadAction.compute<SpringData?, Throwable> {
-            val facade = JavaPsiFacade.getInstance(project)
-            val scope = GlobalSearchScope.projectScope(project)
+        val beans = mutableListOf<SpringBean>()
+        val endpoints = mutableListOf<SpringEndpoint>()
+        val injections = mutableListOf<SpringInjection>()
 
-            val beans = mutableListOf<SpringBean>()
-            val endpoints = mutableListOf<SpringEndpoint>()
-            val injections = mutableListOf<SpringInjection>()
+        // Discover beans per annotation type — each in its own ReadAction to avoid IDE freezes
+        for ((annotationFqn, beanType) in BEAN_ANNOTATIONS) {
+            ProgressManager.checkCanceled()
 
-            // Discover beans via stereotype annotations
-            for ((annotationFqn, beanType) in BEAN_ANNOTATIONS) {
+            ReadAction.run<Throwable> {
+                val facade = JavaPsiFacade.getInstance(project)
+                val scope = GlobalSearchScope.projectScope(project)
                 val annotationClass = facade.findClass(annotationFqn, GlobalSearchScope.allScope(project))
-                    ?: continue
+                    ?: return@run
 
                 AnnotatedElementsSearch.searchPsiClasses(annotationClass, scope).forEach { psiClass ->
                     val classFqn = psiClass.qualifiedName ?: return@forEach
@@ -76,24 +77,22 @@ object SpringCollector {
                         type = beanType
                     ))
 
-                    // Find @Autowired fields → injections
                     collectInjections(psiClass, classFqn, injections)
 
-                    // Find endpoints on controllers
                     if (beanType in listOf("CONTROLLER", "REST_CONTROLLER")) {
                         collectEndpoints(psiClass, classFqn, endpoints)
                     }
                 }
             }
-
-            if (beans.isEmpty()) {
-                LOG.info("No Spring beans found")
-                return@compute null
-            }
-
-            LOG.info("Collected ${beans.size} beans, ${endpoints.size} endpoints, ${injections.size} injections")
-            SpringData(beans = beans, endpoints = endpoints, injections = injections)
         }
+
+        if (beans.isEmpty()) {
+            LOG.info("No Spring beans found")
+            return null
+        }
+
+        LOG.info("Collected ${beans.size} beans, ${endpoints.size} endpoints, ${injections.size} injections")
+        return SpringData(beans = beans, endpoints = endpoints, injections = injections)
     }
 
     private fun collectInjections(

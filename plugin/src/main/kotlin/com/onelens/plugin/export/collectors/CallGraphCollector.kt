@@ -33,25 +33,29 @@ object CallGraphCollector {
                     for (classData in chunk) {
                         ProgressManager.checkCanceled()
 
-                        val classEdges = ReadAction.compute<List<CallEdge>, Throwable> {
-                            val facade = JavaPsiFacade.getInstance(project)
-                            val scope = GlobalSearchScope.projectScope(project)
-                            val psiClass = facade.findClass(classData.fqn, scope)
-                                ?: return@compute emptyList()
-                            val batch = mutableListOf<CallEdge>()
+                        try {
+                            val classEdges = ReadAction.compute<List<CallEdge>, Throwable> {
+                                val facade = JavaPsiFacade.getInstance(project)
+                                val scope = GlobalSearchScope.projectScope(project)
+                                val psiClass = facade.findClass(classData.fqn, scope)
+                                    ?: return@compute emptyList()
+                                val batch = mutableListOf<CallEdge>()
 
-                            for (method in psiClass.methods) {
-                                if (method.containingClass != psiClass) continue
-                                val body = method.body ?: continue
-                                val callerFqn = buildMethodFqn(method, classData.fqn)
+                                for (method in psiClass.methods) {
+                                    if (method.containingClass != psiClass) continue
+                                    val body = method.body ?: continue
+                                    val callerFqn = buildMethodFqn(method, classData.fqn)
 
-                                collectMethodCalls(body, callerFqn, classData.filePath, project, batch)
-                                collectConstructorCalls(body, callerFqn, classData.filePath, project, batch)
-                                collectMethodReferences(body, callerFqn, classData.filePath, project, batch)
+                                    collectMethodCalls(body, callerFqn, classData.filePath, project, batch)
+                                    collectConstructorCalls(body, callerFqn, classData.filePath, project, batch)
+                                    collectMethodReferences(body, callerFqn, classData.filePath, project, batch)
+                                }
+                                batch
                             }
-                            batch
+                            allEdges.addAll(classEdges)
+                        } catch (e: Exception) {
+                            LOG.warn("Failed to collect call edges for ${classData.fqn}: ${e.message}")
                         }
-                        allEdges.addAll(classEdges)
                     }
                 }
             }

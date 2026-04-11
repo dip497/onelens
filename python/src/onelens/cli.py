@@ -102,9 +102,11 @@ def query(cypher: str, graph: str, backend: str, db_path: str):
         table = Table()
         for col in result[0].keys():
             table.add_column(col)
-        for row in result[:50]:
+        for row in result[:100]:
             table.add_row(*[str(v) for v in row.values()])
         console.print(table)
+        if len(result) > 100:
+            console.print(f"[dim]... {len(result) - 100} more rows (showing 100/{len(result)})[/dim]")
     else:
         console.print("[dim]No results[/dim]")
 

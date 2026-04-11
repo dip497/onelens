@@ -82,7 +82,7 @@ object ClassCollector {
             packageName = (psiClass.containingFile as? PsiJavaFile)?.packageName ?: "",
             enclosingClass = psiClass.containingClass?.qualifiedName,
             superClass = psiClass.superClass?.qualifiedName?.takeIf { it != "java.lang.Object" },
-            interfaces = psiClass.interfaces.mapNotNull { it.qualifiedName },
+            interfaces = psiClass.implementsListTypes.mapNotNull { it.resolve()?.qualifiedName },
             annotations = extractAnnotations(psiClass.modifierList)
         )
     }

@@ -104,9 +104,9 @@ object DeltaExportService {
 
         // We track file→classes mapping in state.fileHashes (key=filePath, value=comma-separated FQNs)
         for (deletedFile in changedFiles.deleted) {
-            val classFqns = state.state.fileHashes[deletedFile]?.split(",") ?: continue
+            val classFqns = state.state.fileHashes[deletedFile]
+                ?.split(",")?.filter { it.isNotEmpty() } ?: continue
             deletedClasses.addAll(classFqns)
-            // Methods and fields will be cascade-deleted when their class is deleted
         }
 
         // 3. For modified files: re-collect classes in those files
@@ -122,7 +122,8 @@ object DeltaExportService {
 
         // Also add modified files' old classes to deleted (they'll be replaced by upserted)
         for (modifiedFile in changedFiles.modified) {
-            val oldClassFqns = state.state.fileHashes[modifiedFile]?.split(",") ?: continue
+            val oldClassFqns = state.state.fileHashes[modifiedFile]
+                ?.split(",")?.filter { it.isNotEmpty() } ?: continue
             deletedClasses.addAll(oldClassFqns)
         }
 
@@ -171,14 +172,17 @@ object DeltaExportService {
         state.state.lastExportPath = outputFile.toString()
         if (newHash.isNotEmpty()) state.state.lastGitHash = newHash
 
-        // Update file→classes mapping for affected files
-        for (cls in affectedClasses) {
-            val existing = state.state.fileHashes.getOrDefault(cls.filePath, "")
-            val fqns = if (existing.isEmpty()) cls.fqn else "$existing,${cls.fqn}"
-            state.state.fileHashes[cls.filePath] = fqns
+        // Update file→classes mapping: clear modified files first, then rebuild from fresh collection
+        for (modifiedFile in changedFiles.modified) {
+            state.state.fileHashes.remove(modifiedFile)
         }
         for (deletedFile in changedFiles.deleted) {
             state.state.fileHashes.remove(deletedFile)
+        }
+        // Rebuild mapping from freshly collected classes
+        for (cls in affectedClasses) {
+            val existing = state.state.fileHashes.getOrDefault(cls.filePath, "")
+            state.state.fileHashes[cls.filePath] = if (existing.isEmpty()) cls.fqn else "$existing,${cls.fqn}"
         }
 
         LOG.info("Delta export complete: $outputFile (${durationMs}ms)")
@@ -198,7 +202,7 @@ object DeltaExportService {
         val fs = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
 
         for (relativePath in filePaths) {
-            val absolutePath = "$basePath/$relativePath"
+            val absolutePath = java.nio.file.Paths.get(basePath, relativePath).toString()
             val virtualFile = fs.findFileByPath(absolutePath) ?: continue
             val psiFile = psiManager.findFile(virtualFile) as? PsiJavaFile ?: continue
 
@@ -218,7 +222,7 @@ object DeltaExportService {
                     packageName = psiFile.packageName,
                     enclosingClass = psiClass.containingClass?.qualifiedName,
                     superClass = psiClass.superClass?.qualifiedName?.takeIf { it != "java.lang.Object" },
-                    interfaces = psiClass.interfaces.mapNotNull { it.qualifiedName },
+                    interfaces = psiClass.implementsListTypes.mapNotNull { it.resolve()?.qualifiedName },
                     annotations = ClassCollector.extractAnnotations(psiClass.modifierList)
                 ))
 
