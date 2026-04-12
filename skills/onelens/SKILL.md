@@ -166,6 +166,50 @@ AND m.name <> "toString" AND m.name <> "hashCode" AND m.name <> "equals"
 RETURN m.classFqn + "#" + m.name AS unused_method, m.filePath LIMIT 30
 ```
 
+### 11. Semantic Search — "Find code by description"
+
+```bash
+~/.onelens/venv/bin/onelens search "User*" --graph <project-name>               # prefix match
+~/.onelens/venv/bin/onelens search "auth" --type method --graph <project-name>   # methods only
+~/.onelens/venv/bin/onelens search "/api/users" --type endpoint --graph <project-name>
+```
+
+Or via raw Cypher:
+```cypher
+CALL db.idx.fulltext.queryNodes('Class', 'User*') YIELD node
+RETURN node.fqn, node.name, node.filePath LIMIT 20
+```
+
+### 12. Endpoint Impact — "Which APIs break if I change this method?"
+
+**This is the most useful command for PR review and impact analysis.**
+
+```bash
+~/.onelens/venv/bin/onelens impact "com.example.UserService#updateUser(CallContext,long,UserRest)" --graph <project-name>
+```
+
+Output: only the affected REST endpoints, not raw callers.
+```
+PATCH /api/users/{id}  →  UserController.updateUser  UserController.java:56  (1 hops)
+POST /api/admin/users/bulk  →  AdminController.bulkUpdate  AdminController.java:89  (2 hops)
+3 endpoints affected
+```
+
+Use `--json` for structured output when processing programmatically.
+
+### 13. Execution Flow Trace — "What does this endpoint do end-to-end?"
+
+Forward trace (for understanding code flow):
+```bash
+~/.onelens/venv/bin/onelens trace "/api/users" --type endpoint --depth 3 --graph <project-name>
+~/.onelens/venv/bin/onelens trace "com.example.UserService#create(CallContext,UserRest)" --depth 3 --graph <project-name>
+```
+
+List all entry points:
+```bash
+~/.onelens/venv/bin/onelens entry-points --graph <project-name>
+```
+
 ## Approach
 
 1. Identify the question type from the patterns above

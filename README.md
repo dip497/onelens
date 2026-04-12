@@ -45,13 +45,24 @@ First time, the plugin will:
 
 Subsequent syncs detect changes and do delta imports (seconds).
 
-### 4. Query
+### 4. Query & Analyze
 
 ```bash
-# What calls UserServiceImpl?
-~/.onelens/venv/bin/onelens query \
-  "MATCH (c:Class {name: 'MyService'})-[:HAS_METHOD]->(m) MATCH (caller:Method)-[:CALLS]->(m) RETURN caller.classFqn, m.name LIMIT 10" \
-  --graph my-project
+# Search by name (full-text, supports prefix and fuzzy)
+~/.onelens/venv/bin/onelens search "User*" --graph my-project
+~/.onelens/venv/bin/onelens search "authenticate" --type method --graph my-project
+
+# Which REST endpoints break if I change this method?
+~/.onelens/venv/bin/onelens impact "com.example.UserService#updateUser(CallContext,long,UserRest)" --graph my-project
+
+# Trace endpoint execution flow
+~/.onelens/venv/bin/onelens trace "/api/users" --type endpoint --depth 3 --graph my-project
+
+# List all entry points (REST endpoints, scheduled jobs)
+~/.onelens/venv/bin/onelens entry-points --graph my-project
+
+# Raw Cypher
+~/.onelens/venv/bin/onelens query "MATCH (c:Class {name: 'MyService'})-[:HAS_METHOD]->(m) RETURN m.name LIMIT 10" --graph my-project
 
 # Stats
 ~/.onelens/venv/bin/onelens stats --graph my-project
@@ -63,8 +74,9 @@ Copy the skill from `skills/onelens/` to `~/.claude/skills/onelens/` and ask nat
 
 - "what calls UserServiceImpl?"
 - "blast radius of changing OrderService"
+- "which endpoints break if I change FlotoBaseService?"
 - "trace the /api/orders endpoint"
-- "what depends on BaseServiceImpl?"
+- "search for methods related to schedule"
 
 ## What gets exported
 

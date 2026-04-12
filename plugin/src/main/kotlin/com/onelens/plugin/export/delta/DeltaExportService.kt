@@ -80,7 +80,6 @@ object DeltaExportService {
      * @return Path to delta JSON file, or null if no changes detected
      */
     fun exportDelta(project: Project, config: ExportConfig): DeltaResult {
-        val startTime = System.currentTimeMillis()
         val basePath = project.basePath ?: return DeltaResult.Error("No project base path")
         val state = ExportState.getInstance(project)
 
@@ -95,7 +94,28 @@ object DeltaExportService {
             return DeltaResult.NoChanges
         }
 
-        LOG.info("Delta: ${changedFiles.modified.size} modified, ${changedFiles.deleted.size} deleted files")
+        return exportDeltaForFiles(project, config, changedFiles.modified, changedFiles.deleted)
+    }
+
+    /**
+     * Export delta for a specific list of changed files.
+     * Called by exportDelta() and by AutoSyncService.
+     */
+    fun exportDeltaForFiles(
+        project: Project,
+        config: ExportConfig,
+        modifiedFiles: List<String>,
+        deletedFiles: List<String> = emptyList()
+    ): DeltaResult {
+        val startTime = System.currentTimeMillis()
+        val basePath = project.basePath ?: return DeltaResult.Error("No project base path")
+        val state = ExportState.getInstance(project)
+
+        if (state.state.lastExportTimestamp == 0L) {
+            return DeltaResult.NeedFullExport("No previous export — full export needed first")
+        }
+
+        LOG.info("Delta: ${modifiedFiles.size} modified, ${deletedFiles.size} deleted files")
 
         // 2. For deleted files: find what classes were in them (from file hashes map keys)
         val deletedClasses = mutableListOf<String>()
@@ -103,7 +123,7 @@ object DeltaExportService {
         val deletedFields = mutableListOf<String>()
 
         // We track file→classes mapping in state.fileHashes (key=filePath, value=comma-separated FQNs)
-        for (deletedFile in changedFiles.deleted) {
+        for (deletedFile in deletedFiles) {
             val classFqns = state.state.fileHashes[deletedFile]
                 ?.split(",")?.filter { it.isNotEmpty() } ?: continue
             deletedClasses.addAll(classFqns)
@@ -111,7 +131,7 @@ object DeltaExportService {
 
         // 3. For modified files: re-collect classes in those files
         val affectedClasses = ReadAction.compute<List<ClassData>, Throwable> {
-            collectClassesFromFiles(project, changedFiles.modified, basePath)
+            collectClassesFromFiles(project, modifiedFiles, basePath)
         }
 
         // 4. Collect members, calls, inheritance for affected classes
@@ -121,7 +141,7 @@ object DeltaExportService {
         val annotations = AnnotationCollector.collect(project, affectedClasses)
 
         // Also add modified files' old classes to deleted (they'll be replaced by upserted)
-        for (modifiedFile in changedFiles.modified) {
+        for (modifiedFile in modifiedFiles) {
             val oldClassFqns = state.state.fileHashes[modifiedFile]
                 ?.split(",")?.filter { it.isNotEmpty() } ?: continue
             deletedClasses.addAll(oldClassFqns)
@@ -134,7 +154,7 @@ object DeltaExportService {
             version = OneLensConstants.EXPORT_VERSION,
             timestamp = java.time.Instant.now().toString(),
             basedOnTimestamp = java.time.Instant.ofEpochMilli(state.state.lastExportTimestamp).toString(),
-            changedFiles = changedFiles.modified + changedFiles.deleted,
+            changedFiles = modifiedFiles + deletedFiles,
             deleted = DeletedSection(
                 classes = deletedClasses.distinct(),
                 methods = deletedMethods,
@@ -150,7 +170,7 @@ object DeltaExportService {
                 annotations = annotations,
             ),
             stats = DeltaStats(
-                changedFileCount = changedFiles.totalChanges,
+                changedFileCount = modifiedFiles.size + deletedFiles.size,
                 deletedClassCount = deletedClasses.distinct().size,
                 upsertedClassCount = affectedClasses.size,
                 upsertedMethodCount = members.methods.size,
@@ -173,10 +193,10 @@ object DeltaExportService {
         if (newHash.isNotEmpty()) state.state.lastGitHash = newHash
 
         // Update file→classes mapping: clear modified files first, then rebuild from fresh collection
-        for (modifiedFile in changedFiles.modified) {
+        for (modifiedFile in modifiedFiles) {
             state.state.fileHashes.remove(modifiedFile)
         }
-        for (deletedFile in changedFiles.deleted) {
+        for (deletedFile in deletedFiles) {
             state.state.fileHashes.remove(deletedFile)
         }
         // Rebuild mapping from freshly collected classes

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from onelens.graph.db import GraphDB
-from onelens.importer.schema import NODE_SCHEMA
+from onelens.importer.schema import NODE_SCHEMA, FULLTEXT_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,15 @@ class GraphLoader:
             # Create indexes (idempotent)
             task = progress.add_task("Creating indexes...", total=len(NODE_SCHEMA))
             for i, (name, ddl) in enumerate(NODE_SCHEMA.items()):
+                try:
+                    self.db.execute(ddl)
+                except Exception:
+                    pass  # Index already exists
+                progress.update(task, completed=i + 1)
+
+            # Create full-text search indexes (idempotent)
+            task = progress.add_task("Creating full-text indexes...", total=len(FULLTEXT_SCHEMA))
+            for i, (name, ddl) in enumerate(FULLTEXT_SCHEMA.items()):
                 try:
                     self.db.execute(ddl)
                 except Exception:

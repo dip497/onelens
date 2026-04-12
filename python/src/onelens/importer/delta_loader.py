@@ -227,6 +227,14 @@ class DeltaLoader:
                 MERGE (a)-[:OVERRIDES]->(b)
             """, {"batch": batch})
 
+        # 9. Ensure full-text search indexes exist (idempotent)
+        from onelens.importer.schema import FULLTEXT_SCHEMA
+        for ddl in FULLTEXT_SCHEMA.values():
+            try:
+                self.db.execute(ddl)
+            except Exception:
+                pass
+
         stats = data.get("stats", {})
         logger.info(f"Delta applied: {stats}")
         return stats

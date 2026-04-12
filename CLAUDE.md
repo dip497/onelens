@@ -28,6 +28,9 @@ Two components in a monorepo:
 - **Small ReadAction blocks**: Each class processed in its own ReadAction to avoid IDE freezes. Call graph uses parallel threads (half CPU cores).
 - **UNWIND batching**: Import uses Cypher UNWIND for batch inserts. 980K edges in 30 seconds.
 - **Smart sync**: Plugin detects changes via git diff + VCS ChangeListManager. Full export on first run, delta on subsequent runs.
+- **Auto-sync**: Optional — BulkFileListener detects .java file saves, debounces 5s, runs delta export+import in background. Toggle via Tools → OneLens → Toggle Auto-Sync.
+- **Full-text search**: FalkorDB FTS indexes on Class.name, Method.name, Endpoint.path. Supports prefix (`User*`), fuzzy (`%auth%1`).
+- **Endpoint impact**: Reverse trace from any method UP through callers to find affected REST endpoints. Key command for PR review.
 
 ## Building
 
@@ -66,11 +69,26 @@ FQN formats:
 - Method: `com.example.MyService#doWork(java.lang.String)`
 - Field: `com.example.MyService#repository`
 
-## Testing queries
+## CLI Commands
 
 ```bash
-onelens query "MATCH (c:Class) RETURN c.name, c.kind LIMIT 10" --graph <name>
-onelens stats --graph <name>
+# Core
+onelens import <json> --graph <name> --clear    # Full import (auto-detects delta)
+onelens stats --graph <name>                     # Node/edge counts
+onelens query "<cypher>" --graph <name>          # Raw Cypher query
+
+# Search (full-text, supports prefix User*, fuzzy %auth%1)
+onelens search "User*" --type class --graph <name>
+onelens search "authenticate" --type method --graph <name>
+
+# Impact analysis (key command for PR review)
+onelens impact "<method_fqn>" --graph <name>     # Which REST endpoints break if this changes?
+onelens impact "<method_fqn>" --json --graph <name>  # JSON output for AI consumption
+
+# Execution flow tracing
+onelens trace "/api/users" --type endpoint --depth 3 --graph <name>   # Forward: endpoint → service → repo
+onelens trace "<method_fqn>" --depth 3 --graph <name>                 # Forward from method
+onelens entry-points --graph <name>              # List all REST endpoints, @Scheduled, main()
 ```
 
 ## File layout
@@ -94,12 +112,17 @@ plugin/src/main/kotlin/com/onelens/plugin/
 │       ├── DeltaTracker.kt       # git diff + VCS change detection
 │       └── DeltaExportService.kt # Delta JSON export
 ├── actions/
-│   └── ExportFullAction.kt       # "Sync Graph" menu action (smart full/delta)
+│   ├── ExportFullAction.kt       # "Sync Graph" menu action (smart full/delta)
+│   └── ToggleAutoSyncAction.kt   # Toggle auto-sync on/off
+├── autosync/
+│   ├── AutoSyncService.kt        # Debounced background sync on file save
+│   ├── AutoSyncFileListener.kt   # VFS listener for .java file changes
+│   └── AutoSyncStartupActivity.kt # Enable auto-sync on project open
 └── settings/
-    └── OneLensSettings.kt
+    └── OneLensSettings.kt        # Includes autoSyncEnabled, autoSyncDebounceMs
 
 python/src/onelens/
-├── cli.py                         # Click CLI (import, query, stats, serve)
+├── cli.py                         # Click CLI (import, query, stats, search, trace, impact, entry-points, serve)
 ├── importer/
 │   ├── loader.py                  # UNWIND batch import with rich progress
 │   ├── delta_loader.py            # Delta import (delete + upsert)
@@ -107,8 +130,8 @@ python/src/onelens/
 ├── graph/
 │   ├── db.py                      # Abstract GraphDB interface + factory
 │   ├── backends/                  # Pluggable: falkordb, falkordblite, neo4j
-│   ├── queries.py                 # Pre-built Cypher for impact analysis
-│   └── analysis.py                # Blast radius, caller/callee traversal
+│   ├── queries.py                 # Pre-built Cypher: search, trace, impact, callers/callees
+│   └── analysis.py                # Blast radius, flow tracing, endpoint impact, search
 └── mcp/
     └── server.py                  # FastMCP server for AI tools
 ```

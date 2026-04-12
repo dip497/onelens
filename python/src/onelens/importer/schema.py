@@ -14,6 +14,13 @@ NODE_SCHEMA = {
     "Annotation": "CREATE INDEX FOR (n:Annotation) ON (n.fqn)",
 }
 
+# Full-text search indexes — FalkorDB CALL procedure syntax
+FULLTEXT_SCHEMA = {
+    "Class_name": "CALL db.idx.fulltext.createNodeIndex('Class', 'name')",
+    "Method_name": "CALL db.idx.fulltext.createNodeIndex('Method', 'name')",
+    "Endpoint_path": "CALL db.idx.fulltext.createNodeIndex('Endpoint', 'path')",
+}
+
 # Relationship types — no DDL needed for FalkorDB/Neo4j (edges are schemaless)
 # These are documented here for reference and used by the loader
 REL_SCHEMA = {

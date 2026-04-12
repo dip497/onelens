@@ -15,6 +15,8 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         var includeSpring: Boolean = true,
         var includeDiagnostics: Boolean = false,
         var excludeTestSources: Boolean = false,
+        var autoSyncEnabled: Boolean = false,
+        var autoSyncDebounceMs: Int = 5000,
     )
 
     private var state = State()

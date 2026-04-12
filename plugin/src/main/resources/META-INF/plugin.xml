@@ -19,8 +19,17 @@
             serviceImplementation="com.onelens.plugin.settings.OneLensSettings"/>
         <projectService
             serviceImplementation="com.onelens.plugin.export.ExportState"/>
+        <projectService
+            serviceImplementation="com.onelens.plugin.autosync.AutoSyncService"/>
+        <postStartupActivity
+            implementation="com.onelens.plugin.autosync.AutoSyncStartupActivity"/>
         <notificationGroup id="OneLens" displayType="BALLOON"/>
     </extensions>
+
+    <applicationListeners>
+        <listener class="com.onelens.plugin.autosync.AutoSyncFileListener"
+                  topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+    </applicationListeners>
 
     <actions>
         <group id="OneLens.Actions" text="OneLens" popup="true">
@@ -28,6 +37,10 @@
                 class="com.onelens.plugin.actions.ExportFullAction"
                 text="Sync Graph"
                 description="Smart sync — auto-detects changes, exports full or delta as needed"/>
+            <action id="OneLens.ToggleAutoSync"
+                class="com.onelens.plugin.actions.ToggleAutoSyncAction"
+                text="Toggle Auto-Sync"
+                description="Enable/disable automatic graph sync on file save"/>
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </group>
     </actions>
