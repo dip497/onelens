@@ -166,18 +166,47 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
                     }
                     is OneLensEvent.Progress -> logLine("[${(event.fraction * 100).toInt()}%] ${event.label}", ConsoleViewContentType.LOG_INFO_OUTPUT)
                     is OneLensEvent.SyncComplete -> {
+                        // Render counts per active adapter. On Java-only projects
+                        // we show the classes/methods/edges line; Vue-only projects
+                        // showed "0 classes · 0 methods" before, which looked like
+                        // a silent failure. Composite projects show both.
+                        val summary = buildSyncSummary(event)
                         logLine(
-                            "Sync complete (${if (event.isDelta) "delta" else "full"}): " +
-                                "${event.classes} classes · ${event.methods} methods · ${event.callEdges} edges · ${event.durationMs}ms",
+                            "Sync complete (${if (event.isDelta) "delta" else "full"}) · $summary · ${event.durationMs}ms",
                             ConsoleViewContentType.LOG_INFO_OUTPUT,
                         )
                         lastSyncInfo = "Last sync: ${if (event.isDelta) "delta" else "full"} — " +
-                            "${event.classes} classes · ${event.methods} methods · ${event.callEdges} edges · ${event.durationMs}ms"
+                            "$summary · ${event.durationMs}ms"
                         refreshAsync()
                     }
                 }
             }
         })
+    }
+
+    /**
+     * Build a per-adapter "X classes · Y methods" summary from a SyncComplete
+     * event. Shows JVM counts only on Java-only projects, Vue counts only on
+     * Vue-only projects, both on composite projects. Stops showing the
+     * "0 classes · 0 methods" line on frontend-only syncs that used to look
+     * like a silent failure.
+     */
+    private fun buildSyncSummary(e: OneLensEvent.SyncComplete): String {
+        val parts = mutableListOf<String>()
+        val adapters = e.activeAdapters
+        val hasJvm = adapters.contains("spring-boot") || e.classes > 0 || e.methods > 0 || e.callEdges > 0
+        val hasVue = adapters.contains("vue3") || e.vueNodes > 0 || e.jsModules > 0
+        if (hasJvm) {
+            parts += "${e.classes} classes · ${e.methods} methods · ${e.callEdges} edges"
+        }
+        if (hasVue) {
+            parts += "${e.vueNodes} Vue nodes · ${e.vueEdges} Vue edges" +
+                if (e.jsModules > 0) " · ${e.jsModules} modules · ${e.jsFunctions} fns" else ""
+        }
+        if (parts.isEmpty()) {
+            parts += "${e.classes} classes · ${e.methods} methods · ${e.callEdges} edges"
+        }
+        return parts.joinToString(" · ")
     }
 
     private fun logLine(text: String, type: ConsoleViewContentType) {

@@ -35,9 +35,18 @@ sealed class OneLensEvent(val timestampMs: Long = System.currentTimeMillis()) {
     /** Progress inside a long-running op (install, embedding pass). */
     class Progress(val label: String, val fraction: Double) : OneLensEvent()
 
-    /** A sync completed — the tool window refreshes graph stats. */
+    /**
+     * A sync completed — the tool window refreshes graph stats. JVM counts
+     * (`classes` / `methods` / `callEdges`) are zero for Vue-only projects;
+     * `vueNodes` / `vueEdges` summarize the Vue3 adapter contribution so the
+     * console log and status strip never display the misleading "0 classes ·
+     * 0 methods" line on frontend-only syncs.
+     */
     class SyncComplete(val graphName: String, val classes: Int, val methods: Int,
-                       val callEdges: Int, val isDelta: Boolean, val durationMs: Long) : OneLensEvent()
+                       val callEdges: Int, val isDelta: Boolean, val durationMs: Long,
+                       val vueNodes: Int = 0, val vueEdges: Int = 0,
+                       val jsModules: Int = 0, val jsFunctions: Int = 0,
+                       val activeAdapters: List<String> = emptyList()) : OneLensEvent()
 }
 
 enum class OneLensState { UNKNOWN, SETTING_UP, READY, SYNCING, ERROR }

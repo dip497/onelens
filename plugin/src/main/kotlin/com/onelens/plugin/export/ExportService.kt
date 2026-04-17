@@ -177,6 +177,12 @@ class ExportService {
 
         LOG.info("Full export complete: $outputFile (${durationMs}ms)")
         publish(OneLensEvent.Info("Full export complete: $outputFile (${durationMs}ms)"))
+        val v = document.vue3
+        val vueNodeCount = (v?.components?.size ?: 0) + (v?.composables?.size ?: 0) +
+            (v?.stores?.size ?: 0) + (v?.routes?.size ?: 0) + (v?.apiCalls?.size ?: 0)
+        val vueEdgeCount = (v?.usesStore?.size ?: 0) + (v?.usesComposable?.size ?: 0) +
+            (v?.dispatches?.size ?: 0) + (v?.callsApi?.size ?: 0) +
+            (v?.imports?.size ?: 0)
         publish(OneLensEvent.SyncComplete(
             graphName = project.name,
             classes = document.stats.classCount,
@@ -184,6 +190,11 @@ class ExportService {
             callEdges = document.stats.callEdgeCount,
             isDelta = false,
             durationMs = durationMs,
+            vueNodes = vueNodeCount,
+            vueEdges = vueEdgeCount,
+            jsModules = v?.modules?.size ?: 0,
+            jsFunctions = v?.functions?.size ?: 0,
+            activeAdapters = document.adapters,
         ))
 
         // Auto-import into graph DB if onelens CLI is available
