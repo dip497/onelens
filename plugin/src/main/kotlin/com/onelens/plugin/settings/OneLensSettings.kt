@@ -23,6 +23,10 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         // one-time onboarding balloon on the first project open with the
         // plugin installed. Reset only by deleting onelens-settings.xml.
         var firstRunComplete: Boolean = false,
+        // Vue 3 adapter override. null = auto-detect (default); true/false force on/off.
+        // Stored as String so kotlinx-serialization-style nulls survive round-trip
+        // through IntelliJ's XmlSerializer, which treats Boolean? fields inconsistently.
+        var vueAdapterOverride: String = "auto",
     )
 
     private var state = State()
@@ -32,6 +36,17 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
     override fun loadState(state: State) {
         this.state = state
     }
+
+    /**
+     * Vue 3 adapter override as a Boolean (null = auto-detect). Thin accessor over
+     * [State.vueAdapterOverride] so callers don't have to parse the stored string.
+     */
+    val vueAdapterEnabled: Boolean?
+        get() = when (state.vueAdapterOverride.lowercase()) {
+            "on", "true", "yes" -> true
+            "off", "false", "no" -> false
+            else -> null
+        }
 
     companion object {
         fun getInstance(): OneLensSettings =

@@ -39,9 +39,22 @@ dependencies {
         pluginVerifier()
         create(providers.gradleProperty("platformType"), providers.gradleProperty("platformVersion"))
         bundledPlugins(providers.gradleProperty("platformBundledPlugins").map { it.split(',') })
-        plugins(providers.gradleProperty("platformPlugins").map { it.split(',') })
+        plugins(providers.gradleProperty("platformPlugins").map { it.split(',').filter(String::isNotBlank) })
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })
         testFramework(TestFrameworkType.Platform)
+
+        // Marketplace plugins whose exact build id we don't want to pin. The Gradle plugin
+        // queries JetBrains Marketplace for a version compatible with the current
+        // platformVersion at configuration time. See:
+        // https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-dependencies-extension.html
+        //
+        // These are optional at runtime (config-file split in plugin.xml); the plugin still
+        // installs into IDEs that lack them.
+        compatiblePlugins(
+            providers.gradleProperty("platformCompatiblePlugins")
+                .map { it.split(',').filter(String::isNotBlank) }
+                .orElse(emptyList())
+        )
     }
 }
 
@@ -77,15 +90,38 @@ tasks {
         gradleVersion = providers.gradleProperty("gradleVersion").get()
     }
 
-    // Bundle the OneLens skill into the plugin JAR so `InstallSkillAction`
-    // can ship it to ~/.claude/skills/onelens/SKILL.md without requiring
-    // users to have the repo checked out. Source: skills/onelens/SKILL.md
-    // at the project root (one level above plugin/). Runs on every build;
-    // processResources copies it into the jar under /skills/onelens/SKILL.md.
+    // Bundle the OneLens skill (SKILL.md + references/*.md) into the plugin JAR
+    // so `InstallSkillAction` can ship it to ~/.claude/skills/onelens/ without
+    // requiring users to have the repo checked out. Source: skills/onelens/ at
+    // the project root (one level above plugin/). Runs on every build;
+    // processResources copies the whole directory into the jar under /skills/onelens/.
     processResources {
         from("${project.rootDir.parent}/skills") {
             into("skills")
             include("onelens/SKILL.md")
+            include("onelens/references/**")
+        }
+        // Bundle the Python source tree so PythonEnvManager can install
+        // onelens[context] into a fresh venv on a machine with no repo
+        // checked out and no PyPI release. Extracted on first sync to
+        // ~/.onelens/source/ and installed via `uv pip install -e`.
+        // Exclude build artifacts, caches, and local-only dev files.
+        from("${project.rootDir.parent}/python") {
+            into("python")
+            exclude(
+                "**/.venv/**",
+                "**/__pycache__/**",
+                "**/*.egg-info/**",
+                "**/.pytest_cache/**",
+                "**/.mypy_cache/**",
+                "**/.ruff_cache/**",
+                "**/dist/**",
+                "**/build/**",
+                "**/*.pyc",
+                "benchmarks/**",
+                "trial_*.py",
+                "modal_index*.py",
+            )
         }
     }
 }

@@ -132,6 +132,14 @@ class CodeMiner:
         stats["classes"] = self._mine_classes(data)
         stats["endpoints"] = self._mine_endpoints(data)
 
+        # Vue 3 — additive: only runs when the export carries a vue3 subdoc.
+        # Drawers share the metadata schema with Java nodes (wing/room/hall/fqn/
+        # type/importance/filed_at) so retrieval's wing+room filters work.
+        if data.get("vue3"):
+            stats["vue_components"] = self._mine_vue_components(data["vue3"])
+            stats["vue_composables"] = self._mine_vue_composables(data["vue3"])
+            stats["vue_stores"] = self._mine_vue_stores(data["vue3"])
+
         total_time = time.time() - t0
         total_drawers = sum(stats.values())
         print(f"\nDone! {total_drawers} drawers in {total_time:.1f}s "
@@ -825,4 +833,137 @@ class CodeMiner:
 
         elapsed = time.time() - t_start
         print(f"  Endpoints done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    # ── Vue 3 ─────────────────────────────────────────────────────────────
+    #
+    # Separate mining pass for Vue nodes. Kept small on purpose — just enough
+    # to let semantic retrieval find components/stores/composables by intent.
+    # The Kotlin side already truncated `body` fields to 2000 chars.
+
+    def _vue_room(self, file_path: str) -> str:
+        """Relative directory path used as the drawer's `room` metadata key."""
+        if not file_path:
+            return ""
+        norm = file_path.replace("\\", "/")
+        idx = norm.rfind("/")
+        return norm[:idx] if idx > 0 else ""
+
+    def _mine_vue_components(self, vue3: dict) -> int:
+        components = [c for c in vue3.get("components", []) if c.get("filePath")]
+        existing = self._get_existing_ids("component:")
+        components = [c for c in components if f"component:{c['filePath']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(components)} Vue components ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for comp in components:
+            fp = comp["filePath"]
+            name = comp.get("name", "")
+            body = (comp.get("body") or "").strip()
+            doc = f"// Component: {name}\n// File: {fp}\n{body}" if body else f"// Component: {name}\n// File: {fp}"
+            drawer_id = f"component:{fp}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "component",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Components done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    def _mine_vue_composables(self, vue3: dict) -> int:
+        items = [c for c in vue3.get("composables", []) if c.get("fqn")]
+        existing = self._get_existing_ids("composable:")
+        items = [c for c in items if f"composable:{c['fqn']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(items)} Vue composables ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for comp in items:
+            fqn = comp["fqn"]
+            name = comp.get("name", "")
+            fp = comp.get("filePath", "")
+            body = (comp.get("body") or "").strip()
+            doc = f"// Composable: {name}\n// File: {fp}\n{body}" if body else f"// Composable: {name}\n// File: {fp}"
+            drawer_id = f"composable:{fqn}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "composable",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Composables done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    def _mine_vue_stores(self, vue3: dict) -> int:
+        stores = [s for s in vue3.get("stores", []) if s.get("id")]
+        existing = self._get_existing_ids("store:")
+        stores = [s for s in stores if f"store:{s['id']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(stores)} Vue stores ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for store in stores:
+            sid = store["id"]
+            name = store.get("name", "")
+            fp = store.get("filePath", "")
+            body = (store.get("body") or "").strip()
+            doc = f"// Store: {sid} (export {name})\n// File: {fp}\n{body}" if body else f"// Store: {sid} (export {name})\n// File: {fp}"
+            drawer_id = f"store:{sid}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "store",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Stores done: {done} in {elapsed:.1f}s", flush=True)
         return done

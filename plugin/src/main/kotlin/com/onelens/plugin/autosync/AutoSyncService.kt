@@ -14,6 +14,8 @@ import com.onelens.plugin.export.ExportConfig
 import com.onelens.plugin.export.ExportService
 import com.onelens.plugin.export.delta.DeltaExportService
 import com.onelens.plugin.settings.OneLensSettings
+import com.onelens.plugin.ui.OneLensEvents
+import com.onelens.plugin.ui.OneLensState
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -130,9 +132,12 @@ class AutoSyncService(private val project: Project) : Disposable {
         }
 
         LOG.info("Auto-sync triggered: ${filesToSync.size} modified, ${filesDeleted.size} deleted")
+        OneLensEvents.status(OneLensState.SYNCING)
+        OneLensEvents.info("Auto-sync triggered: ${filesToSync.size} modified, ${filesDeleted.size} deleted")
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
             override fun run(indicator: ProgressIndicator) {
+                val start = System.currentTimeMillis()
                 try {
                     indicator.text = "Auto-syncing ${filesToSync.size} modified, ${filesDeleted.size} deleted..."
                     val config = ExportConfig()
@@ -142,19 +147,34 @@ class AutoSyncService(private val project: Project) : Disposable {
                         is DeltaExportService.DeltaResult.Success -> {
                             val service = ApplicationManager.getApplication().getService(ExportService::class.java)
                             service.syncToGraph(result.path, project.name, config, isFull = false)
+                            val dur = System.currentTimeMillis() - start
                             LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
+                            OneLensEvents.syncComplete(
+                                graphName = project.name,
+                                classes = result.stats.upsertedClassCount,
+                                methods = result.stats.upsertedMethodCount,
+                                callEdges = result.stats.upsertedCallEdgeCount,
+                                isDelta = true,
+                                durationMs = dur,
+                            )
                         }
                         is DeltaExportService.DeltaResult.NeedFullExport -> {
                             LOG.info("Auto-sync: full export needed, skipping (use manual Sync Graph)")
+                            OneLensEvents.warn("Auto-sync skipped: full export needed. Click Sync Graph.")
                         }
                         is DeltaExportService.DeltaResult.NoChanges -> {
                             LOG.info("Auto-sync: no changes detected")
+                            OneLensEvents.info("Auto-sync: no changes detected")
                         }
                         is DeltaExportService.DeltaResult.Error -> {
                             LOG.warn("Auto-sync failed: ${result.message}")
+                            OneLensEvents.error("Auto-sync failed: ${result.message}")
                         }
                     }
+                } catch (t: Throwable) {
+                    OneLensEvents.error("Auto-sync crashed: ${t.message}", t)
                 } finally {
+                    OneLensEvents.status(OneLensState.READY)
                     syncing.set(false)
                 }
             }

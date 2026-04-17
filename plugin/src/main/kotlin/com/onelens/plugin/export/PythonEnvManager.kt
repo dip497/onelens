@@ -1,9 +1,14 @@
 package com.onelens.plugin.export
 
 import com.intellij.openapi.diagnostic.logger
+import com.onelens.plugin.ui.OneLensEvents
+import com.onelens.plugin.ui.OneLensState
 import java.io.File
+import java.net.JarURLConnection
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * Manages a self-contained Python venv with onelens installed via uv.
@@ -25,19 +30,37 @@ object PythonEnvManager {
     private val ONELENS_HOME: Path = Paths.get(System.getProperty("user.home"), ".onelens")
     private val VENV_DIR: Path = ONELENS_HOME.resolve("venv")
     private val ONELENS_BIN: Path = VENV_DIR.resolve("bin").resolve("onelens")
+    // Extracted Python source lives here; keyed by plugin version so a plugin
+    // upgrade rewrites the tree and triggers a reinstall.
+    private val BUNDLED_SOURCE_DIR: Path = ONELENS_HOME.resolve("source")
 
     /**
      * Get the path to the onelens CLI, auto-installing if needed.
      * Returns the path to the binary, or null if setup failed.
      */
     fun getOneLensCli(onelensSourcePath: String = ""): String? {
-        // Already installed?
-        if (ONELENS_BIN.toFile().exists()) {
+        // Already installed AND matches current plugin version?
+        // After a plugin upgrade the venv is still on disk but its Python
+        // source is stale; treat version mismatch as "needs reinstall" so
+        // new collectors / CLI changes actually take effect.
+        if (ONELENS_BIN.toFile().exists() && installedMatchesPluginVersion()) {
             return ONELENS_BIN.toString()
         }
 
-        LOG.info("OneLens CLI not found, setting up environment...")
+        LOG.info("OneLens CLI setup required (missing or plugin upgraded)...")
         return setup(onelensSourcePath)
+    }
+
+    private fun installedMatchesPluginVersion(): Boolean {
+        // Dev-mode override via settings always skips the version check —
+        // an editable install in a source tree is always "current".
+        val marker = BUNDLED_SOURCE_DIR.resolve(".version").toFile()
+        if (!marker.exists()) {
+            // No marker means CLI came from somewhere other than a bundled
+            // extract (e.g. dev-mode sourcePath or manual install). Trust it.
+            return true
+        }
+        return marker.readText().trim() == pluginVersion()
     }
 
     /**
@@ -49,26 +72,39 @@ object PythonEnvManager {
      * Create venv and install onelens.
      */
     private fun setup(onelensSourcePath: String): String? {
+        OneLensEvents.status(OneLensState.SETTING_UP)
         val homeDir = ONELENS_HOME.toFile()
         homeDir.mkdirs()
 
         // 1. Create venv using uv (fast) or python -m venv (fallback)
+        OneLensEvents.progress("Creating Python venv", 0.1)
         if (!createVenv()) {
+            OneLensEvents.error("Failed to create venv — neither uv nor python3 available")
+            OneLensEvents.status(OneLensState.ERROR)
             return null
         }
 
-        // 2. Install onelens package
+        // 2. Install onelens package (~80 MB — chromadb + modal + httpx).
+        //    Model weights live remote (Modal or OpenAI-compat provider);
+        //    no local GPU / ONNX deps needed. First-run: under 1 min.
+        OneLensEvents.progress("Installing onelens + context deps (~80 MB: chromadb, modal SDK, httpx)", 0.3)
         if (!installOneLens(onelensSourcePath)) {
+            OneLensEvents.error("Failed to install onelens — see idea.log for uv output")
+            OneLensEvents.status(OneLensState.ERROR)
             return null
         }
 
         // 3. Verify
         if (ONELENS_BIN.toFile().exists()) {
             LOG.info("OneLens CLI ready at: $ONELENS_BIN")
+            OneLensEvents.info("OneLens CLI ready at: $ONELENS_BIN")
+            OneLensEvents.status(OneLensState.READY)
             return ONELENS_BIN.toString()
         }
 
         LOG.warn("OneLens CLI not found after install")
+        OneLensEvents.error("Install claimed success but CLI binary is missing at $ONELENS_BIN")
+        OneLensEvents.status(OneLensState.ERROR)
         return null
     }
 
@@ -80,6 +116,7 @@ object PythonEnvManager {
         val uvBin = findUv()
         if (uvBin != null && runCommand(listOf(uvBin, "venv", venvDir.absolutePath), ONELENS_HOME.toFile())) {
             LOG.info("Created venv with uv at $uvBin")
+            OneLensEvents.info("Created venv with uv ($uvBin) → $venvDir")
             return true
         }
 
@@ -87,6 +124,7 @@ object PythonEnvManager {
         for (python in findPythonCandidates()) {
             if (runCommand(listOf(python, "-m", "venv", venvDir.absolutePath), ONELENS_HOME.toFile())) {
                 LOG.info("Created venv with $python")
+                OneLensEvents.info("Created venv with $python → $venvDir")
                 return true
             }
         }
@@ -99,26 +137,30 @@ object PythonEnvManager {
         val pip = VENV_DIR.resolve("bin").resolve("pip").toString()
         val uvBin = findUv()
 
-        // Install with [context] extra so ChromaDB + Qwen3 embedder + mxbai
-        // reranker are available out of the box. Without this, `onelens retrieve`
-        // and `context_search` silently fall back / fail. Adds ~1 GB to venv
-        // (torch + transformers) but unlocks semantic search.
+        // Install with [context] extra so ChromaDB + Modal SDK + httpx are
+        // available. Heavy inference runs remotely (Modal or OpenAI-compat) —
+        // no local torch / ORT / GPU. Adds ~80 MB to venv.
+        // Resolution order:
+        //   1. Explicit dev sourcePath from settings (editable install).
+        //   2. Bundled Python source extracted from plugin JAR (default).
+        //   3. PyPI fallback (future — not published yet; will fail today).
         val extras = "[context]"
-        val packageSpec = if (sourcePath.isNotEmpty() && File(sourcePath).exists()) {
-            // Editable dev install: use the local path unchanged. pip accepts
-            // `-e path` but not `-e path[context]` syntax cleanly across
-            // versions; rely on pyproject.toml [project.optional-dependencies]
-            // and install the extra separately.
+        val resolvedSource = if (sourcePath.isNotEmpty() && File(sourcePath).exists()) {
             sourcePath
         } else {
-            "onelens$extras"  // PyPI with context extra
+            extractBundledSource()?.toString() ?: ""
+        }
+        val packageSpec = if (resolvedSource.isNotEmpty()) {
+            resolvedSource
+        } else {
+            "onelens$extras"  // PyPI with context extra (fallback; not live yet)
         }
 
         val venvPython = VENV_DIR.resolve("bin").resolve("python").toString()
-        // For local/editable installs (dev mode), pip accepts `path[extra]`
-        // syntax in recent versions. If sourcePath is provided, also install
-        // the [context] extra explicitly so chromadb + embedder deps land.
-        val isDev = sourcePath.isNotEmpty() && File(sourcePath).exists()
+        // For local/editable installs (dev or bundled), pip accepts `path[extra]`
+        // but not reliably across pip versions when combined with `-e`. Install
+        // the context extra explicitly as a second step.
+        val isDev = resolvedSource.isNotEmpty()
         val devExtras = if (isDev) "chromadb>=1.0.0" else null
 
         // Try uv pip install first (10x faster)
@@ -150,6 +192,119 @@ object PythonEnvManager {
 
         LOG.error("Failed to install onelens")
         return false
+    }
+
+    /**
+     * Extract the Python source tree bundled inside the plugin JAR to
+     * `~/.onelens/source/python/` and return that path.
+     *
+     * Re-extraction is keyed by plugin version: a `.version` marker is
+     * written alongside the tree and compared on subsequent runs. A plugin
+     * upgrade therefore triggers one re-extract + reinstall; no-op otherwise.
+     *
+     * Returns null only if the plugin JAR has no bundled python/ directory
+     * (should never happen in a shipped plugin — only during dev against a
+     * raw `.class` layout). Caller then falls through to PyPI / failure.
+     */
+    private fun extractBundledSource(): Path? {
+        val currentVersion = pluginVersion()
+        val pythonDir = BUNDLED_SOURCE_DIR.resolve("python")
+        val versionMarker = BUNDLED_SOURCE_DIR.resolve(".version")
+
+        // Fast path: already extracted for this version.
+        if (pythonDir.toFile().exists()
+            && versionMarker.toFile().exists()
+            && versionMarker.toFile().readText().trim() == currentVersion
+        ) {
+            LOG.info("Bundled Python source already extracted for plugin $currentVersion")
+            return pythonDir
+        }
+
+        // Locate the bundled resource root. We use a sentinel file inside
+        // the bundle (pyproject.toml) to get a URL into the classpath, then
+        // walk sibling entries. Works for both JAR (production) and plain
+        // directory (dev) classloaders.
+        val sentinel = javaClass.classLoader.getResource("python/pyproject.toml") ?: run {
+            LOG.warn("No bundled python/pyproject.toml in plugin JAR — is the plugin built from this repo?")
+            return null
+        }
+
+        LOG.info("Extracting bundled Python source ($sentinel) → $pythonDir")
+        // Wipe any previous extract to avoid stale files lingering after
+        // a file is removed from the repo between plugin versions.
+        if (BUNDLED_SOURCE_DIR.toFile().exists()) {
+            BUNDLED_SOURCE_DIR.toFile().deleteRecursively()
+        }
+        Files.createDirectories(pythonDir)
+
+        val ok = try {
+            when (sentinel.protocol) {
+                "jar" -> extractFromJar(sentinel, pythonDir)
+                "file" -> extractFromDirectory(sentinel, pythonDir)
+                else -> {
+                    LOG.warn("Unsupported classpath protocol for bundled source: ${sentinel.protocol}")
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            LOG.warn("Failed to extract bundled Python source: ${e.message}", e)
+            false
+        }
+
+        if (!ok) return null
+
+        Files.writeString(versionMarker, currentVersion)
+        LOG.info("Bundled Python source extracted for plugin $currentVersion")
+        return pythonDir
+    }
+
+    private fun extractFromJar(sentinel: java.net.URL, pythonDir: Path): Boolean {
+        val conn = sentinel.openConnection() as JarURLConnection
+        conn.jarFile.use { jar ->
+            val prefix = "python/"
+            val entries = jar.entries().toList().filter { it.name.startsWith(prefix) }
+            for (entry in entries) {
+                val relative = entry.name.removePrefix(prefix)
+                if (relative.isEmpty()) continue
+                val target = pythonDir.resolve(relative)
+                if (entry.isDirectory) {
+                    Files.createDirectories(target)
+                    continue
+                }
+                Files.createDirectories(target.parent)
+                jar.getInputStream(entry).use { input ->
+                    Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
+        return true
+    }
+
+    private fun extractFromDirectory(sentinel: java.net.URL, pythonDir: Path): Boolean {
+        // The sentinel's URL points at `.../python/pyproject.toml` on disk;
+        // its parent is the bundled python/ root. Copy the tree.
+        val sourceRoot = Paths.get(sentinel.toURI()).parent
+        Files.walk(sourceRoot).use { stream ->
+            for (path in stream) {
+                val relative = sourceRoot.relativize(path)
+                val target = pythonDir.resolve(relative.toString())
+                if (Files.isDirectory(path)) {
+                    Files.createDirectories(target)
+                } else {
+                    Files.createDirectories(target.parent)
+                    Files.copy(path, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
+        return true
+    }
+
+    private fun pluginVersion(): String = try {
+        com.intellij.ide.plugins.PluginManagerCore
+            .getPlugin(com.intellij.openapi.extensions.PluginId.getId("com.onelens.plugin"))
+            ?.version ?: "unknown"
+    } catch (_: Throwable) {
+        "unknown"
     }
 
     private fun findUv(): String? {
@@ -212,21 +367,36 @@ object PythonEnvManager {
         return candidates
     }
 
+    /**
+     * Run a shell command, streaming each stdout line to the event bus so the
+     * tool window log stays live during long installs. Full output is also
+     * buffered and logged on failure for diagnostics. Returns exitCode == 0.
+     */
     private fun runCommand(command: List<String>, workDir: File): Boolean {
         return try {
             LOG.info("Running: ${command.joinToString(" ")}")
+            OneLensEvents.info("\$ ${command.joinToString(" ")}")
             val process = ProcessBuilder(command)
                 .directory(workDir)
                 .redirectErrorStream(true)
                 .start()
-            val output = process.inputStream.bufferedReader().readText()
+            val buffered = StringBuilder()
+            process.inputStream.bufferedReader().use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    buffered.appendLine(line)
+                    OneLensEvents.info(line)
+                }
+            }
             val exitCode = process.waitFor()
             if (exitCode != 0) {
-                LOG.debug("Command failed (exit $exitCode): $output")
+                LOG.debug("Command failed (exit $exitCode): $buffered")
+                OneLensEvents.warn("Command exit $exitCode: ${command.first()}")
             }
             exitCode == 0
         } catch (e: Exception) {
             LOG.debug("Command failed: ${e.message}")
+            OneLensEvents.warn("Command raised: ${e.message}")
             false
         }
     }

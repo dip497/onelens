@@ -94,19 +94,26 @@ class GraphLoader:
             ann_nodes = [{"fqn": fqn, "name": fqn.split(".")[-1]} for fqn in ann_fqns]
             self._batch_nodes(progress, "Annotations", ann_nodes, "Annotation", "fqn", ["name"])
 
-            # Spring nodes
+            # Spring nodes. Every node is stamped with `wing = graph_name` so the
+            # cross-wing bridge pass (bridge_http.compute_hits) can filter Spring
+            # Endpoints against Vue ApiCalls that live in a different wing on the
+            # same FalkorDB instance. Without `wing` on Endpoint the bridge
+            # query's `e.wing IS NOT NULL` check is always false and zero HITS
+            # edges are emitted.
+            graph_wing = data.get("project", {}).get("name", "") or "default"
             spring = data.get("spring")
             if spring:
-                beans = spring.get("beans", [])
+                beans = [dict(b, wing=graph_wing) for b in spring.get("beans", [])]
                 self._batch_nodes(progress, "Spring Beans", beans, "SpringBean", "name", [
-                    "classFqn", "scope", "profile", "type",
+                    "classFqn", "scope", "profile", "type", "wing",
                 ])
                 endpoints = spring.get("endpoints", [])
                 for ep in endpoints:
                     if "id" not in ep:
                         ep["id"] = f"{ep.get('httpMethod', 'GET')}:{ep.get('path', '/')}"
+                    ep["wing"] = graph_wing
                 self._batch_nodes(progress, "Endpoints", endpoints, "Endpoint", "id", [
-                    "path", "httpMethod", "controllerFqn", "handlerMethodFqn",
+                    "path", "httpMethod", "controllerFqn", "handlerMethodFqn", "wing",
                 ])
 
             # --- EXTERNAL STUB NODES ---
@@ -255,6 +262,14 @@ class GraphLoader:
                                              "SpringBean", "classFqn", "SpringBean", "classFqn",
                                              ["field", "type"])
 
+            # Vue 3 — load the frontend subdoc if present. Kept inside the
+            # `with Progress(...)` context so `progress.add_task` has a live
+            # context (Rich raises on a stopped progress). Java-only exports
+            # pass through unchanged: `data.get("vue3")` is None.
+            vue3 = data.get("vue3")
+            if vue3:
+                self._load_vue3(progress, vue3, graph_name=data.get("project", {}).get("name", ""))
+
         # Post-import phase: compute PageRank on the call graph and write
         # it back as Method.pagerank + Class.pagerank. One-time cost (~5-15s
         # for 80K methods). Enables "important methods" queries via
@@ -279,6 +294,154 @@ class GraphLoader:
         stats["importDurationSec"] = round(elapsed, 1)
         print(f"\nImport complete in {elapsed:.1f}s")
         return stats
+
+    def _load_vue3(self, progress, vue3: dict, graph_name: str):
+        """Load the Vue 3 subdoc into the same graph wing as the Java/Spring nodes.
+
+        Every Vue node is tagged with `wing = graph_name` so the bridge pass
+        (`bridge_http.py`) can match cross-wing ApiCall ↔ Endpoint pairs when
+        multiple repos share one FalkorDB graph.
+        """
+        wing = graph_name or "default"
+
+        # Components — primary key = filePath (unique per repo).
+        components = [dict(c, wing=wing) for c in vue3.get("components", [])]
+        for c in components:
+            # Props list is a list of small dicts; flatten to a comma-separated name
+            # string for the FTS index. The full prop detail lives as separate fields.
+            props = c.get("props", []) or []
+            c["propNames"] = ",".join(p.get("name", "") for p in props)
+            c["emits"] = ",".join(c.get("emits", []) or [])
+            c["exposes"] = ",".join(c.get("exposes", []) or [])
+        self._batch_nodes(progress, "Vue Components", components, "Component", "filePath", [
+            "name", "scriptSetup", "propNames", "emits", "exposes", "body", "wing",
+        ])
+
+        # Composables
+        composables = [dict(c, wing=wing) for c in vue3.get("composables", [])]
+        self._batch_nodes(progress, "Vue Composables", composables, "Composable", "fqn", [
+            "name", "filePath", "body", "wing",
+        ])
+
+        # Stores
+        stores = [dict(s, wing=wing) for s in vue3.get("stores", [])]
+        for s in stores:
+            s["state"] = ",".join(s.get("state", []) or [])
+            s["getters"] = ",".join(s.get("getters", []) or [])
+            s["actions"] = ",".join(s.get("actions", []) or [])
+        self._batch_nodes(progress, "Vue Stores", stores, "Store", "id", [
+            "name", "filePath", "style", "state", "getters", "actions", "body", "wing",
+        ])
+
+        # Routes
+        routes = [dict(r, wing=wing) for r in vue3.get("routes", [])]
+        for r in routes:
+            r["meta"] = ",".join(f"{k}={v}" for k, v in (r.get("meta") or {}).items())
+        self._batch_nodes(progress, "Vue Routes", routes, "Route", "name", [
+            "path", "componentRef", "meta", "parentName", "filePath", "wing",
+        ])
+
+        # ApiCalls — fqn synthesized to be unique even across repeated callers.
+        api_calls = vue3.get("apiCalls", []) or []
+        for a in api_calls:
+            a["fqn"] = f"{a.get('method', '')}:{a.get('path', '')}:{a.get('callerFqn', '')}"
+            a["wing"] = wing
+        self._batch_nodes(progress, "Vue ApiCalls", api_calls, "ApiCall", "fqn", [
+            "method", "path", "parametric", "binding", "callerFqn", "filePath", "wing",
+        ])
+
+        # Edges — use the existing _batch_edges helper with the shared (wing,label)
+        # match keys. Each edge is a dict with src/dst fqn equivalents.
+        uses_store = [
+            {"caller": e.get("callerFqn", ""), "store": e.get("storeId", ""),
+             "indirect": bool(e.get("indirect", False)), "via": e.get("via", "") or ""}
+            for e in vue3.get("usesStore", [])
+        ]
+        self._batch_edges_simple(
+            progress, "USES_STORE", uses_store,
+            "MATCH (c {wing: $wing}) WHERE (c.fqn = e.caller OR c.filePath = e.caller)",
+            "MATCH (s:Store {wing: $wing, id: e.store})",
+            "MERGE (c)-[r:USES_STORE]->(s) SET r.indirect = e.indirect, r.via = e.via",
+            wing=wing,
+        )
+
+        uses_comp = [
+            {"caller": e.get("callerFqn", ""), "comp": e.get("composableFqn", "")}
+            for e in vue3.get("usesComposable", [])
+        ]
+        self._batch_edges_simple(
+            progress, "USES_COMPOSABLE", uses_comp,
+            "MATCH (c {wing: $wing}) WHERE (c.fqn = e.caller OR c.filePath = e.caller)",
+            "MATCH (co:Composable {wing: $wing, fqn: e.comp})",
+            "MERGE (c)-[:USES_COMPOSABLE]->(co)",
+            wing=wing,
+        )
+
+        dispatches = [
+            {"route": e.get("routeName", ""), "comp": e.get("componentRef", "")}
+            for e in vue3.get("dispatches", [])
+        ]
+        self._batch_edges_simple(
+            progress, "DISPATCHES", dispatches,
+            "MATCH (r:Route {wing: $wing, name: e.route})",
+            "OPTIONAL MATCH (co:Component {wing: $wing}) WHERE co.filePath CONTAINS e.comp",
+            "WITH r, co WHERE co IS NOT NULL MERGE (r)-[:DISPATCHES]->(co)",
+            wing=wing,
+            src_var="r",
+        )
+
+        calls_api = [
+            {"caller": e.get("callerFqn", ""), "api": e.get("apiCallFqn", "")}
+            for e in vue3.get("callsApi", [])
+        ]
+        self._batch_edges_simple(
+            progress, "CALLS_API", calls_api,
+            "MATCH (c {wing: $wing}) WHERE (c.fqn = e.caller OR c.filePath = e.caller)",
+            "MATCH (a:ApiCall {wing: $wing, fqn: e.api})",
+            "MERGE (c)-[:CALLS_API]->(a)",
+            wing=wing,
+        )
+
+        # Bridge pass — emit cross-wing HITS edges between Vue ApiCall and Spring Endpoint.
+        try:
+            from onelens.importer import bridge_http
+
+            bridge_stats = bridge_http.compute_hits(self.db, graph_name=wing)
+            logger.info("Vue 3 bridge pass: %s", bridge_stats)
+        except Exception as e:
+            logger.warning("Vue 3 bridge pass failed: %s", e)
+
+    def _batch_edges_simple(self, progress, desc: str, edges: list,
+                             src_match: str, dst_match: str, tail: str, wing: str,
+                             src_var: str = "c"):
+        """UNWIND-based batched edge creation with caller-provided MATCH/MERGE fragments.
+
+        `src_var` names the Cypher variable bound by `src_match`. We carry that
+        variable (alongside `e`) through the `WITH` clause into `dst_match`. A
+        previous version hard-coded `WITH e, c` which silently broke the
+        DISPATCHES batch (src bound as `r`, not `c`) — the batch would throw
+        `c is undefined` and every DISPATCHES edge would be swallowed by the
+        generic except below.
+
+        Used only for the Vue 3 edges which do not fit the tidy (label,key)-based
+        `_batch_edges`. Keeping it separate avoids polluting the Java code path.
+        """
+        if not edges:
+            return
+        query = (
+            "UNWIND $batch AS e "
+            f"{src_match} WITH e, {src_var} "
+            f"{dst_match} "
+            f"{tail}"
+        )
+        task = progress.add_task(f"{desc}...", total=len(edges))
+        for i in range(0, len(edges), EDGE_BATCH):
+            batch = edges[i:i + EDGE_BATCH]
+            try:
+                self.db.execute(query, {"batch": batch, "wing": wing})
+            except Exception as e:
+                logger.warning("Edge batch %s failed: %s", desc, e)
+            progress.update(task, advance=len(batch))
 
     def _batch_nodes(self, progress, desc: str, items: list, label: str, pk: str, props: list[str]):
         """Create nodes using UNWIND in batches."""

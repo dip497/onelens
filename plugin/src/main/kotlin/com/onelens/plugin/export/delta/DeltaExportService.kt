@@ -11,6 +11,7 @@ import com.onelens.plugin.export.collectors.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToStream
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -205,7 +206,11 @@ object DeltaExportService {
         Files.createDirectories(outputDir)
         val fileName = "${project.name}-delta-${System.currentTimeMillis()}.json"
         val outputFile = outputDir.resolve(fileName)
-        Files.writeString(outputFile, json.encodeToString(delta))
+        // Stream JSON to disk to avoid OOM on large deltas.
+        Files.newOutputStream(outputFile).use { out ->
+            @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+            json.encodeToStream(delta, out)
+        }
 
         // 7. Update state
         val newHash = DeltaTracker.getCurrentGitHash(basePath)

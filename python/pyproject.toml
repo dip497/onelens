@@ -14,7 +14,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-context = ["chromadb>=1.0.0"]
+# Semantic retrieval stack. Default backend is Modal — plugin side ships
+# NO local GPU / ONNX deps. Heavy bits (onnxruntime-gpu, fastembed, Qwen3
+# weights) live inside the Modal container image (see remote/modal_app.py).
+# Local venv footprint: ~80 MB (chromadb + modal + httpx + numpy).
+#
+# OpenAI-compat backend uses plain HTTP — no SDK required.
+context = [
+    "chromadb>=1.0.0",
+    "modal>=0.74",                # client for the Modal embed/rerank app
+    "httpx>=0.27",                # OpenAI-compat bulk-concurrent embedding calls
+    "numpy>=1.24",
+]
 lite = ["falkordblite>=0.9.0"]
 neo4j = ["neo4j>=5.0.0"]
 dev = [

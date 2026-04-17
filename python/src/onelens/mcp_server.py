@@ -44,18 +44,20 @@ async def lifespan(server: FastMCP):
         t0 = time.time()
         logger.info("Warming embedder + reranker...")
         try:
-            from onelens.context.embedder import QwenEmbedder
+            # Factory picks the configured backend (Modal / OpenAI-compat).
+            from onelens.context.embed_backends import get_embedder
 
-            _STATE["embedder"] = QwenEmbedder()
+            _STATE["embedder"] = get_embedder()
             _STATE["embedder"].encode(["warmup"])
         except Exception as e:
             logger.warning("Embedder warmup failed: %s", e)
         try:
-            from onelens.context.reranker import get_default_reranker
-            from onelens.context.retrieval import RetrievalHit
+            from onelens.context.embed_backends import get_reranker
 
-            reranker = get_default_reranker()
-            reranker.rerank("warmup", [RetrievalHit(fqn="x", type="method", score=0.0, snippet="t")], top_k=1)
+            reranker = get_reranker()
+            # Cheap no-op score call — trips a cold start once but keeps the
+            # rerank container mapped for the first real query.
+            reranker.score("warmup", ["warmup"])
             _STATE["reranker"] = reranker
         except Exception as e:
             logger.warning("Reranker warmup failed: %s", e)

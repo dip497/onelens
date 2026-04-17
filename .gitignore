@@ -61,3 +61,8 @@ Thumbs.db
 CLAUDE.local.md
 AGENTS.local.md
 .claude/settings.local.json
+
+# Keep the client-name block list out of commits — it contains the very
+# terms we don't want leaking. The hook (`block-client-names.sh`) reads it
+# from the working tree; contributors populate their local copy.
+.claude/hooks/client-names.txt
