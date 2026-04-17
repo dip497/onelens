@@ -26,6 +26,9 @@ NODE_SCHEMA = {
     "Store": "CREATE INDEX FOR (n:Store) ON (n.id)",
     "Route": "CREATE INDEX FOR (n:Route) ON (n.name)",
     "ApiCall": "CREATE INDEX FOR (n:ApiCall) ON (n.fqn)",
+    # Phase B2 — JS business-logic layer (plain helpers / modules).
+    "JsModule": "CREATE INDEX FOR (n:JsModule) ON (n.filePath)",
+    "JsFunction": "CREATE INDEX FOR (n:JsFunction) ON (n.fqn)",
 }
 
 # Full-text search indexes — FalkorDB CALL procedure syntax.
@@ -85,6 +88,17 @@ FULLTEXT_SCHEMA = {
         "'ApiCall',"
         " {field: 'path', weight: 8.0},"
         " {field: 'method', weight: 5.0})"
+    ),
+    "JsFunction_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'JsFunction',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'filePath', weight: 3.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "JsModule_path": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'JsModule', {field: 'filePath', weight: 10.0})"
     ),
 }
 

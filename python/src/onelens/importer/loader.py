@@ -378,6 +378,20 @@ class GraphLoader:
             "method", "path", "parametric", "binding", "callerFqn", "filePath", "wing",
         ])
 
+        # Phase B2 — JS business-logic layer. `JsModule` per file (always),
+        # `JsFunction` per exported top-level fn. Both carry `wing` so
+        # cross-repo graphs can filter.
+        modules = [dict(m, wing=wing) for m in vue3.get("modules", [])]
+        self._batch_nodes(progress, "JS Modules", modules, "JsModule", "filePath", [
+            "fileKind", "isBarrel", "wing",
+        ])
+
+        functions = [dict(f, wing=wing) for f in vue3.get("functions", [])]
+        self._batch_nodes(progress, "JS Functions", functions, "JsFunction", "fqn", [
+            "name", "filePath", "exported", "isDefault", "isAsync",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
         # Edges — caller match is a 3-way OR because collectors emit
         # `callerFqn` in three shapes:
         #   Component-scoped call   -> "<filePath>::<ComponentName>"   (CallThroughResolver)
@@ -478,6 +492,53 @@ class GraphLoader:
             "MERGE (c)-[:CALLS_API]->(a)",
             wing=wing,
         )
+
+        # IMPORTS edges — JsModule / Component / Composable / Store → JsFunction (or JsModule).
+        # The source side can be any of those four labels, keyed on filePath.
+        # Target side: when targetFqn is set, match a JsFunction by fqn;
+        # otherwise fall back to a JsModule by filePath.
+        imports_resolved = [
+            {"src": e.get("sourceModule", ""), "tgt_fqn": e.get("targetFqn") or "",
+             "name": e.get("importedName", ""),
+             "alias": e.get("localAlias") or "",
+             "isDefault": bool(e.get("isDefault", False)),
+             "isNamespace": bool(e.get("isNamespace", False))}
+            for e in vue3.get("imports", []) if e.get("targetFqn")
+        ]
+        if imports_resolved:
+            self._batch_edges_simple(
+                progress, "IMPORTS (resolved)", imports_resolved,
+                "MATCH (src {wing: $wing}) "
+                "WHERE (src:JsModule OR src:Component OR src:Composable OR src:Store) "
+                "  AND src.filePath = e.src",
+                "MATCH (tgt:JsFunction {wing: $wing, fqn: e.tgt_fqn})",
+                "MERGE (src)-[r:IMPORTS]->(tgt) "
+                "SET r.importedName = e.name, r.alias = e.alias, "
+                "    r.isDefault = e.isDefault, r.isNamespace = e.isNamespace",
+                wing=wing,
+                src_var="src",
+            )
+
+        imports_modulelevel = [
+            {"src": e.get("sourceModule", ""), "tgt": e.get("targetModule", ""),
+             "name": e.get("importedName", ""),
+             "alias": e.get("localAlias") or "",
+             "unresolved": bool(e.get("unresolved", False))}
+            for e in vue3.get("imports", []) if not e.get("targetFqn")
+        ]
+        if imports_modulelevel:
+            self._batch_edges_simple(
+                progress, "IMPORTS (module-level)", imports_modulelevel,
+                "MATCH (src {wing: $wing}) "
+                "WHERE (src:JsModule OR src:Component OR src:Composable OR src:Store) "
+                "  AND src.filePath = e.src",
+                "OPTIONAL MATCH (tgt:JsModule {wing: $wing, filePath: e.tgt}) "
+                "WITH src, tgt, e WHERE tgt IS NOT NULL",
+                "MERGE (src)-[r:IMPORTS]->(tgt) "
+                "SET r.importedName = e.name, r.alias = e.alias, r.unresolved = e.unresolved",
+                wing=wing,
+                src_var="src",
+            )
 
         # Bridge pass — emit cross-wing HITS edges between Vue ApiCall and Spring Endpoint.
         try:

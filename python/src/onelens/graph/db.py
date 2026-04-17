@@ -19,6 +19,8 @@ NODE_TYPES = [
     "EnumConstant",
     # Vue 3
     "Component", "Composable", "Store", "Route", "ApiCall",
+    # Phase B2 — JS business-logic layer
+    "JsModule", "JsFunction",
 ]
 
 

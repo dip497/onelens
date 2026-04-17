@@ -45,7 +45,67 @@ data class Vue3Data(
     val usesStore: List<UsesStoreEdge> = emptyList(),
     val usesComposable: List<UsesComposableEdge> = emptyList(),
     val dispatches: List<DispatchesEdge> = emptyList(),
-    val callsApi: List<CallsApiEdge> = emptyList()
+    val callsApi: List<CallsApiEdge> = emptyList(),
+    // Phase B2 — business-logic layer. Closes the gap where plain JS helpers
+    // (`src/data/*.js`, `*-api.js`, module-local `helpers/*.js`) were invisible.
+    val modules: List<JsModuleData> = emptyList(),
+    val functions: List<JsFunctionData> = emptyList(),
+    val imports: List<ImportsEdge> = emptyList()
+)
+
+/**
+ * Every `.js` / `.ts` / `.vue` source file that participates in the import
+ * graph. Present for files already modelled as Component / Composable / Store
+ * too, so the import target resolves to a single node kind. Pure container —
+ * the interesting stuff (Functions, imports) hangs off this.
+ */
+@Serializable
+data class JsModuleData(
+    val filePath: String,              // project-relative, canonicalized
+    val isBarrel: Boolean = false,     // heuristic: all statements are re-exports
+    val fileKind: String = "js"        // "js" | "ts" | "vue"
+)
+
+/**
+ * Top-level function / const-arrow / const-function declaration in a JS module.
+ * Mirrors tree-sitter's `@definition.function` set: named function declarations,
+ * `const x = () => …`, `export default function`, `export default () => …`.
+ * Methods inside classes are NOT emitted here — classes are framework-specific.
+ */
+@Serializable
+data class JsFunctionData(
+    val fqn: String,                   // "<filePath>::<name>" — matches callerFqn elsewhere
+    val name: String,
+    val filePath: String,
+    val exported: Boolean = false,
+    val isDefault: Boolean = false,    // `export default function …`
+    val isAsync: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null
+)
+
+/**
+ * ES6 `import … from '…'` resolved via IntelliJ JS PSI. One edge per imported
+ * binding. For aliased imports (`import { X as Y }`) the target node is the
+ * original, not the alias specifier (2-hop resolve inside the collector).
+ *
+ * `sourceModule` points at the importer's module filePath; `targetModule` is
+ * the absolute resolved file path of the source. `targetFqn` points at a
+ * specific `JsFunctionData.fqn` when the binding resolves to a named export;
+ * null when the resolve fell short (barrel edge-case, external, or missed).
+ */
+@Serializable
+data class ImportsEdge(
+    val sourceModule: String,          // filePath of the importing module
+    val targetModule: String,          // filePath of the imported module
+    val importedName: String,          // "default" / "*" / named binding
+    val localAlias: String? = null,    // non-null when `{ X as Y }`
+    val isDefault: Boolean = false,
+    val isNamespace: Boolean = false,  // `import * as ns from …`
+    val targetFqn: String? = null,     // `<targetModule>::<resolved-name>` when resolved
+    val unresolved: Boolean = false,
+    val lineStart: Int = 0
 )
 
 @Serializable

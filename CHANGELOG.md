@@ -37,6 +37,29 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   with Cypher recipes for module-scoped enum filtering and annotation
   attribute searches.
 
+### Added — Phase B2 · JS business-logic layer (first cut, 2026-04-18)
+
+- `JsModule` node per `.js` / `.ts` / `.vue` file. Container for the import
+  graph; always present even when the file is also modelled as a Component /
+  Composable / Store so `IMPORTS` edges always have a valid anchor.
+- `JsFunction` node per top-level `export function`, `export const x = () =>`,
+  `export default …`. Closes the Phase B gap where plain JS helper modules
+  (`src/data/*.js`, module-local `helpers/*.js`, `*-api.js`) produced zero
+  nodes even when several components imported them. Mirrors tree-sitter's
+  `@definition.function` set; uses PSI for accuracy.
+- `IMPORTS` edge (source = `JsModule` / `Component` / `Composable` / `Store`;
+  target = `JsFunction` when symbol-resolved, else `JsModule` when only the
+  file resolves). Resolution goes through IntelliJ JS PSI with a 2-hop
+  `ES6ImportSpecifierAlias → original declaration` step that covers
+  `import { X as Y }` — the one failing case from `ImportResolveTest`.
+- `NODE_TYPES`, `NODE_SCHEMA`, `FULLTEXT_SCHEMA` updated: `JsModule` FTS
+  indexed on `filePath`; `JsFunction` indexed `name` (w=10) / `filePath`
+  (w=3) / `body` (w=1) for semantic retrieval by intent.
+- Known deferred: JS `CALLS` edges (raw data present, emitter pending),
+  `Channel` / `EMITS` / `LISTENS` for `mitt` / `Bus` (no other indexer in the
+  surveyed set — potpie, SCIP, aider — does this), `Constant` node for
+  exported literals, `RE_EXPORTS` edge for barrel files.
+
 ### Fixed — Phase B dogfood round (2026-04-18)
 
 - `ExportService.exportFull` now iterates EVERY detected adapter's collectors
