@@ -122,7 +122,9 @@ def import_graph(
 
     Set context=True to also index methods/classes into ChromaDB for semantic search.
     """
+    import contextlib
     import json
+    import sys
 
     path = Path(export_path).expanduser()
     with open(path) as f:
@@ -131,32 +133,41 @@ def import_graph(
 
     db = _get_db(backend, graph, db_path)
 
-    if export_type == "delta":
-        from onelens.importer.delta_loader import DeltaLoader
+    # Redirect stdout to stderr for the whole import pass. When this tool runs
+    # under FastMCP's stdio transport, stdout IS the JSON-RPC channel — every
+    # `print(…)` / `rich.Progress` in the loader or miner pollutes it and
+    # trips the client-side parser with errors like
+    # `Invalid JSON: expected ident at line 1 column 2 …`.
+    # Rich detects non-TTY and falls back to plain writes; we just need those
+    # writes to land on stderr. The surfaced tool result (dict) still returns
+    # over stdout via FastMCP's normal response channel.
+    with contextlib.redirect_stdout(sys.stderr):
+        if export_type == "delta":
+            from onelens.importer.delta_loader import DeltaLoader
 
-        loader = DeltaLoader(db)
-        # Delta path delegates context mining to the loader itself — it knows
-        # how to cascade-delete removed drawers and upsert only the changed
-        # methods/classes via CodeMiner's deterministic IDs. Calling
-        # CodeMiner.mine(path) here would be wrong: `mine` expects a full
-        # export JSON shape, not a delta.
-        stats = loader.apply_delta(path, graph_name=graph, context=context)
-        result = {"mode": "delta", "stats": stats}
-    else:
-        from onelens.importer.loader import GraphLoader
+            loader = DeltaLoader(db)
+            # Delta path delegates context mining to the loader itself — it knows
+            # how to cascade-delete removed drawers and upsert only the changed
+            # methods/classes via CodeMiner's deterministic IDs. Calling
+            # CodeMiner.mine(path) here would be wrong: `mine` expects a full
+            # export JSON shape, not a delta.
+            stats = loader.apply_delta(path, graph_name=graph, context=context)
+            result = {"mode": "delta", "stats": stats}
+        else:
+            from onelens.importer.loader import GraphLoader
 
-        loader = GraphLoader(db)
-        if clear:
-            loader.clear()
-        stats = loader.load_full(path)
-        result = {"mode": "full", "stats": stats}
+            loader = GraphLoader(db)
+            if clear:
+                loader.clear()
+            stats = loader.load_full(path)
+            result = {"mode": "full", "stats": stats}
 
-        if context:
-            from onelens.miners.code_miner import CodeMiner
+            if context:
+                from onelens.miners.code_miner import CodeMiner
 
-            miner = CodeMiner(graph)
-            ctx_stats = miner.mine(path)
-            result["context"] = ctx_stats
+                miner = CodeMiner(graph)
+                ctx_stats = miner.mine(path)
+                result["context"] = ctx_stats
 
     return result
 
