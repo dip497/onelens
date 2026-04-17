@@ -9,6 +9,7 @@ import com.onelens.plugin.framework.CollectorOutput
 import com.onelens.plugin.framework.FrameworkAdapter
 import com.onelens.plugin.framework.vue3.collectors.ApiCallCollector
 import com.onelens.plugin.framework.vue3.collectors.ComposableCollector
+import com.onelens.plugin.framework.vue3.collectors.JsModuleCollector
 import com.onelens.plugin.framework.vue3.collectors.LazyRouteCollector
 import com.onelens.plugin.framework.vue3.collectors.PiniaStoreCollector
 import com.onelens.plugin.framework.vue3.collectors.SfcScriptSetupCollector
@@ -126,6 +127,10 @@ class Vue3Collector : Collector {
         indicator?.text = "Vue 3: store / composable edges (1-hop)…"
         indicator?.fraction = baseFraction + 0.46
         CallThroughResolver.collect(project, vueCtx)
+
+        indicator?.text = "Vue 3: JS modules + functions + imports…"
+        indicator?.fraction = baseFraction + 0.48
+        JsModuleCollector.collect(project, vueCtx)
 
         val snapshot: Vue3Data = vueCtx.snapshot()
         val nodeCount = snapshot.components.size + snapshot.composables.size +

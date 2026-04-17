@@ -5,6 +5,9 @@ import com.onelens.plugin.export.CallsApiEdge
 import com.onelens.plugin.export.ComponentData
 import com.onelens.plugin.export.ComposableData
 import com.onelens.plugin.export.DispatchesEdge
+import com.onelens.plugin.export.ImportsEdge
+import com.onelens.plugin.export.JsFunctionData
+import com.onelens.plugin.export.JsModuleData
 import com.onelens.plugin.export.RouteData
 import com.onelens.plugin.export.StoreData
 import com.onelens.plugin.export.UsesComposableEdge
@@ -32,6 +35,10 @@ class Vue3Context(
     val usesComposable: MutableList<UsesComposableEdge> = mutableListOf()
     val dispatches: MutableList<DispatchesEdge> = mutableListOf()
     val callsApi: MutableList<CallsApiEdge> = mutableListOf()
+    // Phase B2 business-logic layer
+    val modules: MutableList<JsModuleData> = mutableListOf()
+    val functions: MutableList<JsFunctionData> = mutableListOf()
+    val imports: MutableList<ImportsEdge> = mutableListOf()
 
     fun snapshot(): Vue3Data = Vue3Data(
         components = components.toList(),
@@ -42,7 +49,10 @@ class Vue3Context(
         usesStore = usesStore.toList(),
         usesComposable = usesComposable.toList(),
         dispatches = dispatches.toList(),
-        callsApi = callsApi.toList()
+        callsApi = callsApi.toList(),
+        modules = modules.toList(),
+        functions = functions.toList(),
+        imports = imports.toList()
     )
 
     /** Make a file path relative to [projectBase]. Falls back to absolute path string on failure. */

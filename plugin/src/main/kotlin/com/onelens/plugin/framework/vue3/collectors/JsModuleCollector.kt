@@ -1,0 +1,366 @@
+package com.onelens.plugin.framework.vue3.collectors
+
+import com.intellij.lang.ecmascript6.psi.ES6ImportDeclaration
+import com.intellij.lang.ecmascript6.psi.ES6ImportSpecifier
+import com.intellij.lang.ecmascript6.psi.ES6ImportSpecifierAlias
+import com.intellij.lang.javascript.psi.JSCallExpression
+import com.intellij.lang.javascript.psi.JSFunction
+import com.intellij.lang.javascript.psi.JSFunctionExpression
+import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
+import com.intellij.lang.javascript.psi.JSReferenceExpression
+import com.intellij.lang.javascript.psi.JSVariable
+import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.fileTypes.FileTypeManager
+import com.intellij.openapi.fileTypes.UnknownFileType
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.project.DumbService
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Computable
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiFile
+import com.intellij.psi.PsiManager
+import com.intellij.psi.search.FileTypeIndex
+import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.util.PsiTreeUtil
+import com.onelens.plugin.export.ImportsEdge
+import com.onelens.plugin.export.JsFunctionData
+import com.onelens.plugin.export.JsModuleData
+import com.onelens.plugin.framework.vue3.Vue3Context
+import java.nio.file.Paths
+
+/**
+ * Closes the "business-logic layer is invisible" gap: plain JS helper
+ * modules under `src/data/`, `src/utils/`, module-local helper dirs,
+ * and api-wrapper files that aren't Components / Composables / Stores
+ * produced zero graph nodes in Phase B. A real-world dogfood of a
+ * 1500+ file Vue 3 repo confirmed 1000+ LOC business-logic files were
+ * invisible to the graph even when 4+ components imported them.
+ *
+ * Emits, for every JS / TS / Vue source under the project:
+ *   - one [JsModuleData] per file (always)
+ *   - one [JsFunctionData] per top-level exported function / arrow-const /
+ *     default export. Mirrors tree-sitter's @definition.function set.
+ *   - one [ImportsEdge] per ES6 import specifier, target resolved via
+ *     IntelliJ JS PSI resolve() with a 2-hop for aliased imports
+ *     (`import { X as Y }` — first resolve stops at the alias node; we
+ *     call resolve again to reach the original declaration. Verified in
+ *     ImportResolveTest.)
+ *
+ * Non-goals (Phase B2 follow-ups):
+ *   - Capturing every local function (only exports today — mirrors the
+ *     publishing surface that matters for cross-module edges).
+ *   - Re-export edges (`export { X } from …`) — Phase B2 follow-up.
+ *   - `Channel` / `EMITS` / `LISTENS` — separate collector.
+ *   - `Constant` nodes for exported object / array literals — follow-up.
+ *   - JS `CALLS` edges — follow-up; the raw data is here via JSCallExpression
+ *     but emitting is a separate pass.
+ */
+object JsModuleCollector {
+    private val LOG = logger<JsModuleCollector>()
+    private const val MAX_BODY_CHARS = 2000
+
+    fun collect(project: Project, ctx: Vue3Context) {
+        if (DumbService.isDumb(project)) {
+            LOG.warn("Skipping JS module collection — dumb mode")
+            return
+        }
+        val ftm = FileTypeManager.getInstance()
+        val types = listOfNotNull(
+            ftm.getFileTypeByExtension("js").takeIf { it != UnknownFileType.INSTANCE },
+            ftm.getFileTypeByExtension("ts").takeIf { it != UnknownFileType.INSTANCE },
+            ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE },
+            ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
+        )
+        val scope = GlobalSearchScope.projectScope(project)
+        val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        )
+        val psiManager = PsiManager.getInstance(project)
+
+        for (vf in allFiles) {
+            ProgressManager.checkCanceled()
+            ReadAction.run<Throwable> {
+                val psi = psiManager.findFile(vf) ?: return@run
+                val relative = ctx.relativize(Paths.get(vf.path))
+                val ext = vf.extension?.lowercase() ?: "js"
+
+                // Module node — always. Even barrel / empty files land here so
+                // ImportsEdge has a valid `targetModule` anchor.
+                val module = JsModuleData(
+                    filePath = relative,
+                    fileKind = ext,
+                    isBarrel = looksLikeBarrel(psi)
+                )
+                ctx.modules += module
+
+                // Function nodes — only exported top-level functions / arrows.
+                collectExportedFunctions(psi, relative).forEach { ctx.functions += it }
+
+                // Import edges.
+                collectImports(psi, relative).forEach { ctx.imports += it }
+            }
+        }
+        LOG.info(
+            "JsModuleCollector: modules=${ctx.modules.size}, functions=${ctx.functions.size}, imports=${ctx.imports.size}"
+        )
+    }
+
+    /**
+     * Heuristic: a barrel file is one whose entire top-level body is re-exports
+     * (`export { foo } from './foo'`). Cheap textual probe — no PSI cost beyond
+     * the source read we already did.
+     */
+    private fun looksLikeBarrel(file: PsiFile): Boolean {
+        val txt = file.text.trim()
+        if (txt.isEmpty()) return false
+        // Any non-trivial line that isn't a re-export / import / blank / comment
+        // disqualifies the file.
+        val lineCommentStart = "//"
+        val blockCommentStart = "/" + "*"
+        val blockCommentEnd = "*" + "/"
+        val lines = txt.lines().map { it.trim() }.filter {
+            it.isNotEmpty() && !it.startsWith(lineCommentStart) &&
+                !it.startsWith(blockCommentStart) && it != blockCommentEnd
+        }
+        if (lines.isEmpty()) return false
+        return lines.all { line ->
+            line.startsWith("export") && (line.contains("from '") || line.contains("from \"")) ||
+                line.startsWith("export *") ||
+                line.startsWith("import ")
+        }
+    }
+
+    /**
+     * Top-level export sites we care about:
+     *   - `export function foo() {}`
+     *   - `export async function foo() {}`
+     *   - `export const foo = () => {}` / `= function () {}`
+     *   - `export default function foo() {}` / `export default () => {}`
+     * Functions nested inside classes / other functions are skipped.
+     */
+    private fun collectExportedFunctions(file: PsiFile, relative: String): List<JsFunctionData> {
+        val out = mutableListOf<JsFunctionData>()
+        // Walk every JSFunction; we filter to module-top-level by checking the
+        // parent chain stops at the file / an export statement.
+        val fns = PsiTreeUtil.findChildrenOfType(file, JSFunction::class.java)
+        for (fn in fns) {
+            val name = fn.name ?: continue
+            if (!isTopLevel(fn)) continue
+            val exported = isExported(fn)
+            if (!exported) continue
+            out += JsFunctionData(
+                fqn = "$relative::$name",
+                name = name,
+                filePath = relative,
+                exported = true,
+                isDefault = isDefaultExport(fn),
+                isAsync = fn.text.substringBefore("(").contains("async"),
+                body = fn.text.take(MAX_BODY_CHARS)
+            )
+        }
+        // `export const foo = () => {}` / `= function () {}` — RHS is a function
+        // expression, variable is the named binding.
+        val vars = PsiTreeUtil.findChildrenOfType(file, JSVariable::class.java)
+        for (v in vars) {
+            val name = v.name ?: continue
+            if (!isTopLevel(v)) continue
+            if (!isExported(v)) continue
+            val init = v.initializerOrStub ?: continue
+            val isFunctional = init is JSFunction ||
+                init is JSFunctionExpression ||
+                (init is PsiElement && init.text.let { it.contains("=>") || it.trimStart().startsWith("function") })
+            if (!isFunctional) continue
+            // Skip duplicates — if the JSFunction sweep already captured it,
+            // don't double-emit.
+            if (out.any { it.name == name }) continue
+            out += JsFunctionData(
+                fqn = "$relative::$name",
+                name = name,
+                filePath = relative,
+                exported = true,
+                isDefault = false,
+                isAsync = init.text.substringBefore("(").contains("async"),
+                body = v.text.take(MAX_BODY_CHARS)
+            )
+        }
+        return out
+    }
+
+    private fun isTopLevel(element: PsiElement): Boolean {
+        // A function is top-level if its nearest enclosing function-like
+        // ancestor IS the file itself. Walking the parent chain to a JSFunction
+        // and returning false when the function is an ancestor covers it.
+        var parent: PsiElement? = element.parent
+        while (parent != null && parent !is PsiFile) {
+            if (parent is JSFunction && parent !== element) return false
+            parent = parent.parent
+        }
+        return true
+    }
+
+    /**
+     * An element is "exported" when any ancestor is an ES6 `export` statement
+     * OR the element is itself a function with `export` in its leading tokens.
+     * The JS PSI has no single `ExportStatement` interface shared across
+     * versions, so we fall back to a textual probe on the leading chars of the
+     * enclosing statement — stable enough for the shapes tree-sitter's
+     * `tags.scm` also targets.
+     */
+    private fun isExported(element: PsiElement): Boolean {
+        var cursor: PsiElement? = element
+        while (cursor != null && cursor !is PsiFile) {
+            // Check textual prefix of the enclosing statement.
+            val txt = cursor.text.orEmpty().trimStart()
+            if (txt.startsWith("export ") || txt.startsWith("export\n") ||
+                txt.startsWith("export{") || txt.startsWith("export*") ||
+                txt.startsWith("export default ")
+            ) return true
+            cursor = cursor.parent
+        }
+        return false
+    }
+
+    private fun isDefaultExport(element: PsiElement): Boolean {
+        var cursor: PsiElement? = element
+        while (cursor != null && cursor !is PsiFile) {
+            if (cursor.text.orEmpty().trimStart().startsWith("export default")) return true
+            cursor = cursor.parent
+        }
+        return false
+    }
+
+    /**
+     * Walk every `ES6ImportDeclaration` in the file and emit one [ImportsEdge]
+     * per imported binding.
+     */
+    private fun collectImports(file: PsiFile, sourceModule: String): List<ImportsEdge> {
+        val out = mutableListOf<ImportsEdge>()
+        val decls = PsiTreeUtil.findChildrenOfType(file, ES6ImportDeclaration::class.java)
+        for (decl in decls) {
+            val moduleText = decl.importModuleText?.trim()?.trim('\'', '"', '`') ?: continue
+            val lineStart = 0 // line numbers require Document — cheap future addition
+
+            // Each binding in the declaration produces one edge.
+            for (binding in decl.importedBindings) {
+                val resolvedFqn = resolveWithAliasHop(binding)
+                val targetModule = targetModuleFromFqn(resolvedFqn) ?: moduleText
+                out += ImportsEdge(
+                    sourceModule = sourceModule,
+                    targetModule = targetModule,
+                    importedName = binding.name ?: "default",
+                    localAlias = null,
+                    isDefault = true, // default binding is the bare `import Foo from '…'` form
+                    isNamespace = false,
+                    targetFqn = resolvedFqn,
+                    unresolved = resolvedFqn == null,
+                    lineStart = lineStart
+                )
+            }
+            for (spec in decl.importSpecifiers) {
+                val (resolvedFqn, targetModule) = resolveSpecifier(spec, moduleText)
+                val external = spec.referenceName
+                val local = spec.declaredName
+                val importedName = external ?: local ?: "?"
+                // localAlias is non-null only when external and local differ
+                // (i.e. `import { X as Y }`). When both are the same or one is
+                // null, there is no alias to record.
+                val aliasValue = if (external != null && local != null && external != local) local else null
+                out += ImportsEdge(
+                    sourceModule = sourceModule,
+                    targetModule = targetModule,
+                    importedName = importedName,
+                    localAlias = aliasValue,
+                    isDefault = false,
+                    isNamespace = false,
+                    targetFqn = resolvedFqn,
+                    unresolved = resolvedFqn == null,
+                    lineStart = lineStart
+                )
+            }
+            // Namespace imports: `import * as ns from '…'`. The PSI `namedImports`
+            // accessor exposes the specifier list; the namespace case is a
+            // distinct node we pull via text probe on the declaration.
+            val hasNamespace = decl.text.contains("import *") ||
+                decl.text.contains("import * as")
+            if (hasNamespace) {
+                out += ImportsEdge(
+                    sourceModule = sourceModule,
+                    targetModule = moduleText,
+                    importedName = "*",
+                    isDefault = false,
+                    isNamespace = true,
+                    targetFqn = null,
+                    unresolved = true,
+                    lineStart = lineStart
+                )
+            }
+        }
+        return out
+    }
+
+    /**
+     * Resolve a specifier, handling the aliased-import 2-hop case
+     * (`import { alpha as renamed } from './a'`). The first `.resolve()` on
+     * the reference element stops at `ES6ImportSpecifierAlias`; we call
+     * resolve again on the alias's own reference to reach the original
+     * declaration. Verified in ImportResolveTest.testCaseF.
+     */
+    private fun resolveSpecifier(spec: ES6ImportSpecifier, moduleText: String): Pair<String?, String> {
+        // `spec.declaredName` is the binding visible in this file. When there's
+        // an alias, this is the alias; otherwise it matches the external name.
+        val ref = spec.reference ?: return null to moduleText
+        var target: PsiElement? = try { ref.resolve() } catch (_: Throwable) { null }
+        if (target is ES6ImportSpecifierAlias) {
+            val inner = target.reference
+            target = try { inner?.resolve() } catch (_: Throwable) { null }
+        }
+        if (target == null) return null to moduleText
+        val fqn = fqnFor(target)
+        val module = fqn?.substringBefore("::") ?: moduleText
+        return fqn to module
+    }
+
+    /**
+     * Same two-hop resolve for default-binding references, if they ever land
+     * on an alias node.
+     */
+    private fun resolveWithAliasHop(binding: PsiElement): String? {
+        val ref = binding.references.firstOrNull() ?: return null
+        var target: PsiElement? = try { ref.resolve() } catch (_: Throwable) { null }
+        if (target is ES6ImportSpecifierAlias) {
+            val inner = target.reference
+            target = try { inner?.resolve() } catch (_: Throwable) { null }
+        }
+        return target?.let(::fqnFor)
+    }
+
+    /**
+     * Compute a `<filePath>::<name>` fqn for a resolved PSI element.
+     * Falls back to null when the element doesn't belong to a nameable
+     * declaration (built-ins, external libs, etc).
+     */
+    private fun fqnFor(element: PsiElement): String? {
+        val containing = element.containingFile?.virtualFile?.path ?: return null
+        val name = when (element) {
+            is JSFunction -> element.name
+            is JSVariable -> element.name
+            is ES6ImportSpecifier -> element.declaredName
+            else -> element.text.takeIf { it.length < 120 }?.substringBefore('(')?.trim()
+        } ?: return null
+        // Best effort — we don't have the project base path here, so we return
+        // an absolute path::name; the importer rebases via the relative
+        // `sourceModule` during the Python load pass if needed.
+        return "$containing::$name"
+    }
+
+    /**
+     * Extract the target module path from a resolved fqn (`path::name` → `path`).
+     * Returns null when the fqn shape is unexpected.
+     */
+    private fun targetModuleFromFqn(fqn: String?): String? {
+        if (fqn.isNullOrBlank()) return null
+        val idx = fqn.lastIndexOf("::")
+        return if (idx > 0) fqn.substring(0, idx) else null
+    }
+}

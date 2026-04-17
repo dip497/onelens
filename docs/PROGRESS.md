@@ -97,6 +97,20 @@ Full-import-only. Delta + auto-sync deferred to Phase B2.
 
 ---
 
+## Phase B2 — in progress (JS business-logic layer + Vue delta)
+
+| # | Deliverable | Status | Where |
+|---|---|---|---|
+| B2.JS.1 | `JsModuleData` + `JsFunctionData` + `ImportsEdge` models (new Kotlin data classes) | ✅ | `plugin/.../export/ExportModels.kt` |
+| B2.JS.2 | `JsModuleCollector` — per-file Module node, exported top-level functions, resolved ES6 imports with 2-hop alias resolve (verified by `ImportResolveTest`) | ✅ | `plugin/.../framework/vue3/collectors/JsModuleCollector.kt` |
+| B2.JS.3 | Python loader — `JsModule` / `JsFunction` nodes + `IMPORTS` edges (symbol-resolved via `targetFqn`, module-level fallback when unresolved) | ✅ | `python/src/onelens/importer/loader.py` |
+| B2.JS.4 | NODE_TYPES + NODE_SCHEMA + FULLTEXT_SCHEMA extended for JS modules / functions | ✅ | `python/src/onelens/graph/db.py`, `python/src/onelens/importer/schema.py` |
+| B2.JS.5 | Dogfood re-sync and verify business-logic `.js` helpers under `src/data/*` become queryable as `JsFunction` nodes | ⬜ | Needs WebStorm plugin re-install + Sync Graph |
+| B2.JS.6 | JS `CALLS` edge within + across modules | ⬜ | Raw data (JSCallExpression) available; emitter pending |
+| B2.JS.7 | `Channel` node + `EMITS` / `LISTENS` edges for `mitt`/`Bus.emit`/`Bus.on` — differentiator (no surveyed tool does this) | ⬜ | |
+| B2.JS.8 | `Constant` node for exported object / array literals (rule tables, config) | ⬜ | |
+| B2.JS.9 | `RE_EXPORTS` edge for barrel files | ⬜ | |
+
 ## Phase B2 — Deferred (Vue delta + auto-sync)
 
 | # | Deliverable | Status | Notes |
