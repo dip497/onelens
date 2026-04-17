@@ -27,6 +27,18 @@ plugin/.kotlin/
 # OneLens local data
 .onelens/
 
+# Research/benchmark scratchpads (trial_*.py) — keep locally for reproducing
+# embedding-model comparisons, but not part of the shipped code.
+python/trial_*.py
+
+# Modal deployment scripts — reference specific graph names, keep local.
+python/modal_index*.py
+
+# Benchmark suite — references specific client graph names + FQN ground truth.
+# Every developer runs benchmarks against their own indexed project; no single
+# cases.yaml is portable. Keep local.
+python/benchmarks/
+
 # Environment
 .env
 .env.local
@@ -44,3 +56,8 @@ Thumbs.db
 # Misc
 *.log
 .bg-shell/
+
+# Project-local agent overrides
+CLAUDE.local.md
+AGENTS.local.md
+.claude/settings.local.json

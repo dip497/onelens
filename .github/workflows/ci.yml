@@ -1,0 +1,107 @@
+name: CI
+
+# Runs on every PR and push to main. Validates the plugin compiles, the
+# Python package installs + imports, and that the skill bundling still works.
+# Fast feedback loop — no tests yet, but catches the obvious breakage:
+# CLI command rename mismatches, broken imports, schema drifts.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Cancel superseded runs on the same ref — save CI minutes on PR rebases.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin:
+    name: Plugin (compile + verify)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle with caching
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile Kotlin
+        working-directory: plugin
+        run: ./gradlew compileKotlin --no-daemon --stacktrace
+
+      - name: Build plugin ZIP (smoke)
+        working-directory: plugin
+        # buildPlugin is the canonical "does it package?" check. Cheap after
+        # compileKotlin has primed caches.
+        run: ./gradlew buildPlugin --no-daemon
+
+  python:
+    name: Python (install + imports + schema)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package with context extra
+        working-directory: python
+        # Installs core + chromadb (context) + all other optional-deps we
+        # depend on at import time. Torch/chromadb are heavy (~1 GB) but
+        # GH runner disk budget is ~14 GB — plenty.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[context,dev]"
+
+      - name: Smoke-test imports
+        working-directory: python
+        # If any of these fail, the PR introduced a broken import or a
+        # missing dep declaration. No test suite yet — this is the floor.
+        run: |
+          python -c "
+          from onelens import mcp_server
+          from onelens.miners.code_miner import CodeMiner
+          from onelens.importer.loader import GraphLoader
+          from onelens.importer.delta_loader import DeltaLoader
+          from onelens.importer.pagerank import compute_method_pagerank
+          from onelens.graph import analysis, queries
+          from onelens.context import retrieval, searcher, reranker, embedder
+          print('imports OK')
+          "
+
+      - name: Verify CodeMiner delta API surface
+        working-directory: python
+        # Guard against accidentally renaming/removing methods that
+        # delta_loader.py calls. Broken here → delta sync silently stops
+        # updating ChromaDB in production.
+        run: |
+          python -c "
+          from onelens.miners.code_miner import CodeMiner
+          required = {'mine', 'mine_upserts', 'delete_by_ids', 'delete_methods_of_classes'}
+          missing = required - set(dir(CodeMiner))
+          assert not missing, f'CodeMiner missing: {missing}'
+          print('CodeMiner API OK')
+          "
+
+      - name: Ruff lint
+        working-directory: python
+        continue-on-error: true  # advisory until we agree on strict set
+        run: ruff check src/
+
+      - name: Mypy (advisory)
+        working-directory: python
+        continue-on-error: true
+        run: mypy --ignore-missing-imports src/onelens

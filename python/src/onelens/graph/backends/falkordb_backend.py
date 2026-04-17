@@ -26,7 +26,17 @@ class FalkorDBBackend(GraphDB):
         self._graph.query(cypher, params=params or {})
 
     def clear(self) -> None:
-        self._graph.query("MATCH (n) DETACH DELETE n")
+        # Delete the whole graph key, not just nodes — this also drops FTS/vector
+        # indexes. Without this, evolving the FTS schema (e.g. adding a field)
+        # fails because FalkorDB silently refuses to re-create an existing index.
+        try:
+            self._graph.delete()
+        except Exception:
+            # First-time runs: graph key doesn't exist yet. DETACH DELETE is a
+            # safe no-op fallback.
+            self._graph.query("MATCH (n) DETACH DELETE n")
+        # Re-bind the graph handle so subsequent writes land in a fresh graph.
+        self._graph = self._db.select_graph(self._graph.name)
 
     def close(self) -> None:
         pass

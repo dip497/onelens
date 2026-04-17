@@ -14,11 +14,30 @@ NODE_SCHEMA = {
     "Annotation": "CREATE INDEX FOR (n:Annotation) ON (n.fqn)",
 }
 
-# Full-text search indexes — FalkorDB CALL procedure syntax
+# Full-text search indexes — FalkorDB CALL procedure syntax.
+#
+# Field weights (verified from docs.falkordb.com/cypher/indexing/fulltext-index):
+# { field: 'x', weight: W } boosts W in the TF-IDF score for matches in that field.
+# For code search, the method/class name is the most discriminative signal — weight
+# it 10× over the body. Javadoc is a middle ground (docstring usually summarizes
+# intent more tightly than body). Body stays at default 1.0 — it catches the long
+# tail of in-body terms ("BCrypt", "shutdown hook") the name misses.
 FULLTEXT_SCHEMA = {
-    "Class_name": "CALL db.idx.fulltext.createNodeIndex('Class', 'name')",
-    "Method_name": "CALL db.idx.fulltext.createNodeIndex('Method', 'name')",
-    "Endpoint_path": "CALL db.idx.fulltext.createNodeIndex('Endpoint', 'path')",
+    "Class_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Class', {field: 'name', weight: 10.0})"
+    ),
+    "Method_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Method',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'javadoc', weight: 3.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "Endpoint_path": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Endpoint', {field: 'path', weight: 5.0})"
+    ),
 }
 
 # Relationship types — no DDL needed for FalkorDB/Neo4j (edges are schemaless)

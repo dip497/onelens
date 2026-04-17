@@ -1,0 +1,97 @@
+name: Release Plugin
+
+# Tag the commit with a SemVer tag (e.g. `v0.2.0`) to trigger a release.
+# The tag string's `v` prefix is stripped to derive `pluginVersion`, which is
+# injected into Gradle at build time so the plugin.xml <version> and the ZIP
+# filename both reflect the released version. No manual pluginVersion bump
+# in gradle.properties is required between releases.
+#
+# Release artifact: plugin/build/distributions/onelens-graph-builder-X.Y.Z.zip
+# Uploaded as a GitHub Release asset against the pushed tag.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (without leading v, e.g. 0.2.0). For ad-hoc builds only."
+        required: true
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write  # required to create the GitHub Release and upload assets
+
+jobs:
+  build-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive plugin version
+        id: ver
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Strip "refs/tags/v" → "X.Y.Z"
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle with caching
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build plugin
+        working-directory: plugin
+        # Override pluginVersion so the JAR metadata + ZIP name match the tag.
+        # buildPlugin produces the distributable ZIP under build/distributions/.
+        run: ./gradlew buildPlugin -PpluginVersion=${{ steps.ver.outputs.version }} --no-daemon --stacktrace
+
+      - name: Verify plugin (JetBrains Platform Verifier)
+        working-directory: plugin
+        # pluginVerification is declared in plugin/build.gradle.kts. This
+        # catches breakage against the target IDE builds before shipping.
+        # Non-fatal for now — use `continue-on-error` so the release still
+        # lands if verifier flags are advisory.
+        continue-on-error: true
+        run: ./gradlew verifyPlugin -PpluginVersion=${{ steps.ver.outputs.version }} --no-daemon
+
+      - name: Locate built ZIP
+        id: artifact
+        working-directory: plugin
+        run: |
+          zip_path=$(find build/distributions -name "*.zip" -print -quit)
+          if [[ -z "$zip_path" ]]; then
+            echo "No plugin ZIP produced" >&2
+            exit 1
+          fi
+          echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$(basename "$zip_path")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact (workflow history)
+        # Always keep the artifact so workflow_dispatch runs are downloadable
+        # even when they don't create a release.
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ steps.ver.outputs.version }}
+          path: plugin/${{ steps.artifact.outputs.zip }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: OneLens ${{ github.ref_name }}
+          # Release notes default to GitHub's auto-generated list of commits
+          # since the previous tag — good enough starting point; override by
+          # editing the release after publish if you want curated notes.
+          generate_release_notes: true
+          files: plugin/${{ steps.artifact.outputs.zip }}

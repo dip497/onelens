@@ -85,6 +85,15 @@ object MemberCollector {
             )
         }
 
+        // Body + javadoc: capped to keep JSON export lean and within embedder context.
+        // Null for interfaces/abstracts (no body) or methods too large for a useful embedding.
+        val body = try {
+            method.body?.text?.takeIf { it.length <= MAX_BODY_CHARS }
+        } catch (_: Exception) { null }
+        val javadoc = try {
+            method.docComment?.text?.take(MAX_JAVADOC_CHARS)
+        } catch (_: Exception) { null }
+
         return MethodData(
             fqn = fqn,
             name = method.name,
@@ -100,9 +109,14 @@ object MemberCollector {
             annotations = ClassCollector.extractAnnotations(method.modifierList),
             filePath = filePath,
             lineStart = lineStart,
-            lineEnd = lineEnd
+            lineEnd = lineEnd,
+            body = body,
+            javadoc = javadoc
         )
     }
+
+    private const val MAX_BODY_CHARS = 20_000
+    private const val MAX_JAVADOC_CHARS = 2_000
 
     private fun extractField(
         field: PsiField,

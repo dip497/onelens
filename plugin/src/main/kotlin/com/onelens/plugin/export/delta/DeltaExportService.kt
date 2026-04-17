@@ -43,6 +43,13 @@ object DeltaExportService {
         val changedFiles: List<String>,
         val deleted: DeletedSection,
         val upserted: UpsertedSection,
+        // Spring beans / endpoints / injections are cross-class by nature
+        // (bean A injects bean B), so per-class filtering loses edges. We
+        // ship a full re-scan on every delta — the Python side treats this
+        // as "replace all Spring data". Cost is cheap: AnnotatedElementsSearch
+        // is indexed. Modules are small + rarely change; same treatment.
+        val spring: SpringData? = null,
+        val modules: List<ModuleData> = emptyList(),
         val stats: DeltaStats
     )
 
@@ -140,6 +147,18 @@ object DeltaExportService {
         val inheritance = InheritanceCollector.collect(project, affectedClasses)
         val annotations = AnnotationCollector.collect(project, affectedClasses)
 
+        // 4b. Spring + modules: full re-scan (indexed, cheap). Per-class
+        // filtering would miss cross-class injection edges and newly-added
+        // @RestController / @Service annotations on changed files.
+        val spring = if (config.includeSpring) {
+            try { SpringCollector.collect(project) } catch (e: Throwable) {
+                LOG.warn("Delta Spring collection failed: ${e.message}"); null
+            }
+        } else null
+        val modules = try { ModuleCollector.collect(project) } catch (e: Throwable) {
+            LOG.warn("Delta module collection failed: ${e.message}"); emptyList()
+        }
+
         // Also add modified files' old classes to deleted (they'll be replaced by upserted)
         for (modifiedFile in modifiedFiles) {
             val oldClassFqns = state.state.fileHashes[modifiedFile]
@@ -169,6 +188,8 @@ object DeltaExportService {
                 methodOverrides = inheritance.overrides,
                 annotations = annotations,
             ),
+            spring = spring,
+            modules = modules,
             stats = DeltaStats(
                 changedFileCount = modifiedFiles.size + deletedFiles.size,
                 deletedClassCount = deletedClasses.distinct().size,

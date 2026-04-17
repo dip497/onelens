@@ -156,7 +156,12 @@ class ExportService {
      * Auto-installs onelens CLI via uv if not found.
      * Returns the CLI output, or null if setup failed.
      */
-    fun syncToGraph(exportFile: Path, graphName: String, config: ExportConfig): String? {
+    fun syncToGraph(
+        exportFile: Path,
+        graphName: String,
+        config: ExportConfig,
+        isFull: Boolean = true,
+    ): String? {
         // Auto-setup: ensure onelens CLI is installed
         val cliPath = PythonEnvManager.getOneLensCli(config.onelensSourcePath)
         if (cliPath == null) {
@@ -164,13 +169,37 @@ class ExportService {
             return null
         }
 
+        // Preflight: verify FalkorDB is reachable. Without this the CLI
+        // fails with an opaque connection error that only surfaces in
+        // idea.log. Better to bail early with a clear message the user
+        // can act on. `falkordblite` backend is embedded and doesn't
+        // need a server — skip the check there.
+        if (config.graphBackend == "falkordb" && !isFalkorDbReachable(config)) {
+            LOG.warn(
+                "FalkorDB not reachable at ${config.falkordbHost}:${config.falkordbPort}. " +
+                    "Start it: docker run -d -p 17532:6379 -p 3001:3000 falkordb/falkordb:latest"
+            )
+            return "FalkorDB is not running. Start it with:\n" +
+                "docker run -d -p 17532:6379 -p 3001:3000 falkordb/falkordb:latest\n" +
+                "Or switch --backend to falkordblite in OneLens settings for an embedded DB."
+        }
+
         try {
+            // `import_graph` auto-detects full vs delta from the export header.
+            // `--context` triggers ChromaDB semantic layer: graph + embeddings.
+            //   Full: ~30s graph + ~20 min embedding (first time only)
+            //   Delta: ~seconds (only changed methods re-embed via deterministic IDs)
+            // `--clear` wipes the graph before import — full path only; passing
+            // it on delta would destroy the graph.
             val command = mutableListOf(
-                cliPath, "import", exportFile.toString(),
+                cliPath, "import_graph", exportFile.toString(),
                 "--graph", graphName,
                 "--backend", config.graphBackend,
-                "--clear"
+                "--context"
             )
+            if (isFull) {
+                command += "--clear"
+            }
 
             LOG.info("Running: ${command.joinToString(" ")}")
 
@@ -193,6 +222,26 @@ class ExportService {
         } catch (e: Exception) {
             LOG.warn("Auto-import failed: ${e.message}")
             return null
+        }
+    }
+
+    /**
+     * TCP ping FalkorDB. Fast (~1-5ms on localhost miss; ~20ms remote).
+     * Used as a preflight — if the DB isn't listening, syncing fails with
+     * an opaque error deep in the CLI. Better to bail early with a message
+     * the user can act on.
+     */
+    private fun isFalkorDbReachable(config: ExportConfig): Boolean {
+        return try {
+            java.net.Socket().use { sock ->
+                sock.connect(
+                    java.net.InetSocketAddress(config.falkordbHost, config.falkordbPort),
+                    800
+                )
+                true
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 

@@ -159,7 +159,7 @@ class ExportFullAction : AnAction() {
             is DeltaExportService.DeltaResult.Success -> {
                 // Auto-import delta
                 val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                val importResult = service.syncToGraph(result.path, project.name, config.copy(autoImport = true))
+                val importResult = service.syncToGraph(result.path, project.name, config.copy(autoImport = true), isFull = false)
 
                 val stats = result.stats
                 notify(project,

@@ -76,4 +76,16 @@ tasks {
     wrapper {
         gradleVersion = providers.gradleProperty("gradleVersion").get()
     }
+
+    // Bundle the OneLens skill into the plugin JAR so `InstallSkillAction`
+    // can ship it to ~/.claude/skills/onelens/SKILL.md without requiring
+    // users to have the repo checked out. Source: skills/onelens/SKILL.md
+    // at the project root (one level above plugin/). Runs on every build;
+    // processResources copies it into the jar under /skills/onelens/SKILL.md.
+    processResources {
+        from("${project.rootDir.parent}/skills") {
+            into("skills")
+            include("onelens/SKILL.md")
+        }
+    }
 }
