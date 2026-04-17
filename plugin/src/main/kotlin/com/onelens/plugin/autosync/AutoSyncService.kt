@@ -31,6 +31,7 @@ class AutoSyncService(private val project: Project) : Disposable {
 
     private val alarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val pendingChangedFiles = mutableSetOf<String>()
+    private val pendingDeletedFiles = mutableSetOf<String>()
     @Volatile private var enabled = false
     private val syncing = AtomicBoolean(false)
 
@@ -46,6 +47,7 @@ class AutoSyncService(private val project: Project) : Disposable {
         alarm.cancelAllRequests()
         synchronized(pendingChangedFiles) {
             pendingChangedFiles.clear()
+            pendingDeletedFiles.clear()
         }
         LOG.info("Auto-sync disabled for ${project.name}")
     }
@@ -59,47 +61,87 @@ class AutoSyncService(private val project: Project) : Disposable {
 
         synchronized(pendingChangedFiles) {
             pendingChangedFiles.add(relativePath)
+            // If a file is deleted and recreated inside one debounce window,
+            // prefer the modified path (new content wins).
+            pendingDeletedFiles.remove(relativePath)
         }
 
+        scheduleDebounced()
+    }
+
+    /**
+     * Called by AutoSyncFileListener when a .java file is deleted or moved away.
+     * Delta exporter needs to know the old path so it can drop its classes
+     * from the graph + embeddings — otherwise orphan nodes accumulate.
+     */
+    fun onJavaFileDeleted(relativePath: String) {
+        if (!enabled || syncing.get()) return
+
+        synchronized(pendingDeletedFiles) {
+            pendingDeletedFiles.add(relativePath)
+            // Deletion supersedes a modification in the same window.
+            pendingChangedFiles.remove(relativePath)
+        }
+
+        scheduleDebounced()
+    }
+
+    private fun scheduleDebounced() {
         val debounceMs = OneLensSettings.getInstance().state.autoSyncDebounceMs.toLong()
         alarm.cancelAllRequests()
         alarm.addRequest(::triggerSync, debounceMs)
     }
 
+    // Git branch-change listener was deferred — the Platform's
+    // BranchChangeListener topic classpath varies by IDE bundle and the
+    // reliable path is to let the VFS file listener pick up the file
+    // modifications that branch switches / pulls produce. Revisit once
+    // we have a stable reference to the correct topic for the target
+    // IDE flavors.
+
     private fun triggerSync() {
         if (!syncing.compareAndSet(false, true)) return
 
-        // Don't sync while IDE is indexing — PSI data isn't ready
+        // Don't sync while IDE is indexing — PSI data isn't ready.
+        // Retry after smart mode by firing triggerSync directly; adding an
+        // empty path to pendingChangedFiles (the previous approach) would
+        // inject `""` into the file list and confuse the exporter.
         if (DumbService.isDumb(project)) {
             syncing.set(false)
-            // Retry after dumb mode ends
-            DumbService.getInstance(project).runWhenSmart { onJavaFileChanged("") }
+            DumbService.getInstance(project).runWhenSmart {
+                val debounceMs = OneLensSettings.getInstance().state.autoSyncDebounceMs.toLong()
+                alarm.cancelAllRequests()
+                alarm.addRequest(::triggerSync, debounceMs)
+            }
             return
         }
 
         val filesToSync: List<String>
+        val filesDeleted: List<String>
         synchronized(pendingChangedFiles) {
-            if (pendingChangedFiles.isEmpty()) {
+            if (pendingChangedFiles.isEmpty() && pendingDeletedFiles.isEmpty()) {
                 syncing.set(false)
                 return
             }
             filesToSync = pendingChangedFiles.toList()
+            filesDeleted = pendingDeletedFiles.toList()
             pendingChangedFiles.clear()
+            pendingDeletedFiles.clear()
         }
 
-        LOG.info("Auto-sync triggered: ${filesToSync.size} files changed")
+        LOG.info("Auto-sync triggered: ${filesToSync.size} modified, ${filesDeleted.size} deleted")
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
             override fun run(indicator: ProgressIndicator) {
                 try {
-                    indicator.text = "Auto-syncing ${filesToSync.size} changed files..."
+                    indicator.text = "Auto-syncing ${filesToSync.size} modified, ${filesDeleted.size} deleted..."
                     val config = ExportConfig()
-                    val result = DeltaExportService.exportDeltaForFiles(project, config, filesToSync)
+                    val result = DeltaExportService.exportDeltaForFiles(project, config, filesToSync, filesDeleted)
 
                     when (result) {
                         is DeltaExportService.DeltaResult.Success -> {
                             val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                            service.syncToGraph(result.path, project.name, config)
+                            service.syncToGraph(result.path, project.name, config, isFull = false)
                             LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
                         }
                         is DeltaExportService.DeltaResult.NeedFullExport -> {

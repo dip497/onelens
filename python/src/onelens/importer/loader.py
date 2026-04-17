@@ -72,6 +72,7 @@ class GraphLoader:
             self._batch_nodes(progress, "Methods", methods, "Method", "fqn", [
                 "name", "classFqn", "returnType", "isConstructor",
                 "filePath", "lineStart", "lineEnd",
+                "body", "javadoc",
             ])
 
             fields = data.get("fields", [])
@@ -254,8 +255,27 @@ class GraphLoader:
                                              "SpringBean", "classFqn", "SpringBean", "classFqn",
                                              ["field", "type"])
 
-        elapsed = time.time() - start
+        # Post-import phase: compute PageRank on the call graph and write
+        # it back as Method.pagerank + Class.pagerank. One-time cost (~5-15s
+        # for 80K methods). Enables "important methods" queries via
+        # `ORDER BY pagerank DESC` with no runtime traversal.
         stats = data.get("stats", {})
+        try:
+            from onelens.importer import pagerank as _pr
+
+            pr_stats = _pr.run(self.db)
+            stats["pagerank"] = pr_stats
+            if pr_stats.get("methods_scored"):
+                print(
+                    f"PageRank: {pr_stats['methods_scored']} methods, "
+                    f"{pr_stats['classes_scored']} classes "
+                    f"({pr_stats['total_ms']} ms)"
+                )
+        except Exception as e:
+            logger.warning("PageRank computation failed: %s", e)
+            stats["pagerank"] = {"error": str(e)}
+
+        elapsed = time.time() - start
         stats["importDurationSec"] = round(elapsed, 1)
         print(f"\nImport complete in {elapsed:.1f}s")
         return stats

@@ -1,20 +1,23 @@
 # OneLens
 
-Code knowledge graph for Java/Spring Boot projects. Gives AI 100% accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints — in one click.
+Code knowledge graph for Java/Spring Boot projects. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints — plus semantic search over method bodies and javadoc.
 
 ## What it does
 
-OneLens exports your entire project's code intelligence from IntelliJ using PSI APIs (the same engine that powers IntelliJ's own code navigation), then loads it into a graph database for instant querying.
+OneLens exports your project's code intelligence from IntelliJ using PSI APIs (the same engine that powers IntelliJ's own code navigation), loads it into a graph database (FalkorDB), and embeds method bodies + classes into ChromaDB for semantic retrieval.
 
-**10K classes, 600K call edges, 2K Spring beans — indexed in 4 minutes, imported in 30 seconds.**
+**Real numbers on a 10K-class Spring Boot monolith:**
+- 74K methods, 605K call edges, 2.3K Spring beans, 2.3K REST endpoints
+- Full export: ~4 minutes • Graph import: ~30 s • Embedding pass: ~20 min
+- Delta re-sync (single file save): < 5 s end-to-end
 
-## Quick Start (Linux)
+## Quick Start
 
 ### Prerequisites
 
 - IntelliJ IDEA (Community or Ultimate)
-- Docker (for FalkorDB)
-- Python 3.10+ and [uv](https://docs.astral.sh/uv/)
+- Docker (for FalkorDB — or use `--backend falkordblite` for embedded)
+- [uv](https://docs.astral.sh/uv/) — plugin auto-installs the Python env on first sync
 
 ### 1. Start FalkorDB
 
@@ -22,123 +25,189 @@ OneLens exports your entire project's code intelligence from IntelliJ using PSI 
 docker run -d --name falkordb -p 17532:6379 -p 3001:3000 falkordb/falkordb:latest
 ```
 
-Graph browser available at http://localhost:3001
+Graph browser: http://localhost:3001
 
-### 2. Build & Install Plugin
+### 2. Install the plugin
+
+Download `onelens-graph-builder-0.1.0.zip` from the [latest release](../../releases), then:
+
+IntelliJ → **Settings → Plugins → Gear → Install from Disk** → select the zip.
+
+Or build from source:
 
 ```bash
 cd plugin
 ./gradlew buildPlugin
+# → plugin/build/distributions/onelens-graph-builder-0.1.0.zip
 ```
 
-Install: IntelliJ → Settings → Plugins → Gear icon → Install from Disk → select `plugin/build/distributions/onelens-graph-builder-0.1.0.zip`
+### 3. First sync
 
-### 3. Sync Graph
+The plugin auto-runs on first open and shows a balloon with:
 
-In IntelliJ: **Tools → OneLens → Sync Graph**
+- **Sync Now** — export + import (creates `~/.onelens/venv/` via uv, installs `onelens[context]`, runs full import with embeddings + PageRank)
+- **Install Skill** — drops `~/.claude/skills/onelens/SKILL.md` so Claude Code can query the graph in natural language
+- **Later**
 
-First time, the plugin will:
-1. Export all code intelligence to `~/.onelens/exports/`
-2. Auto-create a Python venv at `~/.onelens/venv/` (via uv)
-3. Install the `onelens` CLI
-4. Import into FalkorDB
+After the first full sync, **auto-sync is on by default**: every `.java` save triggers a debounced delta export (5 s) that incrementally updates the graph *and* re-embeds changed methods/classes. Toggle via **Tools → OneLens → Auto-sync**.
 
-Subsequent syncs detect changes and do delta imports (seconds).
+### 4. Query with Claude Code
 
-### 4. Query & Analyze
-
-```bash
-# Search by name (full-text, supports prefix and fuzzy)
-~/.onelens/venv/bin/onelens search "User*" --graph my-project
-~/.onelens/venv/bin/onelens search "authenticate" --type method --graph my-project
-
-# Which REST endpoints break if I change this method?
-~/.onelens/venv/bin/onelens impact "com.example.UserService#updateUser(CallContext,long,UserRest)" --graph my-project
-
-# Trace endpoint execution flow
-~/.onelens/venv/bin/onelens trace "/api/users" --type endpoint --depth 3 --graph my-project
-
-# List all entry points (REST endpoints, scheduled jobs)
-~/.onelens/venv/bin/onelens entry-points --graph my-project
-
-# Raw Cypher
-~/.onelens/venv/bin/onelens query "MATCH (c:Class {name: 'MyService'})-[:HAS_METHOD]->(m) RETURN m.name LIMIT 10" --graph my-project
-
-# Stats
-~/.onelens/venv/bin/onelens stats --graph my-project
-```
-
-### 5. Use with Claude Code
-
-Copy the skill from `skills/onelens/` to `~/.claude/skills/onelens/` and ask naturally:
+Install the skill (via the balloon or **Tools → OneLens → Install Skill**), then ask naturally:
 
 - "what calls UserServiceImpl?"
 - "blast radius of changing OrderService"
-- "which endpoints break if I change FlotoBaseService?"
+- "which endpoints break if I change PaymentService?"
 - "trace the /api/orders endpoint"
-- "search for methods related to schedule"
+- "how does password encryption work in this codebase?" *(semantic)*
 
-## What gets exported
+The skill lives at `skills/onelens/SKILL.md` — bundled inside the plugin jar, so no manual copy step.
 
-| Data | Count (real project) | Source |
-|------|---------------------|--------|
-| Classes, interfaces, enums | 10,299 | `PsiShortNamesCache` |
-| Methods with resolved types | 74,557 | `PsiClass.getMethods()` |
-| Fields | 58,420 | `PsiClass.getFields()` |
-| Call edges (100% accurate) | 605,736 | `PsiMethodCallExpression.resolveMethod()` |
-| Inheritance (extends/implements) | 9,839 | `PsiClass.superClass/interfaces` |
-| Method overrides | 12,530 | `PsiMethod.findSuperMethods()` |
-| Spring beans | 2,335 | `@Service/@Component/@Repository` detection |
-| REST endpoints | 2,320 | `@RequestMapping/@GetMapping` etc. |
-| Spring injections | 7,854 | `@Autowired` + constructor injection |
-| Annotation usages | 68,396 | `PsiModifierList.getAnnotations()` |
-| External library stubs | 1,609 classes / 5,403 methods | Auto-created from resolved call targets |
+### 5. Or use the CLI directly
+
+```bash
+onelens=~/.onelens/venv/bin/onelens
+
+# Structural search (FTS, weighted: name > javadoc > body)
+$onelens search "User*" --node-type class --graph my-project
+$onelens search "authenticate" --node-type method --graph my-project
+
+# Semantic search (ChromaDB + cross-encoder rerank)
+$onelens search "password hashing" --semantic --graph my-project
+
+# Hybrid retrieval (FTS + semantic RRF + PageRank boost + rerank threshold)
+$onelens retrieve --query "how password encryption works" --graph my-project
+
+# Impact analysis — which REST endpoints break if a method changes?
+$onelens impact --method-fqn "com.example.UserService#updateUser(long,UserRest)" --graph my-project
+
+# Execution trace
+$onelens trace --target "/api/users" --entry-type endpoint --depth 3 --graph my-project
+$onelens trace --target "com.example.UserService#updateUser(long,UserRest)" --depth 3 --graph my-project
+
+# Entry points (REST + @Scheduled + @EventListener + @PostConstruct)
+$onelens entry-points --graph my-project
+
+# Raw Cypher
+$onelens query --cypher "MATCH (c:Class {name:'MyService'})-[:HAS_METHOD]->(m) RETURN m.name LIMIT 10" --graph my-project
+
+# Stats
+$onelens stats --graph my-project
+```
+
+## MCP server mode
+
+The CLI is generated from a FastMCP server — the same operations are available to MCP-aware agents:
+
+```bash
+$onelens mcp-server  # stdio transport; wire into your MCP-compatible client
+```
+
+## Daemon (optional, speeds up semantic queries)
+
+Keeps Qwen3-Embedding-0.6B and mxbai-rerank-base warm in memory across CLI invocations:
+
+```bash
+$onelens daemon start
+$onelens daemon status
+$onelens daemon stop
+```
+
+## What gets captured
+
+| Data | Source |
+|------|--------|
+| Classes, interfaces, enums | `PsiShortNamesCache` |
+| Methods with resolved parameter + return types | `PsiClass.getMethods()` |
+| Fields | `PsiClass.getFields()` |
+| Call edges (type-accurate, including overloads) | `PsiMethodCallExpression.resolveMethod()` |
+| Inheritance (extends/implements) | `PsiClass.superClass/interfaces` |
+| Method overrides | `PsiMethod.findSuperMethods()` |
+| Spring beans | `@Service/@Component/@Repository` detection |
+| REST endpoints | `@RequestMapping/@GetMapping` etc. |
+| Spring injections | `@Autowired` + constructor injection |
+| Annotation usages | `PsiModifierList.getAnnotations()` |
+| External library stubs | Auto-created from resolved call targets |
+| Method body + javadoc embeddings | Qwen3-Embedding-0.6B → ChromaDB |
+| PageRank (personalized, seeded by entry points) | NetworkX, stored as node property |
+
+## Why IntelliJ PSI over tree-sitter?
+
+Tree-sitter can't resolve `service.doThing()` to the *correct* overload across `ServiceImpl`, `ServiceBase`, and an injected `@Qualifier`-tagged bean. PSI can — it's the same engine driving IntelliJ's Go-to-Definition. For a Spring app, that accuracy is the moat.
+
+## Graph schema
+
+Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`
+Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`
+
+FQN formats:
+- Class: `com.example.MyService`
+- Method: `com.example.MyService#doWork(java.lang.String)`
+- Endpoint: `<METHOD>:<path>` (e.g. `PATCH:/vendor/{id}`)
+
+Derived properties (written at import by PageRank prebake):
+- `Method.pagerank`, `Class.pagerank` — centrality score, higher = more structurally important. Used as a multiplicative boost on hybrid retrieval hits.
 
 ## Architecture
 
 ```
-┌── IntelliJ IDE ─────────────────────────┐
-│  OneLens Plugin (Kotlin)                │
-│  ├── 7 Collectors (PSI APIs)            │
-│  ├── Menu: Tools → OneLens → Sync       │
-│  └── Writes JSON + auto-imports         │
-└─────────────────┬───────────────────────┘
-                  │ JSON export
-┌─────────────────┴───────────────────────┐
-│  OneLens CLI (Python)                   │
-│  ├── onelens import <json> --graph X    │
-│  ├── onelens query "<cypher>" --graph X │
-│  └── Pluggable backends (FalkorDB,      │
-│      FalkorDBLite, Neo4j)               │
-└─────────────────┬───────────────────────┘
-                  │ Cypher queries
-          ┌───────┴────────┐
-          │ FalkorDB       │
-          │ + Browser UI   │
-          └────────────────┘
+┌── IntelliJ IDE ──────────────────────────────────────┐
+│  OneLens Plugin (Kotlin)                             │
+│  ├── Collectors (PSI APIs)                           │
+│  ├── Tools → OneLens → Sync / Install Skill / Toggle │
+│  ├── VFS listener → debounced delta export (5 s)     │
+│  └── Shells out to onelens CLI                       │
+└────────────────────────┬─────────────────────────────┘
+                         │ JSON (full or delta)
+┌────────────────────────┴─────────────────────────────┐
+│  onelens CLI (Python, cyclopts-generated)            │
+│  ├── import-graph — auto-detects full vs delta       │
+│  ├── retrieve / impact / trace / search / query      │
+│  ├── daemon — warm Qwen3 + mxbai                     │
+│  └── mcp-server — same ops via MCP stdio             │
+└───────────┬──────────────────────────┬───────────────┘
+            │                          │
+    ┌───────┴────────┐         ┌───────┴────────────┐
+    │ FalkorDB       │         │ ChromaDB           │
+    │ Cypher + FTS   │         │ Qwen3 embeddings   │
+    │ + browser UI   │         │ + mxbai rerank     │
+    └────────────────┘         └────────────────────┘
 ```
 
-## Graph DB Backend
+## Graph DB backends
 
-Default: FalkorDB (Docker). Pluggable via `--backend` flag:
+Default: FalkorDB (Docker). Swap with `--backend`:
 
 ```bash
-onelens import export.json --graph myproject --backend falkordb     # default
-onelens import export.json --graph myproject --backend falkordblite  # embedded, no Docker
-onelens import export.json --graph myproject --backend neo4j         # Neo4j server
+onelens import-graph export.json --graph myproject --backend falkordb      # default
+onelens import-graph export.json --graph myproject --backend falkordblite  # embedded
+onelens import-graph export.json --graph myproject --backend neo4j         # Neo4j server
 ```
 
-## Project Structure
+## Delta-aware embeddings
+
+Deterministic drawer IDs (`method:<fqn>`, `class:<fqn>`) make delta re-embedding idempotent. On delete, method drawers cascade via ID-prefix scan so removed classes purge cleanly without depending on metadata filters (which are fragile across schema migrations).
+
+## Project layout
 
 ```
 onelens/
 ├── plugin/          # IntelliJ plugin (Kotlin/Gradle)
-├── python/          # CLI + graph importer (Python)
-├── skills/          # Claude Code skill
+├── python/          # CLI + importer + miners + MCP server
+├── skills/onelens/  # Claude Code skill (bundled into plugin jar)
+├── docs/
+│   ├── LESSONS-LEARNED.md
+│   └── VISION-AND-ROADMAP.md
+├── .github/workflows/  # CI + tagged-release plugin build
 ├── CLAUDE.md        # Project context for AI
-├── LICENSE          # MIT
-└── README.md
+└── LICENSE          # MIT
 ```
+
+## Contributing
+
+- Before PR: `cd plugin && ./gradlew compileKotlin buildPlugin`
+- Python: `cd python && pip install -e ".[context]"`; `ruff check .` and `mypy src/onelens` (advisory)
+- CI runs Kotlin compile + plugin build + Python import check on every PR
 
 ## License
 

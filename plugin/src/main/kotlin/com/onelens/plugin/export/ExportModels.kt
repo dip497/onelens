@@ -59,7 +59,9 @@ data class MethodData(
     val annotations: List<AnnotationData> = emptyList(),
     val filePath: String = "",
     val lineStart: Int = 0,
-    val lineEnd: Int = 0
+    val lineEnd: Int = 0,
+    val body: String? = null,
+    val javadoc: String? = null
 )
 
 @Serializable

@@ -15,8 +15,14 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         var includeSpring: Boolean = true,
         var includeDiagnostics: Boolean = false,
         var excludeTestSources: Boolean = false,
-        var autoSyncEnabled: Boolean = false,
+        // Auto-sync ON by default — users expect "install plugin → always fresh graph"
+        // without digging through Tools menu. Toggle off via Tools → OneLens.
+        var autoSyncEnabled: Boolean = true,
         var autoSyncDebounceMs: Int = 5000,
+        // First-run flag — the startup activity checks this and shows a
+        // one-time onboarding balloon on the first project open with the
+        // plugin installed. Reset only by deleting onelens-settings.xml.
+        var firstRunComplete: Boolean = false,
     )
 
     private var state = State()

@@ -104,3 +104,31 @@ What was tried, what failed, and what to avoid. Read this before making changes.
 10. **Don't append to file→class mapping in delta state**. When a file is re-exported, clear its old mapping first, then rebuild from the fresh collection. Otherwise stale FQNs accumulate and cause wrong deletions.
 
 11. **Inner class constructors**: `com.example.Outer$Inner` has constructor named `Inner`, not `Outer$Inner`. Split on `$` to get the simple name when checking `is_constructor`.
+
+## Retrieval & MCP migration lessons (2026-04)
+
+12. **Two code paths MUST write the same ChromaDB metadata schema**. We had `_mine_methods` writing `{wing, room, hall, importance, filed_at, fqn, type}` and `_method_metadata` (delta upsert) writing `{graph, class, file, line, fqn, type}`. After any delta upsert, those drawers lost `wing` — and the semantic searcher filters on `wing=<graph_name>`. Silent drift: upserted drawers disappear from all scoped queries. **Always align schemas across full and delta paths, including when introducing new helpers.**
+
+13. **Don't cascade-delete by metadata key you never wrote**. First attempt at `delete_methods_of_classes` used `where={"class": {"$in": ...}}` but no drawer actually had a `class` metadata field. Silent no-op — removed classes accumulated dead method drawers until the next full `--context` import. **Cascade by ID prefix instead** (`method:<classFqn>#*`): works across any historical metadata schema.
+
+14. **`--clear` on a delta wipes the graph**. When we unified plugin dispatch to one `onelens import_graph` call, we kept `--clear` unconditional. Every delta auto-sync started wiping the graph and re-importing just the delta (a tiny subset). Production graph would shrink with every file save. Pass `--clear` only on full imports.
+
+15. **CLI command rename across layers breaks the whole plugin**. The FastMCP migration renamed `onelens import` → `onelens import-graph`. The plugin still shelled out to `"import"`. Every sync failed with "command not found" that surfaced only in `idea.log`. Lesson: **any CLI rename needs a plugin integration test in CI** (we added `CodeMiner` API-surface guard + Kotlin compile gate to catch this class of bug).
+
+16. **`BranchChangeListener` is not a stable IntelliJ public API**. We tried to wire a git branch-change listener via `com.intellij.dvcs.branch.BranchChangeListener` — unresolved at compile time. The class path varies by bundle and IntelliJ version. The VFS `BulkFileListener` already catches the file changes that `git checkout` / pull / rebase produce in the working tree, so the branch listener was redundant. Revert; don't chase unstable hooks.
+
+17. **FastMCP client is ~4s of eager imports**. Every `onelens <cmd>` invocation pays this even after module load — the library is not optimized for CLI usage. The daemon mode helps for warm semantic queries but doesn't save the per-call Python startup tax. If we ever need sub-second CLI latency, the path is a stdio-only MCP runner, not optimizing FastMCP.
+
+18. **Embedding score threshold = 0.02 (mxbai cross-encoder) is the gibberish floor**. Below that, the reranker is effectively random. Empty result = real no-match. Above 0.7 = strong hit; 0.03-0.7 is the honest "some relevance" band. Don't retry failed retrievals with synonym expansion — it was already gibberish.
+
+19. **PageRank boost must multiply already-matched hits, not feed RRF as a third source**. First attempt: add top-100 PR-scored methods as an RRF source. Broke every concept query because semantically irrelevant but topologically central methods (e.g., `Logger.info`, `String.equals`) leaked into results. Fix: multiplicative boost on hits that already matched FTS/semantic (`score *= 1 + 0.3 * normalized_pr`). Bounded, can't promote irrelevant.
+
+20. **Don't cache `mine(path)` across delta calls**. Full `CodeMiner.mine` expects a full export JSON with all indexes built. Delta data is a subset — calling `mine(path)` on a delta file re-reads it as a full export and produces wrong results. Route delta context through `apply_delta(context=True)` → `mine_upserts`, not through `mine`.
+
+21. **Client names creep into code via examples**. Internal class prefixes and customer-specific paths ended up in docstrings, comments, and one README example. Before any OSS push: `grep -rIn "<client-name>"` across `**/*.{py,kt,md,yaml,toml}` with every identifier that ever appeared in a benchmark fixture. Benchmark YAMLs also had real graph names — gitignored for the same reason.
+
+22. **MCP is optional, not universal**. Claude Code + OpenCode have bash tools; the skill + `onelens <cmd>` shell invocation is enough. MCP only helps editors that can't shell reliably (Cursor Agent / Codex / Windsurf). Don't bundle an MCP install path into the plugin if the plugin's target user is a Claude Code user — it's 40s of model-load overhead and two extra config files they'll never use.
+
+23. **Plugin skill install via JAR resource, not repo copy**. The plugin bundles `skills/onelens/SKILL.md` into its jar via Gradle `processResources` (`from("${project.rootDir.parent}/skills")`). `InstallSkillAction.loadBundledSkill()` reads it via classpath `/skills/onelens/SKILL.md`. Users don't need the repo checked out — one action copies the skill to `~/.claude/skills/`. Verify with `unzip -p plugin.zip inner.jar | unzip -l - | grep SKILL`.
+
+24. **Review caught two silent bugs after imports-resolve test passed**. Always have an independent reviewer (human or agent) re-read the diff. "Imports resolve + benchmark passes" is necessary, not sufficient — metadata schema drift and `class`-key cascade bugs both passed initial checks. Cost of skipping a real review was zero measurable; finding them 30 minutes later cost only the time to fix.

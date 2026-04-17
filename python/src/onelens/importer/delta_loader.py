@@ -15,13 +15,18 @@ class DeltaLoader:
     def __init__(self, db: GraphDB):
         self.db = db
 
-    def apply_delta(self, delta_path: Path) -> dict:
+    def apply_delta(self, delta_path: Path, graph_name: str | None = None,
+                    context: bool = False) -> dict:
         """Apply a delta export to an existing graph.
 
         Strategy:
         1. Delete old nodes by FQN (cascade removes edges)
         2. Upsert new nodes + external stubs (batched)
         3. Upsert new edges (batched)
+        4. (Optional) update ChromaDB context: delete removed drawers, upsert
+           changed methods/classes. Only when `context=True` and `graph_name`
+           provided. Uses CodeMiner's deterministic IDs — incremental re-embed
+           is O(changed methods), not full re-mine.
         """
         with open(delta_path) as f:
             data = json.load(f)
@@ -72,13 +77,15 @@ class DeltaLoader:
                 "isConstructor": m.get("isConstructor", False),
                 "filePath": m.get("filePath", ""), "lineStart": m.get("lineStart", 0),
                 "lineEnd": m.get("lineEnd", 0),
+                "body": m.get("body") or "", "javadoc": m.get("javadoc") or "",
             } for m in batch]
             self.db.execute("""
                 UNWIND $batch AS item
                 MERGE (m:Method {fqn: item.fqn})
                 SET m.name = item.name, m.classFqn = item.classFqn, m.returnType = item.returnType,
                     m.isConstructor = item.isConstructor, m.filePath = item.filePath,
-                    m.lineStart = item.lineStart, m.lineEnd = item.lineEnd
+                    m.lineStart = item.lineStart, m.lineEnd = item.lineEnd,
+                    m.body = item.body, m.javadoc = item.javadoc
             """, {"batch": items})
 
         # HAS_METHOD edges for upserted methods
@@ -235,9 +242,170 @@ class DeltaLoader:
             except Exception:
                 pass
 
+        # 9b. Replace-all Spring layer (beans, endpoints, injections, HANDLES)
+        # and Modules. Spring wiring is cross-class — per-class diff would miss
+        # new bean types referenced from unchanged callers. Re-scan cost is
+        # bounded (indexed), re-insert is cheap (~few K rows).
+        spring = data.get("spring")
+        if spring is not None:
+            self._replace_spring(spring)
+
+        modules = data.get("modules")
+        if modules is not None:
+            self._replace_modules(modules)
+
         stats = data.get("stats", {})
+
+        # 10. Optional: propagate the delta into the ChromaDB semantic layer.
+        # Deterministic drawer IDs (`method:<fqn>`, `class:<fqn>`) mean we can
+        # upsert just the changed entities — full re-mine on every file save
+        # would be unusable (20 min). Changed methods / classes re-embed;
+        # deleted ones are purged by ID. External stubs are skipped (they
+        # have no body to embed).
+        if context and graph_name:
+            try:
+                from onelens.miners.code_miner import CodeMiner
+
+                miner = CodeMiner(graph_name)
+
+                # Purge drawers for deleted classes + cascade their methods.
+                # Classes go by exact ID (`class:<fqn>`). Methods cascade via
+                # metadata filter — each method drawer was written with its
+                # owning `class` FQN, so one Chroma delete purges them all.
+                del_class_fqns = [fqn for fqn in deleted.get("classes", []) if fqn]
+                if del_class_fqns:
+                    miner.delete_by_ids([f"class:{fqn}" for fqn in del_class_fqns])
+                    miner.delete_methods_of_classes(del_class_fqns)
+
+                # Upsert changed methods + classes from `upserted`.
+                # Build a synthetic "mini export" shape CodeMiner accepts.
+                mini = {
+                    "classes": classes,
+                    "methods": methods,
+                    "callGraph": upserted.get("callGraph", []),
+                }
+                try:
+                    ctx_stats = miner.mine_upserts(mini)
+                    stats["context"] = ctx_stats
+                except AttributeError:
+                    logger.info(
+                        "CodeMiner.mine_upserts not available; context layer "
+                        "will drift until next full --context import"
+                    )
+                    stats["context"] = {"skipped": "mine_upserts not implemented"}
+            except Exception as e:
+                logger.warning("Delta context mining failed: %s", e)
+                stats["context"] = {"error": str(e)}
+
+        # 11. Recompute PageRank. Topology changed (new nodes / edges or
+        # removed classes), so `Method.pagerank` / `Class.pagerank` are stale.
+        # Retrieval's multiplicative boost reads these — without a refresh,
+        # new endpoints / beans stay at pagerank=0 and rank below stale peers.
+        # NetworkX + graph read takes ~5-15s on 80K methods; acceptable for
+        # a delta that already paid for the graph round-trip.
+        try:
+            from onelens.importer import pagerank as _pr
+
+            pr_stats = _pr.run(self.db)
+            stats["pagerank"] = pr_stats
+        except Exception as e:
+            logger.warning("Delta PageRank refresh failed: %s", e)
+            stats["pagerank"] = {"error": str(e)}
+
         logger.info(f"Delta applied: {stats}")
         return stats
+
+    def _replace_spring(self, spring: dict) -> None:
+        """Drop all SpringBean/Endpoint/HANDLES/INJECTS, then re-insert.
+
+        Spring data is small (~2K beans on a 10K-class project) so a
+        full replace is simpler and more correct than per-class diff —
+        injections reference types on other classes, bean names can be
+        renamed, and annotations can be added/removed without the
+        annotated file showing up as "changed" if only a supertype
+        changed.
+        """
+        self.db.execute("MATCH (b:SpringBean) DETACH DELETE b")
+        self.db.execute("MATCH (e:Endpoint) DETACH DELETE e")
+
+        beans = spring.get("beans", []) or []
+        bean_items = [{
+            "name": b.get("name", ""), "classFqn": b.get("classFqn", ""),
+            "type": b.get("type", ""), "scope": b.get("scope", ""),
+            "profile": b.get("profile", ""),
+        } for b in beans if b.get("name")]
+        for batch in self._chunks(bean_items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                CREATE (b:SpringBean {name: item.name})
+                SET b.classFqn = item.classFqn, b.type = item.type,
+                    b.scope = item.scope, b.profile = item.profile
+            """, {"batch": batch})
+
+        endpoints = spring.get("endpoints", []) or []
+        ep_items = []
+        handles = []
+        for ep in endpoints:
+            method = ep.get("httpMethod", "GET")
+            path = ep.get("path", "/")
+            ep_id = ep.get("id") or f"{method}:{path}"
+            ep_items.append({
+                "id": ep_id, "path": path, "httpMethod": method,
+                "controllerFqn": ep.get("controllerFqn", ""),
+                "handlerMethodFqn": ep.get("handlerMethodFqn", ""),
+            })
+            if ep.get("handlerMethodFqn"):
+                handles.append({"src": ep["handlerMethodFqn"], "dst": ep_id})
+
+        for batch in self._chunks(ep_items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                CREATE (e:Endpoint {id: item.id})
+                SET e.path = item.path, e.httpMethod = item.httpMethod,
+                    e.controllerFqn = item.controllerFqn,
+                    e.handlerMethodFqn = item.handlerMethodFqn
+            """, {"batch": batch})
+
+        for batch in self._chunks(handles, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (m:Method {fqn: edge.src}), (e:Endpoint {id: edge.dst})
+                MERGE (m)-[:HANDLES]->(e)
+            """, {"batch": batch})
+
+        # INJECTS edges live between SpringBean nodes keyed by classFqn.
+        # DETACH DELETE above already dropped them; re-insert from the delta.
+        injections = spring.get("injections", []) or []
+        inj_items = [{
+            "src": inj.get("targetClassFqn", ""),
+            "dst": inj.get("injectedClassFqn", ""),
+            "field": inj.get("targetFieldOrParam", ""),
+            "type": inj.get("injectionType", ""),
+        } for inj in injections if inj.get("targetClassFqn") and inj.get("injectedClassFqn")]
+        for batch in self._chunks(inj_items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (a:SpringBean {classFqn: edge.src}),
+                      (b:SpringBean {classFqn: edge.dst})
+                MERGE (a)-[:INJECTS {field: edge.field, type: edge.type}]->(b)
+            """, {"batch": batch})
+
+        logger.info(
+            "Spring replaced: %d beans, %d endpoints, %d injections",
+            len(bean_items), len(ep_items), len(inj_items),
+        )
+
+    def _replace_modules(self, modules: list) -> None:
+        """Drop all Module nodes, then re-insert."""
+        self.db.execute("MATCH (m:Module) DETACH DELETE m")
+        items = [{"name": m.get("name", ""), "type": m.get("type", "")}
+                 for m in modules if m.get("name")]
+        for batch in self._chunks(items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                CREATE (m:Module {name: item.name}) SET m.type = item.type
+            """, {"batch": batch})
+        logger.info("Modules replaced: %d", len(items))
 
     @staticmethod
     def _chunks(lst: list, size: int):

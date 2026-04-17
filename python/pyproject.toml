@@ -5,14 +5,16 @@ description = "Code knowledge graph for Java/Spring Boot — imports IntelliJ ex
 requires-python = ">=3.10"
 dependencies = [
     "falkordb>=1.6.0",
-    "click>=8.1.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
-    "fastmcp>=0.1.0",
-    "mcp>=1.0.0",
+    "fastmcp>=3.2.0",
+    "cyclopts>=3.0.0",
+    "networkx>=3.0",          # PageRank centrality prebake at import time
+    "pyyaml>=6.0",            # Benchmark cases.yaml + agent configs
 ]
 
 [project.optional-dependencies]
+context = ["chromadb>=1.0.0"]
 lite = ["falkordblite>=0.9.0"]
 neo4j = ["neo4j>=5.0.0"]
 dev = [
@@ -23,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-onelens = "onelens.cli:main"
+onelens = "onelens.cli_generated:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

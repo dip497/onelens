@@ -29,6 +29,7 @@
     <applicationListeners>
         <listener class="com.onelens.plugin.autosync.AutoSyncFileListener"
                   topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+        <!-- BranchChangeListener lives in git-features.xml (optional Git4Idea dep) -->
     </applicationListeners>
 
     <actions>
@@ -41,6 +42,10 @@
                 class="com.onelens.plugin.actions.ToggleAutoSyncAction"
                 text="Toggle Auto-Sync"
                 description="Enable/disable automatic graph sync on file save"/>
+            <action id="OneLens.InstallSkill"
+                class="com.onelens.plugin.skill.InstallSkillAction"
+                text="Install Skill for Claude Code"
+                description="Copy OneLens skill (SKILL.md) to ~/.claude/skills/. Claude Code invokes `onelens` via its Bash tool — no daemon, no MCP."/>
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </group>
     </actions>
