@@ -4,6 +4,7 @@ import com.intellij.lang.javascript.psi.JSCallExpression
 import com.intellij.lang.javascript.psi.JSLiteralExpression
 import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -50,7 +51,13 @@ object SfcScriptSetupCollector {
         }
 
         val scope = GlobalSearchScope.projectScope(project)
-        val vueFiles = FileTypeIndex.getFiles(vueType, scope)
+        // FileTypeIndex.getFiles() is index-backed and must run inside a read
+        // action AND with the indexes ready. WebStorm 2026.1+ throws
+        // `Read access is allowed from inside read-action only` if we call it
+        // from a background thread directly (older IDEs are more lenient).
+        // runReadActionInSmartMode handles both constraints in one call.
+        val vueFiles = DumbService.getInstance(project)
+            .runReadActionInSmartMode(Computable { FileTypeIndex.getFiles(vueType, scope).toList() })
         LOG.info("SfcScriptSetupCollector: ${vueFiles.size} .vue files to scan")
         val psiManager = PsiManager.getInstance(project)
 

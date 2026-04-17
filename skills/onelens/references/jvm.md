@@ -17,6 +17,7 @@ Source of truth is PSI-resolved, not text-matched: overloads, polymorphism, Spri
 | Endpoint | id, path, httpMethod, handlerMethodFqn | REST API endpoints |
 | Module | name, type, sourceRoots | Maven/Gradle modules |
 | Annotation | fqn, name | Java annotations |
+| EnumConstant | fqn, name, ordinal, enumFqn, args, argList, argTypes | Per-enum-constant node with resolved constructor args — enables module/feature-scope filtering on enum registries |
 
 ### Edges
 
@@ -28,7 +29,8 @@ Source of truth is PSI-resolved, not text-matched: overloads, polymorphism, Spri
 | HAS_METHOD | Class → Method | Class declares this method |
 | HAS_FIELD | Class → Field | Class declares this field |
 | OVERRIDES | Method → Method | Method overrides parent method |
-| ANNOTATED_WITH | Class/Method/Field → Annotation | Has this annotation |
+| ANNOTATED_WITH | Class/Method/Field → Annotation | Has this annotation. Edge carries `attributes` — JSON map of resolved attribute values (arrays, class FQNs, enum names, nested annotations). |
+| HAS_ENUM_CONSTANT | Class → EnumConstant | Enum declares this constant |
 | HANDLES | Method → Endpoint | Controller method handles this REST endpoint |
 | INJECTS | SpringBean → SpringBean | Bean depends on another bean |
 
@@ -278,6 +280,74 @@ List all entry points:
 ```bash
 ~/.onelens/venv/bin/onelens entry-points --graph <project-name>
 ```
+
+### 14. Enum Constants — "Which enum values satisfy tag / feature / role X?"
+
+Enums are often used as per-feature or per-module registries, with each constant
+carrying configuration via constructor args (roles a status transitions to,
+currencies a payment method supports, tenants a feature rolls out to). OneLens
+resolves those args onto the `EnumConstant` node:
+
+- `args` — JSON-encoded arg list, for forensic inspection.
+- `argList` — flattened string tokens. Use with FalkorDB's native `IN` predicate.
+  No substring traps (`"A"` won't collide with `"APPROVED"`).
+- `argTypes` — parallel list of Java type strings.
+
+```cypher
+// All constants of OrderStatus that allow transitioning to APPROVED.
+MATCH (c:Class {name: 'OrderStatus'})-[:HAS_ENUM_CONSTANT]->(ec:EnumConstant)
+WHERE 'APPROVED' IN ec.argList
+RETURN ec.name, ec.args
+ORDER BY ec.ordinal
+```
+
+```cypher
+// Diff: constants present in EnumA but missing in EnumB for the same tag X.
+MATCH (:Class {name: 'EnumA'})-[:HAS_ENUM_CONSTANT]->(a:EnumConstant)
+WHERE 'X' IN a.argList
+WITH collect(a.name) AS fromA
+MATCH (:Class {name: 'EnumB'})-[:HAS_ENUM_CONSTANT]->(b:EnumConstant)
+WHERE 'X' IN b.argList
+WITH fromA, collect(b.name) AS fromB
+UNWIND fromA AS n
+WITH n WHERE NOT n IN fromB
+RETURN n AS onlyInA
+```
+
+Unresolvable args (runtime-computed, lambdas) render as the literal string
+`<dynamic>`. Exclude them when doing negative proofs:
+
+```cypher
+MATCH (:Class {name: 'MyEnum'})-[:HAS_ENUM_CONSTANT]->(ec)
+WHERE NOT 'FLAG' IN ec.argList AND NOT '<dynamic>' IN ec.argList
+RETURN ec.name
+```
+
+### 15. Annotation Attributes — "Which targets carry annotation X with value Y?"
+
+`ANNOTATED_WITH` edges carry an `attributes` property — a JSON string mapping
+each annotation attribute to its resolved value. Arrays become JSON arrays,
+class literals become FQN strings, enum refs become constant names, nested
+annotations are preserved as `{"@<fqn>": {...}}`.
+
+```cypher
+// Methods gated by a specific Spring Security role.
+MATCH (m:Method)-[r:ANNOTATED_WITH]->(a:Annotation {name: 'PreAuthorize'})
+WHERE r.attributes CONTAINS '"ROLE_ADMIN"'
+RETURN m.classFqn + '#' + m.name AS handler
+```
+
+```cypher
+// Classes activated only under a given Spring profile.
+MATCH (c:Class)-[r:ANNOTATED_WITH]->(:Annotation {name: 'Profile'})
+WHERE r.attributes CONTAINS '"prod"'
+RETURN c.fqn
+```
+
+Substring-on-JSON has false-positive risk when one token is a prefix of another
+(`"READ"` vs `"READABLE"`). When precision matters, either (a) wrap the value in
+JSON punctuation in the query (`'":"read"'`, `'"read"]'`), or (b) promote the
+attribute to a first-class array property on the edge upstream.
 
 ## Approach — Answer the Question, Don't Dump Pointers
 

@@ -80,6 +80,19 @@ class GraphLoader:
                 "name", "classFqn", "type", "filePath", "lineStart",
             ])
 
+            # EnumConstant nodes — semantic payload for enum-as-config registries.
+            # `args` is a JSON-serialized blob kept for forensic inspection; `argList`
+            # is a flat string array usable in `IN` predicates. Both ship because
+            # FalkorDB stores arrays natively — no per-token explosion needed. Absent
+            # in pre-1.1 exports; `data.get` returns [] so older graphs no-op.
+            enum_constants = data.get("enumConstants", [])
+            self._batch_nodes(progress, "Enum Constants", enum_constants,
+                              "EnumConstant", "fqn", [
+                                  "name", "ordinal", "enumFqn",
+                                  "args", "argList", "argTypes",
+                                  "filePath", "lineStart",
+                              ])
+
             modules = data.get("modules", [])
             self._batch_nodes(progress, "Modules", modules, "Module", "name", ["type"])
 
@@ -217,6 +230,12 @@ class GraphLoader:
             has_field = [{"src": f["classFqn"], "dst": f["fqn"]} for f in fields]
             self._batch_edges(progress, "HAS_FIELD", has_field, "Class", "fqn", "Field", "fqn")
 
+            # HAS_ENUM_CONSTANT (Class → EnumConstant). Skipped when `enumConstants`
+            # is empty (pre-1.1 exports / non-Java adapters).
+            has_enum_const = [{"src": e["enumFqn"], "dst": e["fqn"]} for e in enum_constants]
+            self._batch_edges(progress, "HAS_ENUM_CONSTANT", has_enum_const,
+                              "Class", "fqn", "EnumConstant", "fqn")
+
             # EXTENDS
             extends = [{"src": e["childFqn"], "dst": e["parentFqn"]}
                        for e in data.get("inheritance", []) if e.get("relationType") == "EXTENDS"]
@@ -237,16 +256,25 @@ class GraphLoader:
                          for o in data.get("methodOverrides", [])]
             self._batch_edges(progress, "OVERRIDES", overrides, "Method", "fqn", "Method", "fqn")
 
-            # ANNOTATED_WITH — group by source label in single pass
+            # ANNOTATED_WITH — edges carry the `attributes` JSON blob (resolved
+            # values; `{}` for pre-1.1 exports). Group by target label since each
+            # label has its own primary-key column.
             ann_groups = {"Class": [], "Method": [], "Field": []}
             for a in data.get("annotations", []):
                 kind = a.get("targetKind", "CLASS")
                 label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
-                ann_groups[label].append({"src": a["targetFqn"], "dst": a["annotationFqn"]})
+                ann_groups[label].append({
+                    "src": a["targetFqn"],
+                    "dst": a["annotationFqn"],
+                    "attributes": a.get("attributes", "{}"),
+                })
             for label, edges in ann_groups.items():
                 if edges:
-                    self._batch_edges(progress, f"ANNOTATED_WITH ({label})", edges, label, "fqn", "Annotation", "fqn",
-                                      rel_type="ANNOTATED_WITH")
+                    self._batch_edges_with_props(
+                        progress, f"ANNOTATED_WITH ({label})", edges,
+                        label, "fqn", "Annotation", "fqn",
+                        prop_names=["attributes"], rel_type="ANNOTATED_WITH",
+                    )
 
             # Spring edges
             if spring:
@@ -350,8 +378,17 @@ class GraphLoader:
             "method", "path", "parametric", "binding", "callerFqn", "filePath", "wing",
         ])
 
-        # Edges — use the existing _batch_edges helper with the shared (wing,label)
-        # match keys. Each edge is a dict with src/dst fqn equivalents.
+        # Edges — caller match is a 3-way OR because collectors emit
+        # `callerFqn` in three shapes:
+        #   Component-scoped call   -> "<filePath>::<ComponentName>"   (CallThroughResolver)
+        #   Function-scoped call    -> "<filePath>::<fnName>"           (ApiCallCollector)
+        #   Module-top-level call   -> "<filePath>::<module>"
+        # Component nodes are keyed on `filePath` (no `::name` suffix), so a
+        # literal equality check misses most component-sourced edges. We
+        # additionally accept any caller whose string starts with
+        # `c.filePath + '::'` — which matches Component rows without
+        # double-counting Composable rows whose `fqn` already equals the full
+        # caller string.
         uses_store = [
             {"caller": e.get("callerFqn", ""), "store": e.get("storeId", ""),
              "indirect": bool(e.get("indirect", False)), "via": e.get("via", "") or ""}
@@ -359,7 +396,11 @@ class GraphLoader:
         ]
         self._batch_edges_simple(
             progress, "USES_STORE", uses_store,
-            "MATCH (c {wing: $wing}) WHERE (c.fqn = e.caller OR c.filePath = e.caller)",
+            "MATCH (c {wing: $wing}) "
+            "WHERE (c:Component OR c:Composable) AND ("
+            "    c.fqn = e.caller OR c.filePath = e.caller "
+            " OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
+            ")",
             "MATCH (s:Store {wing: $wing, id: e.store})",
             "MERGE (c)-[r:USES_STORE]->(s) SET r.indirect = e.indirect, r.via = e.via",
             wing=wing,
@@ -371,21 +412,49 @@ class GraphLoader:
         ]
         self._batch_edges_simple(
             progress, "USES_COMPOSABLE", uses_comp,
-            "MATCH (c {wing: $wing}) WHERE (c.fqn = e.caller OR c.filePath = e.caller)",
+            "MATCH (c {wing: $wing}) "
+            "WHERE (c:Component OR c:Composable) AND ("
+            "    c.fqn = e.caller OR c.filePath = e.caller "
+            " OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
+            ")",
             "MATCH (co:Composable {wing: $wing, fqn: e.comp})",
             "MERGE (c)-[:USES_COMPOSABLE]->(co)",
             wing=wing,
         )
 
+        # DISPATCHES: route.componentRef is as-typed in source ('./views/X.vue'),
+        # Component.filePath is project-relative ('src/modules/ticket/views/X.vue').
+        # Resolve the relative ref against the route file's directory so the
+        # match is exact — ENDS WITH alone overmatches every component whose
+        # filename happens to appear multiple places in the tree.
+        import os.path as _osp
+        routes_by_name = {r.get("name", ""): r for r in vue3.get("routes", []) if r.get("name")}
+
+        def _resolve_comp(route_name: str, ref: str) -> str:
+            if not ref:
+                return ""
+            cleaned = ref
+            # Resolve relative path against the route file's directory.
+            rt = routes_by_name.get(route_name)
+            if rt and rt.get("filePath") and (cleaned.startswith("./") or cleaned.startswith("../") or not cleaned.startswith("/")):
+                base_dir = _osp.dirname(rt["filePath"])
+                cleaned = _osp.normpath(_osp.join(base_dir, cleaned)).replace("\\", "/")
+            else:
+                while cleaned.startswith("./") or cleaned.startswith("../"):
+                    cleaned = cleaned[cleaned.index("/") + 1:]
+            return cleaned
+
         dispatches = [
-            {"route": e.get("routeName", ""), "comp": e.get("componentRef", "")}
+            {"route": e.get("routeName", ""),
+             "comp": _resolve_comp(e.get("routeName", ""), e.get("componentRef", ""))}
             for e in vue3.get("dispatches", [])
+            if e.get("componentRef")
         ]
         self._batch_edges_simple(
             progress, "DISPATCHES", dispatches,
             "MATCH (r:Route {wing: $wing, name: e.route})",
-            "OPTIONAL MATCH (co:Component {wing: $wing}) WHERE co.filePath CONTAINS e.comp",
-            "WITH r, co WHERE co IS NOT NULL MERGE (r)-[:DISPATCHES]->(co)",
+            "MATCH (co:Component {wing: $wing, filePath: e.comp})",
+            "MERGE (r)-[:DISPATCHES]->(co)",
             wing=wing,
             src_var="r",
         )
@@ -394,9 +463,17 @@ class GraphLoader:
             {"caller": e.get("callerFqn", ""), "api": e.get("apiCallFqn", "")}
             for e in vue3.get("callsApi", [])
         ]
+        # Restrict the caller MATCH to Component or Composable — an untyped match
+        # also picks up ApiCall / Route nodes (they carry filePath) and pairs
+        # every such match with every target ApiCall in the batch, which over-
+        # produces edges by a factor of ~20 on a 1500-component repo.
         self._batch_edges_simple(
             progress, "CALLS_API", calls_api,
-            "MATCH (c {wing: $wing}) WHERE (c.fqn = e.caller OR c.filePath = e.caller)",
+            "MATCH (c {wing: $wing}) "
+            "WHERE (c:Component OR c:Composable) AND ("
+            "    c.fqn = e.caller OR c.filePath = e.caller "
+            " OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
+            ")",
             "MATCH (a:ApiCall {wing: $wing, fqn: e.api})",
             "MERGE (c)-[:CALLS_API]->(a)",
             wing=wing,

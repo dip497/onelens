@@ -6,6 +6,7 @@ import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.lang.javascript.psi.JSReturnStatement
 import com.intellij.lang.javascript.psi.JSVariable
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -54,7 +55,9 @@ object ComposableCollector {
             ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = GlobalSearchScope.projectScope(project)
-        val files = jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
+        val files = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        )
         val psiManager = PsiManager.getInstance(project)
 
         for (vf in files) {

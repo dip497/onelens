@@ -3,6 +3,7 @@ package com.onelens.plugin.framework.vue3.resolver
 import com.intellij.lang.javascript.psi.JSLiteralExpression
 import com.intellij.lang.javascript.psi.JSVariable
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -51,6 +52,14 @@ object ModuleNameBinder {
         val scope = GlobalSearchScope.projectScope(project)
         val psiManager = PsiManager.getInstance(project)
 
+        // Pre-enumerate all candidate JS/TS/Vue files once inside a smart read
+        // action. Per-file FileTypeIndex calls inside the parametrics loop
+        // would re-pay the read-action penalty and trip WebStorm 2026.1's
+        // strict "read access must be inside read action" guard.
+        val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        )
+
         // File → { varName → literal } cache, rebuilt lazily per file.
         val fileConstants = HashMap<String, Map<String, String>>()
         val newCalls = mutableListOf<ApiCallData>()
@@ -60,9 +69,7 @@ object ModuleNameBinder {
             val binding = api.binding ?: continue
             val filePath = api.filePath
             val consts = fileConstants.getOrPut(filePath) {
-                val vf = types.asSequence()
-                    .flatMap { FileTypeIndex.getFiles(it, scope).asSequence() }
-                    .firstOrNull { ctx.relativize(Paths.get(it.path)) == filePath }
+                val vf = allFiles.firstOrNull { ctx.relativize(Paths.get(it.path)) == filePath }
                     ?: return@getOrPut emptyMap()
                 ReadAction.compute<Map<String, String>, Throwable> {
                     val psi = psiManager.findFile(vf) ?: return@compute emptyMap()

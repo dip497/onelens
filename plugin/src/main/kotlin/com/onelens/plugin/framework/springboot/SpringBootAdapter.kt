@@ -6,6 +6,7 @@ import com.onelens.plugin.export.AnnotationUsage
 import com.onelens.plugin.export.CallEdge
 import com.onelens.plugin.export.ClassData
 import com.onelens.plugin.export.DiagnosticEntry
+import com.onelens.plugin.export.EnumConstantData
 import com.onelens.plugin.export.FieldData
 import com.onelens.plugin.export.InheritanceEdge
 import com.onelens.plugin.export.MethodData
@@ -77,7 +78,8 @@ data class SpringBootCollectionResult(
     val modules: List<ModuleData>,
     val annotations: List<AnnotationUsage>,
     val spring: SpringData?,
-    val diagnostics: List<DiagnosticEntry>
+    val diagnostics: List<DiagnosticEntry>,
+    val enumConstants: List<EnumConstantData> = emptyList()
 )
 
 /**
@@ -148,7 +150,8 @@ class SpringBootCollector : Collector {
             modules = modules,
             annotations = annotations,
             spring = spring,
-            diagnostics = diagnostics
+            diagnostics = diagnostics,
+            enumConstants = members.enumConstants
         )
         lastResult = result
 
@@ -167,6 +170,7 @@ class SpringBootCollector : Collector {
             put("annotationUsageCount", annotations.size)
             put("springBeanCount", spring?.beans?.size ?: 0)
             put("endpointCount", spring?.endpoints?.size ?: 0)
+            put("enumConstantCount", members.enumConstants.size)
             put("diagnosticCount", diagnostics.size)
             if (spring != null) {
                 put("spring", json.encodeToJsonElement(SpringData.serializer(), spring))

@@ -10,8 +10,16 @@ from abc import ABC, abstractmethod
 from rich.console import Console
 from rich.table import Table
 
-# Node types used across all backends
-NODE_TYPES = ["Class", "Method", "Field", "SpringBean", "Endpoint", "Module", "Annotation"]
+# Node types used across all backends. Includes both JVM (Java / Kotlin /
+# Spring Boot) and Vue 3 labels so `onelens stats` and related tooling show
+# per-label counts for whichever adapter wrote the graph.
+NODE_TYPES = [
+    # JVM
+    "Class", "Method", "Field", "SpringBean", "Endpoint", "Module", "Annotation",
+    "EnumConstant",
+    # Vue 3
+    "Component", "Composable", "Store", "Route", "ApiCall",
+]
 
 
 class GraphDB(ABC):

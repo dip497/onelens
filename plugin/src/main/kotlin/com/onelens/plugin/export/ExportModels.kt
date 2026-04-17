@@ -17,6 +17,7 @@ data class ExportDocument(
     val spring: SpringData? = null,
     val modules: List<ModuleData> = emptyList(),
     val annotations: List<AnnotationUsage> = emptyList(),
+    val enumConstants: List<EnumConstantData> = emptyList(),
     val diagnostics: List<DiagnosticEntry> = emptyList(),
     val stats: ExportStats = ExportStats(),
     /**
@@ -289,12 +290,42 @@ data class ModuleCoordinates(
     val version: String = ""
 )
 
+/**
+ * A single enum constant with its constructor arguments resolved to serializable
+ * shapes. `args` is a JSON array (stringified) preserving order + nesting for
+ * human inspection; `argList` is a flat list of string tokens suitable for
+ * FalkorDB array predicates (`WHERE 'REQUEST' IN ec.argList`). Unresolvable
+ * fragments render as `<dynamic>`.
+ */
+@Serializable
+data class EnumConstantData(
+    val fqn: String,              // com.example.MyEnum#STATUS
+    val name: String,             // STATUS
+    val ordinal: Int,             // declaration index among enum constants
+    val enumFqn: String,          // owning enum class FQN
+    val args: String = "[]",      // JSON-serialized resolved args
+    val argList: List<String> = emptyList(), // flattened string tokens
+    val argTypes: List<String> = emptyList(),
+    val filePath: String = "",
+    val lineStart: Int = 0
+)
+
+/**
+ * Annotation usage with resolved attribute values.
+ *
+ * `params` (legacy) = raw text of each attribute, kept for back-compat with the
+ * pre-1.1 importer. `attributes` = JSON-serialized resolved values via
+ * [com.onelens.plugin.export.collectors.ExpressionResolver] — nested arrays,
+ * class literals (as FQN), enum refs (as name). New queries should read
+ * `attributes`; callers that haven't migrated fall through to `params`.
+ */
 @Serializable
 data class AnnotationUsage(
     val targetFqn: String,
     val targetKind: String,
     val annotationFqn: String,
-    val params: Map<String, String> = emptyMap()
+    val params: Map<String, String> = emptyMap(),
+    val attributes: String = "{}"
 )
 
 @Serializable
@@ -317,6 +348,7 @@ data class ExportStats(
     val endpointCount: Int = 0,
     val moduleCount: Int = 0,
     val annotationUsageCount: Int = 0,
+    val enumConstantCount: Int = 0,
     val diagnosticCount: Int = 0,
     val exportDurationMs: Long = 0
 )

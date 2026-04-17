@@ -7,6 +7,72 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Enum constants + annotation attributes (2026-04-18)
+
+- New `EnumConstant` node + `HAS_ENUM_CONSTANT` edge. Each constant carries
+  `ordinal`, `enumFqn`, `args` (JSON), `argList` (flat string array for `IN`
+  predicates), `argTypes`, and source location. Resolves enum-as-config
+  registries like `OrderStatus(canTransitionTo=Set.of(APPROVED, REJECTED))`
+  so per-constant feature / module / role questions answer from Cypher
+  instead of source grep.
+- `ANNOTATED_WITH` edge gains an `attributes` JSON property holding the resolved
+  values of every annotation attribute — arrays, class literals (FQN), enum
+  refs (name), nested annotations. Legacy `params` map is preserved for
+  back-compat with the pre-1.1 importer.
+- `plugin/.../collectors/ExpressionResolver.kt` — shared PSI-native resolver.
+  Delegates to `PsiConstantEvaluationHelper` for JLS constant expressions;
+  handles collection factories via a semantic heuristic (`static` method
+  returning `Collection` / `Map` / `Iterable` — covers JDK, Guava, Eclipse
+  Collections, Vavr, user builders without a library list), array initializers,
+  class literals, enum refs, and nested annotations. Unresolvable fragments
+  render as `<dynamic>`.
+- `DeltaLoader`: enum constants cascade-delete with their owning class and
+  re-upsert on every class modification. Also fixes a latent pre-existing gap
+  where `ANNOTATED_WITH` edges on modified classes were never re-applied —
+  annotation add/remove on a changed file used to silently drift from the
+  graph until the next full import.
+- Export version bumped to `1.1.0`. Older exports still load (new fields
+  default to empty); older importers ignore the new fields.
+- New skill cookbook sections (`skills/onelens/references/jvm.md` §14-15)
+  with Cypher recipes for module-scoped enum filtering and annotation
+  attribute searches.
+
+### Fixed — Phase B dogfood round (2026-04-18)
+
+- `ExportService.exportFull` now iterates EVERY detected adapter's collectors
+  instead of hard-coding the Spring branch. Earlier the document assembled
+  `adapters: ["vue3"]` but `vue3: null` because the Vue collector never ran —
+  each adapter's collector is now invoked, typed state (`lastResult` /
+  `lastContext`) pulled out, and the Vue3Data is stitched into the document.
+- Every Vue collector + resolver wraps `FileTypeIndex.getFiles()` in
+  `DumbService.runReadActionInSmartMode(Computable { … })`. WebStorm 2026.1
+  throws "Read access is allowed from inside read-action only" for the
+  raw call; the earlier unit tests never hit it because `BasePlatformTestCase`
+  runs in smart mode by default.
+- Loader edge match relaxed to accept the canonical
+  `<filePath>::<symbol>` caller form emitted by Vue collectors
+  (component-sourced edges) via `e.caller STARTS WITH (c.filePath + '::')`.
+  Without this, only composable-sourced edges matched — 345/2484 USES_STORE
+  edges, 251/2583 USES_COMPOSABLE edges. After the fix: 2329 / 2589.
+- `DISPATCHES` matcher uses filePath equality after resolving the
+  route's relative componentRef against the routes file's own directory.
+  Previous `filePath ENDS WITH` clause over-matched by 18× (1698 vs
+  expected 95); now lands on 92.
+- `CALLS_API` / `USES_STORE` / `USES_COMPOSABLE` caller match is label-
+  restricted to `Component` or `Composable` so the untyped MATCH does not
+  also pick up `ApiCall` / `Route` / `Store` nodes (which carry
+  `filePath`). Unconstrained earlier this ballooned `CALLS_API` from the
+  expected 979 to 19 041 as every ApiCall got paired with every caller.
+- Known gap documented: `CALLS_API` only emits when the calling site is
+  itself a Component or Composable node. API calls inside plain JS
+  helper files (`ticket-api.js` etc) preserve `ApiCall.callerFqn` /
+  `ApiCall.filePath` as properties but have no node to anchor the edge to.
+  Phase B2 adds import-chain resolution so the 2-hop edge
+  `Component → helper → ApiCall` materialises. See `references/vue3.md`.
+- `onelens stats` / `NODE_TYPES` now include Vue labels (Component,
+  Composable, Store, Route, ApiCall, EnumConstant) so the counts surface
+  in default CLI output.
+
 ### Fixed — Pre-commit review (2026-04-18)
 
 - `loader._load_vue3` + Spring path: every `Endpoint` / `SpringBean` node now

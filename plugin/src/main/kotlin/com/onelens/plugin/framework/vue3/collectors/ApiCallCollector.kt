@@ -4,6 +4,7 @@ import com.intellij.lang.javascript.psi.JSCallExpression
 import com.intellij.lang.javascript.psi.JSFunction
 import com.intellij.lang.javascript.psi.JSReferenceExpression
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -51,7 +52,9 @@ object ApiCallCollector {
             ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = GlobalSearchScope.projectScope(project)
-        val files = types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
+        val files = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        )
         val psiManager = PsiManager.getInstance(project)
 
         var scanned = 0

@@ -11,6 +11,8 @@ import com.onelens.plugin.framework.FrameworkAdapter
 import com.onelens.plugin.framework.springboot.SpringBootAdapter
 import com.onelens.plugin.framework.springboot.SpringBootCollectionResult
 import com.onelens.plugin.framework.springboot.SpringBootCollector
+import com.onelens.plugin.framework.vue3.Vue3Collector
+import com.onelens.plugin.framework.vue3.Vue3Context
 import com.onelens.plugin.ui.OneLensEvent
 import com.onelens.plugin.ui.OneLensEventBus
 import com.onelens.plugin.ui.OneLensState
@@ -66,13 +68,34 @@ class ExportService {
         val activeIds = adapters.map { it.id }
         LOG.info("Active framework adapters: ${activeIds.joinToString(",")}")
 
-        val springResult: SpringBootCollectionResult? = run {
-            val springAdapter = adapters.firstOrNull { it is SpringBootAdapter } ?: return@run null
-            val collector = springAdapter.collectors().firstOrNull() as? SpringBootCollector ?: return@run null
-            collector.collect(CollectContext(project = project, indicator = indicator, progressFraction = 0.0))
-            collector.lastResult
+        // Run every active adapter's collectors. Each adapter's composite collector
+        // is expected to hold its typed state in a `lastResult` / `lastContext`
+        // side-channel the SPI doesn't formalize yet (P1 debt — see ADR-010).
+        // ExportService then pulls the structured data out of the concrete
+        // collector type and merges it into the legacy top-level keys.
+        var springResult: SpringBootCollectionResult? = null
+        var vueCtx: Vue3Context? = null
+        for (adapter in adapters) {
+            val fraction = when (adapter) {
+                is SpringBootAdapter -> 0.0
+                else -> 0.5   // Vue + future adapters start at the half-way mark
+            }
+            val ctx = CollectContext(project = project, indicator = indicator, progressFraction = fraction)
+            for (collector in adapter.collectors()) {
+                try {
+                    collector.collect(ctx)
+                } catch (e: Throwable) {
+                    LOG.warn("Adapter '${adapter.id}' collector '${collector.id}' failed: ${e.message}", e)
+                    publish(OneLensEvent.Error("Adapter ${adapter.id} failed: ${e.message}"))
+                }
+                when (collector) {
+                    is SpringBootCollector -> springResult = collector.lastResult
+                    is Vue3Collector -> vueCtx = collector.lastContext
+                }
+            }
         }
-        // Legacy behavior preserved when no Spring adapter active: empty Java section.
+
+        // Legacy top-level keys: populated from Spring if present, empty otherwise.
         val classes = springResult?.classes ?: emptyList()
         val members = MembersFrom(springResult)
         val callGraph = springResult?.callGraph ?: emptyList()
@@ -80,10 +103,12 @@ class ExportService {
         val overrideEdges = springResult?.methodOverrides ?: emptyList()
         val modules = springResult?.modules ?: emptyList()
         val annotations = springResult?.annotations ?: emptyList()
+        val enumConstants = springResult?.enumConstants ?: emptyList()
         val spring = if (config.includeSpring) springResult?.spring else null
         val diagnostics = if (config.includeDiagnostics) {
             springResult?.diagnostics ?: emptyList()
         } else emptyList()
+        val vue3Data = vueCtx?.snapshot()
 
         val durationMs = System.currentTimeMillis() - startTime
 
@@ -107,6 +132,7 @@ class ExportService {
             spring = spring,
             modules = modules,
             annotations = annotations,
+            enumConstants = enumConstants,
             diagnostics = diagnostics,
             stats = ExportStats(
                 classCount = classes.size,
@@ -119,10 +145,12 @@ class ExportService {
                 endpointCount = spring?.endpoints?.size ?: 0,
                 moduleCount = modules.size,
                 annotationUsageCount = annotations.size,
+                enumConstantCount = enumConstants.size,
                 diagnosticCount = diagnostics.size,
                 exportDurationMs = durationMs
             ),
-            adapters = activeIds.ifEmpty { listOf("spring-boot") }
+            adapters = activeIds.ifEmpty { listOf("spring-boot") },
+            vue3 = vue3Data,
         )
 
         // Write JSON — stream directly to disk. `encodeToString(document)`
