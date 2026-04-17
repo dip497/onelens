@@ -237,6 +237,16 @@ object JsModuleCollector {
     private fun collectImports(file: PsiFile, sourceModule: String): List<ImportsEdge> {
         val out = mutableListOf<ImportsEdge>()
         val decls = PsiTreeUtil.findChildrenOfType(file, ES6ImportDeclaration::class.java)
+        // If the PSI walk finds no imports but the file text contains `import `,
+        // fall back to a regex scan so we still emit module-level edges. Common
+        // causes we observed on a 5000+ file real-world sync where PSI returned
+        // zero declarations: Vue SFC embedded content not recursively walked in
+        // some plugin versions, stub-only access patterns, or language-service
+        // lazy loads. Regex fallback forfeits resolution (unresolved=true) but
+        // preserves the importer-to-module graph shape.
+        if (decls.isEmpty() && file.text.contains("import ")) {
+            return extractImportsTextual(file, sourceModule)
+        }
         for (decl in decls) {
             val moduleText = decl.importModuleText?.trim()?.trim('\'', '"', '`') ?: continue
             val lineStart = 0 // line numbers require Document — cheap future addition
@@ -320,6 +330,113 @@ object JsModuleCollector {
         val module = fqn?.substringBefore("::") ?: moduleText
         return fqn to module
     }
+
+    /**
+     * Regex fallback for files where the ES6 PSI walk returned zero
+     * declarations. Emits one edge per named binding and one per default
+     * binding, with `unresolved=true` across the board (no `.resolve()` is
+     * available without PSI). Target module is the raw specifier text —
+     * the importer can still traverse source → target at file granularity.
+     *
+     * Handles:
+     *   import defaultName from '…'
+     *   import { a, b, c as renamed } from '…'
+     *   import defaultName, { a, b } from '…'
+     *   import * as ns from '…'
+     *   import '…'                       (side-effect only, emits a * edge)
+     */
+    private fun extractImportsTextual(file: PsiFile, sourceModule: String): List<ImportsEdge> {
+        val out = mutableListOf<ImportsEdge>()
+        val src = file.text
+        IMPORT_STMT_RE.findAll(src).forEach { m ->
+            val clause = m.groupValues[1]
+            val module = m.groupValues[2]
+            when {
+                clause.isBlank() -> {
+                    // side-effect import: `import '…'`
+                    out += ImportsEdge(
+                        sourceModule = sourceModule,
+                        targetModule = module,
+                        importedName = "*",
+                        isDefault = false,
+                        isNamespace = true,
+                        targetFqn = null,
+                        unresolved = true
+                    )
+                }
+                clause.contains("* as ") -> {
+                    val ns = NAMESPACE_RE.find(clause)?.groupValues?.get(1) ?: "*"
+                    out += ImportsEdge(
+                        sourceModule = sourceModule,
+                        targetModule = module,
+                        importedName = "*",
+                        localAlias = ns,
+                        isDefault = false,
+                        isNamespace = true,
+                        targetFqn = null,
+                        unresolved = true
+                    )
+                }
+                else -> {
+                    // Default binding (before the opening `{` or the whole
+                    // clause when there's no brace block).
+                    val braceIdx = clause.indexOf('{')
+                    val defaultChunk = if (braceIdx >= 0) clause.substring(0, braceIdx) else clause
+                    val defaultName = defaultChunk.trim().trimEnd(',').trim()
+                    if (defaultName.isNotEmpty()) {
+                        out += ImportsEdge(
+                            sourceModule = sourceModule,
+                            targetModule = module,
+                            importedName = defaultName,
+                            isDefault = true,
+                            isNamespace = false,
+                            targetFqn = null,
+                            unresolved = true
+                        )
+                    }
+                    // Named specifiers inside `{ … }`.
+                    if (braceIdx >= 0) {
+                        val close = clause.indexOf('}', braceIdx)
+                        if (close > braceIdx) {
+                            val inner = clause.substring(braceIdx + 1, close)
+                            inner.split(',').forEach { raw ->
+                                val piece = raw.trim()
+                                if (piece.isEmpty()) return@forEach
+                                val (extName, alias) = if (" as " in piece) {
+                                    val parts = piece.split(" as ")
+                                    parts[0].trim() to parts.getOrNull(1)?.trim()
+                                } else piece to null
+                                out += ImportsEdge(
+                                    sourceModule = sourceModule,
+                                    targetModule = module,
+                                    importedName = extName,
+                                    localAlias = alias,
+                                    isDefault = false,
+                                    isNamespace = false,
+                                    targetFqn = null,
+                                    unresolved = true
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    private val IMPORT_STMT_RE = Regex(
+        """import(?:\s+([^'"]+?))?\s+from\s*['"`]([^'"`]+)['"`]""",
+        RegexOption.MULTILINE
+    ).let { re ->
+        // Two forms: `import <clause> from '…'` AND `import '…'` (side-effect).
+        // Union them as alternation via a single regex with both shapes.
+        Regex(
+            """import\s+(?:([^;'"\n][^;\n]*?)\s+from\s+)?['"`]([^'"`\n]+)['"`]""",
+            RegexOption.MULTILINE
+        )
+    }
+    private val NAMESPACE_RE = Regex("""\*\s+as\s+(\w+)""")
 
     /**
      * Same two-hop resolve for default-binding references, if they ever land
