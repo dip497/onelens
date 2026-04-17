@@ -105,8 +105,11 @@ class ChromaBackend:
 
     def _get_embedder(self):
         if self._embedder is None:
-            from onelens.context.embedder import QwenEmbedder
-            self._embedder = QwenEmbedder()
+            # Route through the backend factory so the chosen remote
+            # (Modal / OpenAI-compat) is honored. The local ORT path is
+            # still available but only as the Modal container's internals.
+            from onelens.context.embed_backends import get_embedder
+            self._embedder = get_embedder()
         return self._embedder
 
     def get_collection(self, palace_path: str, collection_name: str, create: bool = False):

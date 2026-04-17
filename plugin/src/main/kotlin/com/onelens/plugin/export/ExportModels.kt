@@ -18,7 +18,125 @@ data class ExportDocument(
     val modules: List<ModuleData> = emptyList(),
     val annotations: List<AnnotationUsage> = emptyList(),
     val diagnostics: List<DiagnosticEntry> = emptyList(),
-    val stats: ExportStats = ExportStats()
+    val stats: ExportStats = ExportStats(),
+    /**
+     * Adapters that contributed to this document. Default ["spring-boot"] for
+     * back-compat with pre-adapter exports. Python importer inspects this to
+     * decide which top-level sub-documents to process.
+     */
+    val adapters: List<String> = listOf("spring-boot"),
+    /** Vue 3 adapter output. Present only if Vue3Adapter was active. */
+    val vue3: Vue3Data? = null
+)
+
+/**
+ * Vue 3 adapter payload. Mirrors the per-label split used on the FalkorDB side.
+ * Empty lists (rather than nulls) so Python `data.get("vue3", {}).get("components", [])`
+ * stays clean.
+ */
+@Serializable
+data class Vue3Data(
+    val components: List<ComponentData> = emptyList(),
+    val composables: List<ComposableData> = emptyList(),
+    val stores: List<StoreData> = emptyList(),
+    val routes: List<RouteData> = emptyList(),
+    val apiCalls: List<ApiCallData> = emptyList(),
+    val usesStore: List<UsesStoreEdge> = emptyList(),
+    val usesComposable: List<UsesComposableEdge> = emptyList(),
+    val dispatches: List<DispatchesEdge> = emptyList(),
+    val callsApi: List<CallsApiEdge> = emptyList()
+)
+
+@Serializable
+data class ComponentData(
+    val name: String,
+    val filePath: String,         // canonical (symlink-resolved) relative path
+    val scriptSetup: Boolean = true,
+    val props: List<PropData> = emptyList(),
+    val emits: List<String> = emptyList(),
+    val exposes: List<String> = emptyList(),
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null       // <script setup> content, truncated by Python miner
+)
+
+@Serializable
+data class PropData(
+    val name: String,
+    val type: String = "",
+    val required: Boolean = false,
+    val defaultValue: String? = null
+)
+
+@Serializable
+data class ComposableData(
+    val name: String,
+    val fqn: String,              // module-path::functionName
+    val filePath: String,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null
+)
+
+@Serializable
+data class StoreData(
+    val id: String,               // first arg of defineStore(...)
+    val name: String,             // `useXStore` export name
+    val filePath: String,
+    val style: String = "options", // "options" | "setup"
+    val state: List<String> = emptyList(),
+    val getters: List<String> = emptyList(),
+    val actions: List<String> = emptyList(),
+    val lineStart: Int = 0,
+    val body: String? = null
+)
+
+@Serializable
+data class RouteData(
+    val name: String,             // resolved route name literal
+    val path: String,             // route pattern with placeholders
+    val componentRef: String? = null, // lazy import target (relative path)
+    val meta: Map<String, String> = emptyMap(),
+    val parentName: String? = null,
+    val filePath: String,
+    val lineStart: Int = 0
+)
+
+@Serializable
+data class ApiCallData(
+    val method: String,           // GET/POST/PATCH/DELETE
+    val path: String,             // literal or template
+    val parametric: Boolean = false,
+    val binding: String? = null,  // source of parametric binding if known
+    val callerFqn: String,        // fqn of enclosing function/component
+    val filePath: String,
+    val lineStart: Int = 0
+)
+
+@Serializable
+data class UsesStoreEdge(
+    val callerFqn: String,        // component or composable fqn
+    val storeId: String,
+    val indirect: Boolean = false,
+    val via: String? = null       // wrapper function name when indirect
+)
+
+@Serializable
+data class UsesComposableEdge(
+    val callerFqn: String,
+    val composableFqn: String
+)
+
+@Serializable
+data class DispatchesEdge(
+    val routeName: String,
+    val componentRef: String      // relative path of component
+)
+
+@Serializable
+data class CallsApiEdge(
+    val callerFqn: String,
+    val apiCallFqn: String        // deterministic: "<method>:<path>:<callerFqn>"
 )
 
 @Serializable

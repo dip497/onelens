@@ -1,46 +1,52 @@
 """
-embedder.py — Optimized Qwen3 embedding for OneLens context graph.
+embedder.py — Qwen3-Embedding-0.6B via onnxruntime (no torch, no fastembed).
 
-Design decisions (2026-04):
-- Qwen3-Embedding-0.6B (+41% accuracy over MiniLM on code queries)
-- bf16 default (fp16 was actually slower on Ampere)
-- max_seq_length=512 (our docs are <500 tokens; avoids padding waste)
-- Flash Attention 2 when available — Qwen3 README explicitly recommends it;
-  fuses the attention kernel, drops the O(S²) attention matrix, gives ~2-3×
-  throughput on Ampere+ vs SDPA fallback
-- torch.compile OFF by default — varied input lengths thrash recompilation
-  and negate kernel wins on mixed workloads (methods, classes, endpoints)
-- batch size auto-scales with VRAM (_auto_batch_size); Modal sets
-  ONELENS_EMBED_BATCH to override for remote runs
-- expandable_segments: prevents VRAM fragmentation on long imports
+Why direct ORT + tokenizers:
+- fastembed 0.8 PoolingType has no LAST_TOKEN; Qwen3 spec requires last-token
+  pooling (not MEAN/CLS). Third-party wrappers (qwen3-embed, fastembed-qwen3)
+  either pin to a re-exported model or are stale.
+- Direct ORT against upstream `onnx-community/Qwen3-Embedding-0.6B-ONNX` gives
+  identical math to the HuggingFace reference, zero wrapper drift, ~40 LOC.
+
+Pipeline (matches SentenceTransformer's implementation for Qwen3):
+1. HuggingFace tokenizer, left-padding, pad_id=151643 (`<|endoftext|>`)
+2. ONNX model emits `last_hidden_state` shape (B, T, 1024)
+3. Last-token extract: with left-padding, `hidden[:, -1, :]` IS the last real
+   token for every row (padding sits at the front)
+4. L2 normalize → cosine-space vectors, same as before
+5. 1024-dim output → existing ChromaDB drawers compatible
+
+Model cache: fastembed/HF conventions — respects HF_HOME. First call blocks on
+the 1.2 GB ONNX download via huggingface_hub.snapshot_download.
+
+Install footprint vs old torch stack: ~300 MB (onnxruntime-gpu + tokenizers +
+huggingface_hub + numpy) vs 2.5 GB (torch + sentence-transformers + deps).
 """
 
 import logging
 import os
 import time
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
-# Prevent VRAM fragmentation from dynamic-shape torch.compile on small GPUs.
-# Must be set BEFORE torch is imported for the first time.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-DEFAULT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_MODEL = "onnx-community/Qwen3-Embedding-0.6B-ONNX"
+DEFAULT_ONNX_FILE = "onnx/model.onnx"
+QWEN3_DIM = 1024
+QWEN3_PAD_ID = 151643  # <|endoftext|> — same token for pad, per Qwen3 tokenizer
 DEFAULT_MAX_SEQ = 512
+
+# Qwen3-Embedding-0.6B architecture constants (from config.json).
+# The ONNX export is decoder-style: it expects past_key_values inputs even
+# for a single forward pass. We supply zero-length KV cache tensors per layer.
+QWEN3_NUM_LAYERS = 28
+QWEN3_NUM_KV_HEADS = 8
+QWEN3_HEAD_DIM = 128
 
 
 def _auto_batch_size() -> int:
-    """Pick a batch size that fills the GPU without OOM.
-
-    The attention cost scales as B * H * S^2 * 4B. At S=512, H=16, one sample
-    costs ~16MB for attention plus activations. Empirical safe caps per tier:
-        4GB (A2000, 3050 Ti): 64 — the old hardcoded default
-        16GB (T4, V100):      192
-        24GB (A10G, L4, 3090, 4090): 256
-        40GB+ (A100, H100):   512
-    Override with ONELENS_EMBED_BATCH — Modal images set this so remote runs
-    don't inherit the local 4GB tuning.
-    """
+    """Batch size sized to VRAM. Override via ONELENS_EMBED_BATCH."""
     override = os.environ.get("ONELENS_EMBED_BATCH")
     if override:
         try:
@@ -48,10 +54,10 @@ def _auto_batch_size() -> int:
         except ValueError:
             pass
     try:
-        import torch
-        if not torch.cuda.is_available():
-            return 32
-        total_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        total_gb = pynvml.nvmlDeviceGetMemoryInfo(h).total / (1024 ** 3)
     except Exception:
         return 64
     if total_gb >= 40:
@@ -66,107 +72,152 @@ def _auto_batch_size() -> int:
 DEFAULT_BATCH = _auto_batch_size()
 
 
+def _resolve_providers(device: str | None) -> tuple[list[str], str]:
+    if device == "cpu":
+        return (["CPUExecutionProvider"], "cpu")
+    try:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+    except Exception:
+        return (["CPUExecutionProvider"], "cpu")
+    if "CUDAExecutionProvider" in available:
+        return (["CUDAExecutionProvider", "CPUExecutionProvider"], "cuda")
+    return (["CPUExecutionProvider"], "cpu")
+
+
+def _download_model(repo_id: str) -> str:
+    """Pull the ONNX model + tokenizer from HuggingFace Hub.
+
+    Returns the local path to the model.onnx file. Tokenizer files land
+    alongside it so `Tokenizer.from_file(...)` via the snapshot dir just works.
+    """
+    from huggingface_hub import snapshot_download
+
+    snapshot = snapshot_download(
+        repo_id=repo_id,
+        allow_patterns=[
+            DEFAULT_ONNX_FILE,
+            "onnx/model.onnx_data",    # weights sidecar for >2GB graphs
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "config.json",
+        ],
+    )
+    return os.path.join(snapshot, DEFAULT_ONNX_FILE)
+
+
 class QwenEmbedder:
-    """Wraps SentenceTransformer with optimizations for Qwen3 on small GPUs."""
+    """Qwen3-Embedding-0.6B via onnxruntime + HuggingFace tokenizers (no torch)."""
 
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
-        device: str = None,
+        device: str | None = None,
         max_seq_length: int = DEFAULT_MAX_SEQ,
         batch_size: int = DEFAULT_BATCH,
-        use_compile: bool = False,           # off by default: varied shapes → recompile thrash
-        attn_impl: str = None,               # "flash_attention_2" | "sdpa" | "eager"; auto if None
     ):
-        import torch
-        from sentence_transformers import SentenceTransformer
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
 
-        torch.set_float32_matmul_precision("high")
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        providers, effective_device = _resolve_providers(device)
+        self.device = effective_device
         self.batch_size = batch_size
-        self._calls = 0
-
-        # Flash Attention 2 — Qwen3 README explicitly recommends it; gives ~2-3×
-        # throughput on Ampere+ by fusing the attention kernel and dropping the
-        # O(S²) materialized attention matrix. We only enable it when the wheel
-        # is importable, so CPU / non-Ampere / no-wheel paths fall back to SDPA.
-        resolved_attn = attn_impl or self._pick_attn_impl()
-        model_kwargs = {"attn_implementation": resolved_attn} if resolved_attn else {}
-
-        logger.info("Loading %s on %s (attn=%s)...", model_name, self.device, resolved_attn or "sdpa")
-        t0 = time.time()
-        self._model = SentenceTransformer(
-            model_name, device=self.device, model_kwargs=model_kwargs
-        )
-        self._model.max_seq_length = max_seq_length
+        self.max_seq_length = max_seq_length
         self._model_name = model_name
-        self._attn_impl = resolved_attn or "sdpa"
 
-        # torch.compile is OFF by default. Reason: our inputs have highly varied
-        # token counts (bodies 0-512 tokens, classes <100), which either triggers
-        # constant recompiles (reduce-overhead mode) or adds per-call overhead
-        # that negates the kernel wins (dynamic mode). Measured net slowdown on
-        # varied-batch workloads. Opt in with use_compile=True for benchmarks.
-        if use_compile and self.device == "cuda":
-            try:
-                self._model[0].auto_model = torch.compile(
-                    self._model[0].auto_model, dynamic=True
-                )
-                self._model.encode(["warmup"] * 4, batch_size=4, show_progress_bar=False)
-                logger.info("torch.compile enabled (dynamic shapes)")
-            except Exception as e:
-                logger.warning("torch.compile failed, falling back: %s", e)
+        logger.info("Loading %s via onnxruntime (providers=%s)...", model_name, providers)
+        t0 = time.time()
+        onnx_path = _download_model(model_name)
+
+        # ONNX session — session options keep memory bounded on long imports.
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self._session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
+        # The provider list we pass is an intent, not a guarantee — ORT falls
+        # back to CPU if CUDAExecutionProvider fails to load (missing cuDNN 9
+        # / CUDA 12 libs). Report what actually loaded so callers (UI, logs)
+        # aren't lied to.
+        active_providers = self._session.get_providers()
+        self.device = "cuda" if "CUDAExecutionProvider" in active_providers else "cpu"
+        if effective_device == "cuda" and self.device == "cpu":
+            logger.warning(
+                "CUDAExecutionProvider requested but failed to load; running on CPU. "
+                "Install cuDNN 9 + CUDA 12 runtime libs for GPU acceleration."
+            )
+
+        # Tokenizer lives next to the ONNX file in the snapshot dir.
+        tokenizer_path = os.path.join(os.path.dirname(os.path.dirname(onnx_path)), "tokenizer.json")
+        self._tokenizer = Tokenizer.from_file(tokenizer_path)
+        # Qwen3-Embedding pooling requires left-padding: with padding on the
+        # left, `hidden[:, -1, :]` is the last real token for every row.
+        # Right-padding would force us to gather by attention_mask.sum()-1.
+        self._tokenizer.enable_padding(
+            direction="left", pad_id=QWEN3_PAD_ID, pad_token="<|endoftext|>"
+        )
+        self._tokenizer.enable_truncation(max_length=max_seq_length)
+
+        # Cache the input names — ONNX sessions re-query these on every run
+        # otherwise. Output is just the first tensor (`last_hidden_state`).
+        self._input_names = {inp.name for inp in self._session.get_inputs()}
 
         logger.info("Model ready in %.1fs", time.time() - t0)
 
-    @staticmethod
-    def _pick_attn_impl() -> str | None:
-        """Return 'flash_attention_2' if the wheel is available on a supported
-        GPU, else None to let transformers fall back to SDPA.
+    def encode(
+        self,
+        texts: list[str],
+        batch_size: int | None = None,
+        show_progress: bool = False,
+    ) -> np.ndarray:
+        """Encode texts → (N, dim) numpy array, L2-normalized."""
+        if not texts:
+            return np.empty((0, QWEN3_DIM), dtype=np.float32)
 
-        Flash Attention 2 requires CUDA + Ampere (SM80) or newer. On pre-Ampere
-        cards (T4, V100) or CPU it must not be selected or the model load errors.
-        """
-        override = os.environ.get("ONELENS_ATTN_IMPL")
-        if override:
-            return override if override.lower() != "auto" else None
-        try:
-            import torch
-            if not torch.cuda.is_available():
-                return None
-            # SM80+ = Ampere (A100, A10, A10G, A40, RTX 3090/A2000/A4000/A5000/A6000)
-            major, minor = torch.cuda.get_device_capability(0)
-            if major < 8:
-                return None
-        except Exception:
-            return None
-        try:
-            import flash_attn  # noqa: F401
-        except ImportError:
-            return None
-        return "flash_attention_2"
-
-    def encode(self, texts: list[str], batch_size: int = None, show_progress: bool = False):
-        """Encode a list of texts. Returns numpy array (N, dim)."""
         bs = batch_size or self.batch_size
-        out = self._model.encode(
-            texts,
-            batch_size=bs,
-            normalize_embeddings=True,
-            show_progress_bar=show_progress,
-            convert_to_numpy=True,
+        out_vectors: list[np.ndarray] = []
+        for start in range(0, len(texts), bs):
+            chunk = texts[start:start + bs]
+            vecs = self._encode_batch(chunk)
+            out_vectors.append(vecs)
+        return np.concatenate(out_vectors, axis=0) if out_vectors else np.empty((0, QWEN3_DIM), dtype=np.float32)
+
+    def _encode_batch(self, texts: list[str]) -> np.ndarray:
+        encs = self._tokenizer.encode_batch(texts)
+        input_ids = np.array([e.ids for e in encs], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encs], dtype=np.int64)
+        batch_size, seq_len = input_ids.shape
+
+        feed = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if "position_ids" in self._input_names:
+            feed["position_ids"] = np.broadcast_to(
+                np.arange(seq_len, dtype=np.int64), input_ids.shape
+            ).copy()
+
+        # Qwen3 ONNX export is decoder-style: requires 2*N_LAYERS past_kv
+        # inputs. For single-pass feature extraction we pass zero-length KV
+        # tensors (past_seq = 0). Shape: (B, num_kv_heads, 0, head_dim).
+        empty_kv = np.zeros(
+            (batch_size, QWEN3_NUM_KV_HEADS, 0, QWEN3_HEAD_DIM), dtype=np.float32
         )
-        self._calls += 1
-        # Periodically release reserved-but-unallocated blocks to fight
-        # fragmentation from dynamic-shape compilation.
-        if self.device == "cuda" and self._calls % 10 == 0:
-            import torch
-            torch.cuda.empty_cache()
-        return out
+        for layer in range(QWEN3_NUM_LAYERS):
+            feed[f"past_key_values.{layer}.key"] = empty_kv
+            feed[f"past_key_values.{layer}.value"] = empty_kv
+
+        # Only request last_hidden_state; present_kv outputs are discarded.
+        outputs = self._session.run(["last_hidden_state"], feed)
+        hidden = outputs[0]  # (B, T, 1024)
+
+        # Left-padding → last token is always hidden[:, -1, :].
+        last_token = hidden[:, -1, :].astype(np.float32)
+
+        # L2 normalize → cosine-space vectors.
+        norms = np.linalg.norm(last_token, axis=1, keepdims=True)
+        norms = np.where(norms == 0.0, 1.0, norms)
+        return last_token / norms
 
     @property
     def dim(self) -> int:
-        return self._model.get_sentence_embedding_dimension()
+        return QWEN3_DIM
 
     @property
     def model_name(self) -> str:

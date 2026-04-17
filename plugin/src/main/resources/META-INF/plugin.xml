@@ -7,12 +7,28 @@
         Uses IntelliJ's PSI APIs for 100% accurate type resolution, call graphs, and Spring bean wiring.
     ]]></description>
 
-    <!-- Required: platform + Java -->
+    <!-- Required: IntelliJ Platform only. Language / framework support is optional so the
+         plugin can install into WebStorm (no Java), PyCharm, and IDEA Community/Ultimate. -->
     <depends>com.intellij.modules.platform</depends>
-    <depends>com.intellij.modules.java</depends>
 
-    <!-- Optional: Spring support (exports beans, wiring, endpoints when available) -->
+    <!-- Java / Spring Boot adapter. Loads ExportFullAction, AutoSync for .java, Spring
+         collectors. Absent on WebStorm or PyCharm — plugin still installs. -->
+    <depends optional="true" config-file="framework-springboot.xml">com.intellij.modules.java</depends>
+
+    <!-- Further Spring-plugin features (Endpoints provider, bean graph APIs) load when the
+         com.intellij.spring plugin is present on top of Java. -->
     <depends optional="true" config-file="spring-features.xml">com.intellij.spring</depends>
+
+    <!-- Vue 3 adapter. Requires the JavaScript + Vue plugins; available in WebStorm and
+         IDEA Community/Ultimate once installed from Marketplace. -->
+    <depends optional="true" config-file="framework-vue3.xml">org.jetbrains.plugins.vue</depends>
+
+    <!-- Framework adapter extension point. Each language/framework contributes an adapter. -->
+    <extensionPoints>
+        <extensionPoint name="frameworkAdapter"
+                        interface="com.onelens.plugin.framework.FrameworkAdapter"
+                        dynamic="true"/>
+    </extensionPoints>
 
     <extensions defaultExtensionNs="com.intellij">
         <applicationService
@@ -21,9 +37,15 @@
             serviceImplementation="com.onelens.plugin.export.ExportState"/>
         <projectService
             serviceImplementation="com.onelens.plugin.autosync.AutoSyncService"/>
+        <projectService
+            serviceImplementation="com.onelens.plugin.ui.OneLensStatusService"/>
         <postStartupActivity
             implementation="com.onelens.plugin.autosync.AutoSyncStartupActivity"/>
         <notificationGroup id="OneLens" displayType="BALLOON"/>
+        <toolWindow id="OneLens"
+                    anchor="right"
+                    secondary="false"
+                    factoryClass="com.onelens.plugin.ui.OneLensToolWindowFactory"/>
     </extensions>
 
     <applicationListeners>

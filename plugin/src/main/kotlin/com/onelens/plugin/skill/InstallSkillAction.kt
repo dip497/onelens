@@ -33,7 +33,7 @@ class InstallSkillAction : AnAction("Install OneLens Skill for Claude Code") {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
 
-        val skillBytes = loadBundledSkill()
+        val skillBytes = loadBundledResource("/skills/onelens/SKILL.md")
         if (skillBytes == null) {
             notify(project,
                 "OneLens skill is missing from the plugin bundle.\n" +
@@ -43,7 +43,8 @@ class InstallSkillAction : AnAction("Install OneLens Skill for Claude Code") {
         }
 
         val home = System.getProperty("user.home")
-        val dest: Path = Paths.get(home, ".claude", "skills", "onelens", "SKILL.md")
+        val skillRoot: Path = Paths.get(home, ".claude", "skills", "onelens")
+        val dest: Path = skillRoot.resolve("SKILL.md")
 
         try {
             dest.parent.toFile().mkdirs()
@@ -56,22 +57,48 @@ class InstallSkillAction : AnAction("Install OneLens Skill for Claude Code") {
             return
         }
 
+        // Install stack-specific references. Each reference is loaded lazily by
+        // the main SKILL.md via progressive disclosure, so missing ones are not
+        // fatal — log and continue. The set of reference filenames is hard-coded
+        // here because classpath-scanning directories inside a jar is awkward
+        // across different IDE launch modes; when we add a new reference we also
+        // add its filename here (one line per stack, obvious diff).
+        val references = listOf("jvm.md", "vue3.md")
+        val refDir = skillRoot.resolve("references")
+        refDir.toFile().mkdirs()
+        val missing = mutableListOf<String>()
+        for (ref in references) {
+            val bytes = loadBundledResource("/skills/onelens/references/$ref")
+            if (bytes == null) {
+                missing += ref
+                continue
+            }
+            try {
+                refDir.resolve(ref).toFile().writeBytes(bytes)
+            } catch (ex: Exception) {
+                log.warn("Failed to write reference $ref", ex)
+                missing += ref
+            }
+        }
+
+        val tail = if (missing.isEmpty()) {
+            "References: ${references.joinToString(", ")}."
+        } else {
+            "References installed with gaps — missing: ${missing.joinToString(", ")}."
+        }
         notify(project,
-            "OneLens skill installed at $dest\n" +
+            "OneLens skill installed at $skillRoot\n$tail\n" +
                 "Restart Claude Code once, then ask it anything about your codebase.",
-            NotificationType.INFORMATION)
+            if (missing.isEmpty()) NotificationType.INFORMATION else NotificationType.WARNING)
     }
 
     /**
-     * Load SKILL.md from the plugin's classpath. The skill is packaged under
-     * `/skills/onelens/SKILL.md` by the Gradle `processResources` task (see
-     * `plugin/build.gradle.kts` — the skill copy is the intended pattern).
-     * If the skill isn't bundled, this returns null and the action surfaces
-     * a packaging error.
+     * Load a resource packaged with the plugin by `processResources`. Returns
+     * null if the resource is absent (e.g. a reference was renamed and this
+     * action wasn't updated).
      */
-    private fun loadBundledSkill(): ByteArray? {
-        val stream = javaClass.getResourceAsStream("/skills/onelens/SKILL.md")
-            ?: return null
+    private fun loadBundledResource(path: String): ByteArray? {
+        val stream = javaClass.getResourceAsStream(path) ?: return null
         return stream.use { it.readBytes() }
     }
 

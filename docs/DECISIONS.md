@@ -222,5 +222,177 @@ the plugin (unlikely pre-1.0).
 
 ---
 
+---
+
+## ADR-011 · 2026-04-17 · Framework-adapter SPI for multi-stack support
+
+**Decision.** Introduce a `FrameworkAdapter` extension point so each
+language/framework lives in its own subpackage under
+`plugin/src/main/kotlin/com/onelens/plugin/framework/<adapter-id>/`. The
+existing Java/Spring collectors are wrapped as `SpringBootAdapter`; a new
+`Vue3Adapter` is the second adapter. `ExportService.exportFull` discovers
+active adapters via the EP and merges their outputs into a single JSON
+document; per-adapter subdocs live under top-level keys (`vue3: {…}`).
+
+**Context.** OneLens was hardcoded to Java: `ExportService` called seven
+collectors in a fixed order, `ExportDocument` had flat Java-centric keys,
+and `plugin.xml` hard-depended on `com.intellij.modules.java` so the JAR
+would not install on WebStorm. Adding a Vue 3 adapter in place would have
+duplicated the Java flow; modelling it as a peer via an SPI keeps each
+stack's logic self-contained, makes future stacks (Kotlin, Vert.x, FastAPI)
+additive, and lets users run a Vue-only sync on WebStorm.
+
+**Alternatives.**
+
+- Single mega-collector per language with hand-rolled switching inside
+  `ExportService` (rejected — every new stack would touch the
+  orchestrator and `ExportDocument` grows unbounded).
+- Separate plugins for Java and Vue (rejected — Marketplace UX worse,
+  shared infra like auto-sync and skill install would be duplicated).
+- Neo4j Fabric for federated multi-graph queries (deferred — FalkorDB
+  lacks `USE <graph>` and switching backends is a much larger change;
+  the `wing` property on nodes plus a monograph covers 10+ repos per
+  instance, enough until team-hosted scale forces federation).
+
+**Revisit when.** >10 repos per FalkorDB instance and monograph queries
+become too noisy, or a stack needs a fundamentally different graph shape
+the additive subdoc can't express.
+
+---
+
+## ADR-012 · 2026-04-17 · plugin.xml split via optional config-file deps
+
+**Decision.** `plugin.xml` declares only `com.intellij.modules.platform`
+hard. All language/framework machinery goes into stack-specific config
+files declared `optional` with `config-file=`:
+`framework-springboot.xml` (gated on `com.intellij.modules.java`),
+`spring-features.xml` (gated on `com.intellij.spring`),
+`framework-vue3.xml` (gated on `org.jetbrains.plugins.vue`).
+
+**Context.** The hard `<depends>com.intellij.modules.java</depends>` in
+the original plugin.xml refused installation on WebStorm and PyCharm
+Community — exactly the IDEs a Vue / Python user would have. The
+IntelliJ platform supports optional deps with config files; adapters
+register their extension-point contributions from those files so the
+core plugin loads even if a given stack's IDE module is absent.
+
+**Alternatives.**
+
+- Keep the hard Java dep and tell Vue users to install IDEA Ultimate
+  (rejected — user's target environment is WebStorm).
+- Runtime feature-flag checks inside every Kotlin collector (rejected —
+  ClassNotFoundError risk at plugin load; config-file gating happens in
+  the platform before anything Kotlin loads).
+
+**Revisit when.** The IntelliJ platform deprecates `config-file` or we
+decide to publish separate plugins per stack for Marketplace reasons.
+
+---
+
+## ADR-013 · 2026-04-17 · platformType IU (Ultimate) for dev, runtime portable
+
+**Decision.** `plugin/gradle.properties` sets `platformType = IU` so the
+sandbox + test classpath contain the JavaScript + Vue plugins (both
+bundled in Ultimate, not in Community). `platformCompatiblePlugins` stays
+wired in `build.gradle.kts` for future Marketplace plugins, but is empty
+for now. The shipped plugin's `sinceBuild = 251` gates IDE *version*, not
+*edition* — combined with ADR-012's config-file split, the JAR installs
+cleanly on WebStorm, PyCharm, IDEA Community, and Ultimate.
+
+**Context.** Attempted `compatiblePlugins("JavaScript")` against
+`platformType = IC` and hit `No plugin update with id='JavaScript'
+compatible with 'IC-251.26927.53' found in JetBrains Marketplace` — the
+JavaScript plugin is Ultimate-bundled, not a Marketplace entry. IU is
+the only way to get JS + Vue on the test classpath without per-version
+version pinning.
+
+**Alternatives.**
+
+- Stay on IC and pin a Marketplace build of the Vue plugin (rejected —
+  no standalone JavaScript plugin on Marketplace for IC).
+- Dual-build IC + IU in CI with matrix jobs (deferred — not needed until
+  we want automated verification on IC-specific code paths).
+
+**Revisit when.** JetBrains ships a standalone JavaScript plugin on
+Marketplace for IC, or the Ultimate dev footprint (~1.5 GB) proves too
+heavy for contributors.
+
+---
+
+## ADR-014 · 2026-04-17 · Skill layout — single skill, per-stack references
+
+**Decision.** One `skills/onelens/SKILL.md` hub plus
+`skills/onelens/references/jvm.md` and `.../vue3.md`. The hub
+(~100 lines) stays in context always; references load lazily when the
+hub's stack-detection step determines which stack the active wing
+belongs to. Plugin bundles both the hub and the references directory;
+`InstallSkillAction` copies both.
+
+**Context.** The initial instinct was to create separate
+`onelens-jvm` / `onelens-vue3` skills. That would have split triggering
+across two descriptions, risked Claude picking the wrong one for
+cross-stack questions, and forced duplicated "answer principles" text.
+The skill-creator's domain-organization pattern (hub +
+`references/*.md`) is the canonical fix: one trigger surface,
+progressive disclosure of stack-specific content, cross-stack queries
+live only in the hub.
+
+**Alternatives.**
+
+- Two separate skills with independent descriptions (rejected — ambiguous
+  trigger for cross-stack questions, doubles install surface).
+- Single monolithic SKILL.md (rejected — broke through the recommended
+  <500-line budget; non-relevant stack content polluted every
+  invocation's context).
+
+**Revisit when.** Enough stacks land (Vert.x, FastAPI, Kotlin) that the
+hub itself grows beyond ~200 lines — at that point move the
+stack-detection table into `references/stack-detection.md`.
+
+---
+
+---
+
+## ADR-015 · 2026-04-18 · Block-list hook prevents client names leaking in
+
+**Decision.** Add a `PreToolUse` hook
+(`.claude/hooks/block-client-names.sh`) that reads
+`.claude/hooks/client-names.txt` and refuses any `Write` / `Edit` /
+`NotebookEdit` tool call whose `file_path`, `content`, or `new_string`
+contains a forbidden term (case-insensitive substring). The block list
+is editable only for maintainers; contents stay out of commits by design
+because the file itself also counts against the hook (adding a name to
+the list and committing it would leak the name).
+
+At the same time we swept the existing tree and rewrote 12 references to
+a real-world test-target repo into generic phrasing ("a large Vue 3
+repo", "the reference Java backend"). CHANGELOG and PROGRESS call it
+out explicitly.
+
+**Context.** The convention section of `CLAUDE.md` already said
+"`grep -rIn "<client-name>"` before public push". That rule kept getting
+forgotten in-session, and a swath of plugin + docs code shipped with a
+specific client repo name embedded. Catching drift at Write/Edit time
+turns the rule into enforcement instead of etiquette. The list file +
+hook pattern keeps the fix centralized: new client relationships add
+one line to `client-names.txt`, retire by deleting the line.
+
+**Alternatives.**
+
+- Keep relying on the manual `grep` convention (rejected — already
+  proven unreliable over multiple sessions).
+- Add a CI job that greps the working tree (rejected as the *only*
+  line of defence — catches drift late, after PRs are already open;
+  still a useful second layer).
+- Ban the terms via `.gitignore` / `pre-commit` (rejected as sole
+  mechanism — pre-commit runs in dev loops only; the Claude-Code hook
+  catches the moment an edit is proposed, not just at commit time).
+
+**Revisit when.** The block list outgrows a simple substring match
+(multi-word fuzzy matches, regex needs) — at that point swap the
+`grep -qiF` core for a Python matcher keeping the same input contract.
+
+---
+
 *To append a new ADR, copy the heading format and add at the
 bottom. Do not rewrite or delete earlier entries.*

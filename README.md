@@ -1,6 +1,8 @@
 # OneLens
 
-Code knowledge graph for Java/Spring Boot projects. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints — plus semantic search over method bodies and javadoc.
+Code knowledge graph for Java/Spring Boot backends **and Vue 3 frontends**. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints, Vue components, Pinia stores, composables, routes, API calls — plus cross-stack traversal via `HITS` edges that link a Vue `ApiCall` to the Spring `Endpoint` it actually dispatches to.
+
+Status: see [`docs/PROGRESS.md`](./docs/PROGRESS.md) for the per-feature tracker.
 
 ## What it does
 

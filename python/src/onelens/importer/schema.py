@@ -12,6 +12,14 @@ NODE_SCHEMA = {
     "Endpoint": "CREATE INDEX FOR (n:Endpoint) ON (n.id)",
     "Module": "CREATE INDEX FOR (n:Module) ON (n.name)",
     "Annotation": "CREATE INDEX FOR (n:Annotation) ON (n.fqn)",
+    # Vue 3 — frontend nodes sharing the same graph wing with the Java backend
+    # so cross-stack queries work in a single Cypher call. See bridge_http.py
+    # for the `HITS` edge that links Vue ApiCall to Spring Endpoint.
+    "Component": "CREATE INDEX FOR (n:Component) ON (n.filePath)",
+    "Composable": "CREATE INDEX FOR (n:Composable) ON (n.fqn)",
+    "Store": "CREATE INDEX FOR (n:Store) ON (n.id)",
+    "Route": "CREATE INDEX FOR (n:Route) ON (n.name)",
+    "ApiCall": "CREATE INDEX FOR (n:ApiCall) ON (n.fqn)",
 }
 
 # Full-text search indexes — FalkorDB CALL procedure syntax.
@@ -37,6 +45,40 @@ FULLTEXT_SCHEMA = {
     "Endpoint_path": (
         "CALL db.idx.fulltext.createNodeIndex("
         "'Endpoint', {field: 'path', weight: 5.0})"
+    ),
+    # Vue 3 — name weighted highest for component queries like "TicketView"; path
+    # and body caught via medium/low weights.
+    "Component_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Component',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'filePath', weight: 5.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "Composable_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Composable',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "Store_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Store',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'id', weight: 8.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "Route_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Route',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'path', weight: 8.0})"
+    ),
+    "ApiCall_path": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'ApiCall',"
+        " {field: 'path', weight: 8.0},"
+        " {field: 'method', weight: 5.0})"
     ),
 }
 

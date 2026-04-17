@@ -1,0 +1,13 @@
+<idea-plugin>
+    <!-- Java / Spring Boot framework adapter.
+         Loaded only when com.intellij.modules.java is available (IDEA Community/Ultimate).
+         The SpringBootAdapter below uses the Java PSI APIs and registers all collectors
+         that read PsiClass / PsiMethod / @RestController / @Service etc.
+
+         Further Spring-plugin-only features (beans graph via EndpointsProvider) live
+         in spring-features.xml, which depends on com.intellij.spring. -->
+
+    <extensions defaultExtensionNs="com.onelens.plugin">
+        <frameworkAdapter implementation="com.onelens.plugin.framework.springboot.SpringBootAdapter"/>
+    </extensions>
+</idea-plugin>

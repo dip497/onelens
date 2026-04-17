@@ -179,3 +179,22 @@ python/benchmarks/                # Local only (gitignored)
 - FalkorDB default port: 17532 (mapped from Docker 6379)
 - Before public push: `grep -rIn "<client-name>"` to catch leaked client refs in comments/examples
 - Before committing plugin-side changes: run `./gradlew compileKotlin` — the CLI command rename that slipped through once already (`import` → `import_graph`) would have been caught by CI
+
+## Tracker + docs — keep them current, every turn
+
+**Rule:** whenever you add, change, or retire a feature in this repo (plugin collector, Python module, adapter, schema, Cypher pattern, skill reference, etc.), update these files *in the same session* — never "I'll come back to it later":
+
+1. `docs/PROGRESS.md` — flip the feature row from ⬜/🟡 to ✅ (or add a new row). Drop a one-line pointer to the code file(s) that landed.
+2. `CHANGELOG.md` — append to `[Unreleased] → Added/Changed/Fixed/Removed` as appropriate. Phase/section labels are fine (`### Added — Phase B · Vue 3 adapter`).
+3. `docs/DECISIONS.md` — if the change encodes a non-obvious architectural choice (a new SPI, a manifest split, a backend swap, a skill-layout decision), add a new `ADR-NNN` entry with Decision / Context / Alternatives / Revisit-when.
+4. `docs/roadmap.md` — only when a milestone checkbox flips or a new milestone row is justified.
+5. `README.md` — only when the top-line positioning actually changes (new stack, new flagship feature).
+
+Trigger this check:
+
+- Right before you write the end-of-turn summary for any coding turn that shipped real changes.
+- Whenever you're about to call `git commit` — treat uncommitted doc drift as part of the same unit of work, not a follow-up.
+
+If the change is too small for any of the files above (typo fix, single-line refactor, comment cleanup), say so explicitly in the end-of-turn note so the reader knows the skip was deliberate.
+
+Rationale: tracker drift is invisible until someone else picks up the repo and can't tell what's real vs aspirational. PROGRESS.md + CHANGELOG + DECISIONS are the durable state that outlives any single conversation — keeping them fresh is cheaper than reconstructing them later.

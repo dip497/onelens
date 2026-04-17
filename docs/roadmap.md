@@ -3,9 +3,11 @@
 Pre-1.0. Aspirational and subject to change. Current release line:
 `0.1.0`.
 
-A longer narrative of the same direction lives at
-[VISION-AND-ROADMAP.md](./VISION-AND-ROADMAP.md). This file is the
-crisp milestone list.
+Companion docs:
+- [VISION-AND-ROADMAP.md](./VISION-AND-ROADMAP.md) — longer narrative.
+- [PROGRESS.md](./PROGRESS.md) — per-feature tracker (what's shipped,
+  in progress, deferred).
+- [DECISIONS.md](./DECISIONS.md) — ADR log.
 
 ## M1 — "OneLens works end-to-end on one Spring Boot monolith" (shipping now)
 
@@ -40,10 +42,19 @@ Deferred:
 Ship criteria: *a second engineering org can adopt OneLens without
 custom patches.*
 
-- [ ] Multi-project graphs in one FalkorDB instance.
+- [x] Multi-project graphs in one FalkorDB instance (via the `wing`
+      property on every node; cross-wing `HITS` edges link Vue
+      ApiCall ↔ Spring Endpoint).
+- [x] Framework-adapter SPI (`FrameworkAdapter`) so new stacks land
+      additively. Java/Spring and Vue 3 ride on it today.
+- [x] Vue 3 adapter (full import): Components, Composables, Stores,
+      Routes, ApiCalls, USES_STORE (direct + 1-hop indirect),
+      USES_COMPOSABLE, DISPATCHES, CALLS_API, HITS cross-stack bridge.
 - [ ] IntelliJ marketplace listing.
 - [ ] Hardened `uv` / `pip` fallback for air-gapped environments.
 - [ ] Incremental PageRank on delta imports.
+- [ ] Vue delta + auto-sync (Phase B2 — `DeltaTracker`, file listener,
+      and `delta_loader` Vue branch).
 - [ ] Kotlin project support (PSI already covers it; needs
       collector audit + tests).
 - [ ] Public benchmark harness so adopters can measure on their
