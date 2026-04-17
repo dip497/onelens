@@ -42,6 +42,10 @@ dependencies {
         plugins(providers.gradleProperty("platformPlugins").map { it.split(',').filter(String::isNotBlank) })
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })
         testFramework(TestFrameworkType.Platform)
+        // Enables LightJavaCodeInsightFixtureTestCase + JAVA_17 light project
+        // descriptor for Java PSI tests. Without this the Java resolver tests
+        // run under the bare mock JDK and can't resolve `Set.of`, `String`, etc.
+        testFramework(TestFrameworkType.Plugin.Java)
 
         // Marketplace plugins whose exact build id we don't want to pin. The Gradle plugin
         // queries JetBrains Marketplace for a version compatible with the current

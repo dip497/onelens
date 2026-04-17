@@ -6,6 +6,7 @@ import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.lang.javascript.psi.JSProperty
 import com.intellij.lang.javascript.psi.JSReferenceExpression
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -64,10 +65,13 @@ object LazyRouteCollector {
             ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = GlobalSearchScope.projectScope(project)
-        val routeFiles = jsTypes
-            .flatMap { FileTypeIndex.getFiles(it, scope) }
-            .filter { it.name.endsWith("-routes.js") || it.name.endsWith("-routes.ts") }
-            .distinct()
+        val routeFiles = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable {
+                jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }
+                    .filter { it.name.endsWith("-routes.js") || it.name.endsWith("-routes.ts") }
+                    .distinct()
+            }
+        )
 
         val psiManager = PsiManager.getInstance(project)
         for (vf in routeFiles) {

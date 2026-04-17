@@ -12,6 +12,12 @@ NODE_SCHEMA = {
     "Endpoint": "CREATE INDEX FOR (n:Endpoint) ON (n.id)",
     "Module": "CREATE INDEX FOR (n:Module) ON (n.name)",
     "Annotation": "CREATE INDEX FOR (n:Annotation) ON (n.fqn)",
+    # EnumConstant — primary lookup by owning enum FQN for cascade-delete
+    # on delta imports (`MATCH (e:EnumConstant {enumFqn: $fqn})`) plus a
+    # direct `fqn` index for per-constant lookups. argList is an array
+    # property; FalkorDB supports `IN` over arrays natively, no FTS needed.
+    "EnumConstant_fqn": "CREATE INDEX FOR (n:EnumConstant) ON (n.fqn)",
+    "EnumConstant_enumFqn": "CREATE INDEX FOR (n:EnumConstant) ON (n.enumFqn)",
     # Vue 3 — frontend nodes sharing the same graph wing with the Java backend
     # so cross-stack queries work in a single Cypher call. See bridge_http.py
     # for the `HITS` edge that links Vue ApiCall to Spring Endpoint.
@@ -93,7 +99,10 @@ REL_SCHEMA = {
     "HAS_FIELD": "// Class -[:HAS_FIELD]-> Field",
     "OVERRIDES": "// Method -[:OVERRIDES]-> Method",
     # Annotations
-    "ANNOTATED_WITH": "// Class|Method -[:ANNOTATED_WITH]-> Annotation (params)",
+    "ANNOTATED_WITH": "// Class|Method|Field -[:ANNOTATED_WITH {attributes}]-> Annotation",
+    # EnumConstant structural edge — Class -[:HAS_ENUM_CONSTANT]-> EnumConstant.
+    # Edge has no properties; the constant node carries ordinal / args / argList.
+    "HAS_ENUM_CONSTANT": "// Class -[:HAS_ENUM_CONSTANT]-> EnumConstant",
     # Spring
     "INJECTS": "// SpringBean -[:INJECTS]-> SpringBean (field_name, injection_type)",
     "HANDLES": "// Method -[:HANDLES]-> Endpoint",

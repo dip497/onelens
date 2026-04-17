@@ -49,6 +49,13 @@ class DeltaLoader:
                 "UNWIND $batch AS fqn MATCH (f:Field {classFqn: fqn}) DETACH DELETE f",
                 {"batch": batch}
             )
+            # Cascade enum constants too — they're keyed by `enumFqn`, not
+            # inherited from the class, so Cypher won't touch them via the
+            # class DETACH DELETE above.
+            self.db.execute(
+                "UNWIND $batch AS fqn MATCH (e:EnumConstant {enumFqn: fqn}) DETACH DELETE e",
+                {"batch": batch}
+            )
         logger.info(f"Deleted {len(deleted_classes)} classes")
 
         # 2. Upsert classes (batched)
@@ -118,6 +125,47 @@ class DeltaLoader:
                 UNWIND $batch AS edge
                 MATCH (c:Class {fqn: edge.src}), (f:Field {fqn: edge.dst})
                 MERGE (c)-[:HAS_FIELD]->(f)
+            """, {"batch": batch})
+
+        # 4b. Upsert enum constants. Classes that changed may have added,
+        # removed, or reordered constants — drop all EnumConstant nodes
+        # under each upserted class first, then re-insert from the delta.
+        # Keyed by enumFqn (not the enum class's node) so cascade works even
+        # if the class node hasn't been DETACH-deleted (e.g. modified, not
+        # removed). Delete-then-insert beats MERGE here because `ordinal`
+        # and `argList` can both mutate.
+        upserted_class_fqn_list = [c["fqn"] for c in classes]
+        for batch in self._chunks(upserted_class_fqn_list, BATCH_SIZE):
+            self.db.execute(
+                "UNWIND $batch AS fqn MATCH (e:EnumConstant {enumFqn: fqn}) DETACH DELETE e",
+                {"batch": batch}
+            )
+        enum_consts = upserted.get("enumConstants", [])
+        for batch in self._chunks(enum_consts, BATCH_SIZE):
+            items = [{
+                "fqn": e["fqn"], "name": e.get("name", ""),
+                "ordinal": e.get("ordinal", 0), "enumFqn": e.get("enumFqn", ""),
+                "args": e.get("args", "[]"),
+                "argList": e.get("argList", []) or [],
+                "argTypes": e.get("argTypes", []) or [],
+                "filePath": e.get("filePath", ""),
+                "lineStart": e.get("lineStart", 0),
+            } for e in batch]
+            self.db.execute("""
+                UNWIND $batch AS item
+                MERGE (e:EnumConstant {fqn: item.fqn})
+                SET e.name = item.name, e.ordinal = item.ordinal,
+                    e.enumFqn = item.enumFqn, e.args = item.args,
+                    e.argList = item.argList, e.argTypes = item.argTypes,
+                    e.filePath = item.filePath, e.lineStart = item.lineStart
+            """, {"batch": items})
+        has_enum_const = [{"src": e.get("enumFqn", ""), "dst": e["fqn"]}
+                          for e in enum_consts if e.get("enumFqn")]
+        for batch in self._chunks(has_enum_const, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (c:Class {fqn: edge.src}), (e:EnumConstant {fqn: edge.dst})
+                MERGE (c)-[:HAS_ENUM_CONSTANT]->(e)
             """, {"batch": batch})
 
         # 5. Create external stub nodes for call targets not in graph
@@ -233,6 +281,59 @@ class DeltaLoader:
                 MATCH (a:Method {fqn: edge.src}), (b:Method {fqn: edge.dst})
                 MERGE (a)-[:OVERRIDES]->(b)
             """, {"batch": batch})
+
+        # 8b. Replace ANNOTATED_WITH edges on upserted targets. Pre-1.1 delta
+        # flow skipped this — annotations added / removed on a modified class
+        # never propagated to the graph (silent drift). Fix: for every target
+        # in the delta's annotations block, drop its existing ANNOTATED_WITH
+        # edges, then create fresh ones carrying the resolved `attributes`
+        # JSON. Annotation nodes are MERGEd first so new FQNs auto-exist.
+        annotations = upserted.get("annotations", [])
+        if annotations:
+            # MERGE target Annotation nodes (dedup on fqn).
+            ann_fqns = sorted({a["annotationFqn"] for a in annotations if a.get("annotationFqn")})
+            for batch in self._chunks(ann_fqns, BATCH_SIZE):
+                self.db.execute(
+                    "UNWIND $batch AS fqn MERGE (a:Annotation {fqn: fqn}) "
+                    "ON CREATE SET a.name = split(fqn, '.')[-1]",
+                    {"batch": batch}
+                )
+
+            # Drop old edges per target label. Use per-label batches keyed on
+            # the label's primary-key column so we don't have to MATCH across
+            # three labels in one query.
+            by_label: dict[str, list[str]] = {"Class": [], "Method": [], "Field": []}
+            for a in annotations:
+                kind = a.get("targetKind", "CLASS")
+                label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
+                by_label[label].append(a["targetFqn"])
+            for label, fqns in by_label.items():
+                unique = sorted(set(fqns))
+                for batch in self._chunks(unique, BATCH_SIZE):
+                    self.db.execute(
+                        f"UNWIND $batch AS fqn "
+                        f"MATCH (n:{label} {{fqn: fqn}})-[r:ANNOTATED_WITH]->() DELETE r",
+                        {"batch": batch}
+                    )
+
+            # Create fresh edges with attributes.
+            edges_by_label: dict[str, list[dict]] = {"Class": [], "Method": [], "Field": []}
+            for a in annotations:
+                kind = a.get("targetKind", "CLASS")
+                label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
+                edges_by_label[label].append({
+                    "src": a["targetFqn"],
+                    "dst": a["annotationFqn"],
+                    "attributes": a.get("attributes", "{}"),
+                })
+            for label, edges in edges_by_label.items():
+                for batch in self._chunks(edges, BATCH_SIZE):
+                    self.db.execute(
+                        f"UNWIND $batch AS edge "
+                        f"MATCH (n:{label} {{fqn: edge.src}}), (a:Annotation {{fqn: edge.dst}}) "
+                        f"CREATE (n)-[:ANNOTATED_WITH {{attributes: edge.attributes}}]->(a)",
+                        {"batch": batch}
+                    )
 
         # 9. Ensure full-text search indexes exist (idempotent)
         from onelens.importer.schema import FULLTEXT_SCHEMA

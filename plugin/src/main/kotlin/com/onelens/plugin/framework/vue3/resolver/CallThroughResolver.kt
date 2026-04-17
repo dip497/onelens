@@ -6,6 +6,7 @@ import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.lang.javascript.psi.JSReferenceExpression
 import com.intellij.lang.javascript.psi.JSReturnStatement
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -68,7 +69,10 @@ object CallThroughResolver {
         val emittedStoreEdges = HashSet<Triple<String, String, Boolean>>()
         val emittedComposableEdges = HashSet<Pair<String, String>>()
 
-        for (vf in types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()) {
+        val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        )
+        for (vf in allFiles) {
             ProgressManager.checkCanceled()
             val relative = ctx.relativize(Paths.get(vf.path))
             // Map file path → caller fqn. For components the fqn is the component's

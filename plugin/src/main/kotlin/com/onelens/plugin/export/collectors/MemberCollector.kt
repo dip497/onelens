@@ -8,10 +8,12 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.*
 import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.export.*
+import kotlinx.serialization.json.Json
 
 data class MemberResult(
     val methods: List<MethodData>,
-    val fields: List<FieldData>
+    val fields: List<FieldData>,
+    val enumConstants: List<EnumConstantData> = emptyList()
 )
 
 /**
@@ -22,12 +24,16 @@ object MemberCollector {
 
     private val LOG = logger<MemberCollector>()
 
+    /** Shared JSON codec for serializing EnumConstant.args / Annotation.attributes. */
+    private val JSON: Json = Json { encodeDefaults = true }
+
     fun collect(project: Project, classes: List<ClassData>): MemberResult {
         val facade = JavaPsiFacade.getInstance(project)
         val scope = GlobalSearchScope.projectScope(project)
 
         val methods = mutableListOf<MethodData>()
         val fields = mutableListOf<FieldData>()
+        val enumConstants = mutableListOf<EnumConstantData>()
 
         for (classData in classes) {
             ProgressManager.checkCanceled()
@@ -44,10 +50,20 @@ object MemberCollector {
                     }
                 }
 
+                var enumOrdinal = 0
                 for (field in psiClass.fields) {
                     if (field.containingClass != psiClass) continue
                     try {
+                        // EnumConstant is a PsiField subtype — still emit the FieldData row so
+                        // existing HAS_FIELD edges / fqn lookups keep working, then additionally
+                        // emit EnumConstantData with resolved constructor args.
                         fields.add(extractField(field, classData.fqn, classData.filePath, project))
+                        if (field is PsiEnumConstant) {
+                            enumConstants.add(
+                                extractEnumConstant(field, classData.fqn, classData.filePath, enumOrdinal, project)
+                            )
+                            enumOrdinal++
+                        }
                     } catch (e: Exception) {
                         LOG.debug("Failed to extract field ${field.name} from ${classData.fqn}: ${e.message}")
                     }
@@ -55,8 +71,8 @@ object MemberCollector {
             }
         }
 
-        LOG.info("Collected ${methods.size} methods, ${fields.size} fields")
-        return MemberResult(methods, fields)
+        LOG.info("Collected ${methods.size} methods, ${fields.size} fields, ${enumConstants.size} enum constants")
+        return MemberResult(methods, fields, enumConstants)
     }
 
     private fun extractMethod(
@@ -137,6 +153,43 @@ object MemberCollector {
             type = try { field.type.canonicalText } catch (_: Exception) { "?" },
             modifiers = ClassCollector.extractModifiers(field.modifierList),
             annotations = ClassCollector.extractAnnotations(field.modifierList),
+            filePath = filePath,
+            lineStart = lineStart
+        )
+    }
+
+    private fun extractEnumConstant(
+        constant: PsiEnumConstant,
+        classFqn: String,
+        filePath: String,
+        ordinal: Int,
+        project: Project
+    ): EnumConstantData {
+        val document = constant.containingFile?.let {
+            PsiDocumentManager.getInstance(project).getDocument(it)
+        }
+        val lineStart = safeGetLine(document, constant.textOffset)
+
+        val argExprs = constant.argumentList?.expressions?.toList() ?: emptyList()
+        val argsJson = argExprs.map { ExpressionResolver.resolve(it) }
+        val flat = argsJson.flatMap { ExpressionResolver.flatten(it) }
+        val types = argExprs.map { ExpressionResolver.typeOf(it) }
+
+        val argsString = try {
+            JSON.encodeToString(
+                kotlinx.serialization.json.JsonArray.serializer(),
+                kotlinx.serialization.json.JsonArray(argsJson)
+            )
+        } catch (_: Throwable) { "[]" }
+
+        return EnumConstantData(
+            fqn = "$classFqn#${constant.name}",
+            name = constant.name,
+            ordinal = ordinal,
+            enumFqn = classFqn,
+            args = argsString,
+            argList = flat,
+            argTypes = types,
             filePath = filePath,
             lineStart = lineStart
         )

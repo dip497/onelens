@@ -70,6 +70,7 @@ object DeltaExportService {
         val inheritance: List<InheritanceEdge> = emptyList(),
         val methodOverrides: List<OverrideEdge> = emptyList(),
         val annotations: List<AnnotationUsage> = emptyList(),
+        val enumConstants: List<EnumConstantData> = emptyList(),
     )
 
     @Serializable
@@ -188,6 +189,7 @@ object DeltaExportService {
                 inheritance = inheritance.edges,
                 methodOverrides = inheritance.overrides,
                 annotations = annotations,
+                enumConstants = members.enumConstants,
             ),
             spring = spring,
             modules = modules,

@@ -7,6 +7,7 @@ import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.lang.javascript.psi.JSReturnStatement
 import com.intellij.lang.javascript.psi.JSVarStatement
 import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -63,7 +64,11 @@ object PiniaStoreCollector {
             return
         }
         val scope = GlobalSearchScope.projectScope(project)
-        val files = jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
+        // FileTypeIndex.getFiles() needs a smart read action; WebStorm 2026.1+
+        // throws "Read access is allowed from inside read-action only" otherwise.
+        val files = DumbService.getInstance(project).runReadActionInSmartMode(
+            Computable { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        )
         val psiManager = PsiManager.getInstance(project)
         var scanned = 0
 

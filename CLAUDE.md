@@ -36,6 +36,7 @@ Monorepo, three shipped components + one local:
 - **PageRank at import**: `importer/pagerank.py` runs NetworkX personalized PageRank seeded by REST endpoints + `@Scheduled` / `@EventListener` / `@PostConstruct`. Scores stored as node properties. Retrieval uses a multiplicative boost on already-matched hits (not as an RRF source — prevents irrelevant but topologically central methods from leaking in).
 - **Query router in retrieval**: `hybrid_retrieve` short-circuits to direct Cypher for exact class names / FQN fragments, full RRF+rerank only for conceptual queries. Empty result = real no-match (cross-encoder threshold 0.02 filters gibberish).
 - **UNWIND batching**: Import uses Cypher UNWIND for bulk inserts. ~980K edges in ~30 s.
+- **Enum-as-config extraction**: Mature Spring apps use enums as per-feature/role/module registries (e.g. `OrderStatus(canTransitionTo=Set.of(APPROVED, REJECTED))`). The plugin resolves each constant's constructor args via PSI and emits `EnumConstant` nodes with `argList` array props so `WHERE 'APPROVED' IN ec.argList` answers per-feature questions without source grep. Annotation attributes get the same treatment on the `ANNOTATED_WITH` edge.
 
 ## Building
 
@@ -64,8 +65,13 @@ pip install -e ".[context]"
 
 ## Graph schema
 
-Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`
-Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`
+Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`, `EnumConstant`
+Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`
+
+Semantic payload (v1.1+):
+- `EnumConstant.args` / `EnumConstant.argList` — resolved enum constructor args. Enables `WHERE 'REQUEST' IN ec.argList`-style module/feature filters on enum-as-config registries.
+- `ANNOTATED_WITH.attributes` — JSON map of resolved annotation attribute values (arrays, class FQNs, enum names, nested annotations). Query via `CONTAINS` on substrings or promote hot attributes to edge properties.
+- Resolver: `plugin/.../collectors/ExpressionResolver.kt`. PSI-native — delegates to `PsiConstantEvaluationHelper` for JLS constant expressions; walks collection factories (heuristic: `static` method returning `Collection` / `Map` / `Iterable`), array initializers, class literals, and enum refs. Unresolvable fragments render as `<dynamic>`.
 
 `external` property:
 - `true` — library/JDK stubs (auto-created from resolved call targets; no source file)
