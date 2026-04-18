@@ -114,14 +114,24 @@ fi
 echo "[7/7] install onelens wheel..."
 WHL="$(ls "$SRC"/wheel/onelens-*.whl 2>/dev/null | head -1 || true)"
 if [[ -n "$WHL" ]]; then
-  if command -v onelens >/dev/null 2>&1; then
-    echo "    onelens already on PATH — upgrading from bundled wheel"
-    python3 -m pip install --upgrade "${WHL}[context]"
-  else
-    echo "    installing ${WHL##*/}[context] (user site)"
-    python3 -m pip install --user "${WHL}[context]"
-    echo "    NOTE: ensure ~/.local/bin is on PATH"
+  # Use the managed venv at ~/.onelens/venv — matches the plugin's
+  # PythonEnvManager layout so both restore.sh and the IntelliJ plugin
+  # target the same interpreter. A system-wide `pip install` was failing
+  # on PEP 668 distros (Debian/Ubuntu 23.04+, Fedora 39+) with
+  # "externally-managed-environment" — pip correctly refuses to write to
+  # system site-packages there.
+  VENV_DIR="$HOME/.onelens/venv"
+  if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    echo "    creating venv at $VENV_DIR"
+    if command -v uv >/dev/null 2>&1; then
+      uv venv "$VENV_DIR" >/dev/null
+    else
+      python3 -m venv "$VENV_DIR"
+    fi
   fi
+  echo "    installing ${WHL##*/}[context] into $VENV_DIR"
+  "$VENV_DIR/bin/pip" install --upgrade "${WHL}[context]"
+  echo "    done — invoke as: $VENV_DIR/bin/onelens stats --graph <name>"
 else
   echo "warn: no wheel in bundle — install onelens manually" >&2
 fi
