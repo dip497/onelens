@@ -36,6 +36,36 @@ MAX_JAVADOC_CHARS = 500
 _TRIVIAL_PREFIXES = ("get", "set", "is", "has", "can")
 _TRIVIAL_NAMES = {"toString", "hashCode", "equals", "clone", "finalize"}
 
+import re as _re_imports
+
+_JS_IMPORT_RE = _re_imports.compile(
+    r"^\s*import\s+(?:type\s+)?(?:[^;\n]+?)\s+from\s+['\"][^'\"]+['\"];?\s*$",
+    _re_imports.MULTILINE,
+)
+_JS_SIDE_IMPORT_RE = _re_imports.compile(
+    r"^\s*import\s+['\"][^'\"]+['\"];?\s*$", _re_imports.MULTILINE
+)
+
+
+def _strip_js_imports(src: str) -> str:
+    """Remove ES6 import statements from a Vue body before embedding.
+
+    Dogfood measurements (on the 2516-component motadata-itsm-frontend-vue3
+    corpus):
+      - raw body (no strip):   77% NaN rate from Qwen3 ONNX FP16
+      - stripped:              40% NaN rate
+    Both leak NaN due to the underlying Qwen3 ONNX CUDA FP16 precision
+    bug (HF Qwen3 discussion, ORT #11384/#15752), but stripping imports
+    nearly halves the failure rate by giving the encoder slightly more
+    varied, non-boilerplate tokens. Not a fix — a mitigation.
+    """
+    if not src:
+        return ""
+    out = _JS_IMPORT_RE.sub("", src)
+    out = _JS_SIDE_IMPORT_RE.sub("", out)
+    out = _re_imports.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
 
 def _clean_javadoc(raw: str | None) -> str:
     """Strip /** */ and leading '*' from a Javadoc block. Returns empty if None."""
@@ -166,7 +196,11 @@ class CodeMiner:
             self._class_methods[cls_fqn].append(fqn)
 
         # Endpoints
-        spring = data.get("spring", {})
+        # `data.get("spring", {})` returns None when the key exists with an
+        # explicit null value (Vue-only exports where the Spring adapter is
+        # inactive). `or {}` normalizes to an empty dict so downstream
+        # `.get("endpoints")` doesn't AttributeError.
+        spring = data.get("spring") or {}
         for ep in spring.get("endpoints", []):
             handler = ep.get("handlerMethodFqn", "")
             http = ep.get("httpMethod", "")
@@ -449,7 +483,7 @@ class CodeMiner:
             }
 
         # Endpoints
-        for ep in data.get("spring", {}).get("endpoints", []):
+        for ep in (data.get("spring") or {}).get("endpoints", []):
             http = ep.get("httpMethod", "")
             path = ep.get("path", "")
             handler = ep.get("handlerMethodFqn", "")
@@ -777,7 +811,7 @@ class CodeMiner:
 
     def _mine_endpoints(self, data: dict) -> int:
         """Mine all REST endpoints into ChromaDB. Returns count."""
-        all_endpoints = data.get("spring", {}).get("endpoints", [])
+        all_endpoints = (data.get("spring") or {}).get("endpoints", [])
         existing = self._get_existing_ids("endpoint:")
 
         def _ep_id(ep):
@@ -862,7 +896,7 @@ class CodeMiner:
         for comp in components:
             fp = comp["filePath"]
             name = comp.get("name", "")
-            body = (comp.get("body") or "").strip()
+            body = _strip_js_imports((comp.get("body") or "").strip())
             doc = f"// Component: {name}\n// File: {fp}\n{body}" if body else f"// Component: {name}\n// File: {fp}"
             drawer_id = f"component:{fp}"
             documents.append(doc)
@@ -902,7 +936,7 @@ class CodeMiner:
             fqn = comp["fqn"]
             name = comp.get("name", "")
             fp = comp.get("filePath", "")
-            body = (comp.get("body") or "").strip()
+            body = _strip_js_imports((comp.get("body") or "").strip())
             doc = f"// Composable: {name}\n// File: {fp}\n{body}" if body else f"// Composable: {name}\n// File: {fp}"
             drawer_id = f"composable:{fqn}"
             documents.append(doc)
@@ -930,6 +964,18 @@ class CodeMiner:
 
     def _mine_vue_stores(self, vue3: dict) -> int:
         stores = [s for s in vue3.get("stores", []) if s.get("id")]
+        # Multiple files can declare `defineStore('id', ...)` with the same
+        # id (feature modules registering per-module substores under a
+        # shared name). ChromaDB rejects a batch containing duplicate ids,
+        # so dedupe by `store:<id>` here — first row wins.
+        seen_sid: set[str] = set()
+        deduped: list[dict] = []
+        for s in stores:
+            if s["id"] in seen_sid:
+                continue
+            seen_sid.add(s["id"])
+            deduped.append(s)
+        stores = deduped
         existing = self._get_existing_ids("store:")
         stores = [s for s in stores if f"store:{s['id']}" not in existing]
         batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
@@ -942,7 +988,7 @@ class CodeMiner:
             sid = store["id"]
             name = store.get("name", "")
             fp = store.get("filePath", "")
-            body = (store.get("body") or "").strip()
+            body = _strip_js_imports((store.get("body") or "").strip())
             doc = f"// Store: {sid} (export {name})\n// File: {fp}\n{body}" if body else f"// Store: {sid} (export {name})\n// File: {fp}"
             drawer_id = f"store:{sid}"
             documents.append(doc)

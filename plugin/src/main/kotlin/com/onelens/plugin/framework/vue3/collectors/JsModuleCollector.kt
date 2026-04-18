@@ -3,6 +3,8 @@ package com.onelens.plugin.framework.vue3.collectors
 import com.intellij.lang.ecmascript6.psi.ES6ImportDeclaration
 import com.intellij.lang.ecmascript6.psi.ES6ImportSpecifier
 import com.intellij.lang.ecmascript6.psi.ES6ImportSpecifierAlias
+import com.intellij.lang.ecmascript6.psi.impl.ES6ImportPsiUtil
+import com.intellij.lang.javascript.psi.resolve.JSResolveUtil
 import com.intellij.lang.javascript.psi.JSCallExpression
 import com.intellij.lang.javascript.psi.JSFunction
 import com.intellij.lang.javascript.psi.JSFunctionExpression
@@ -27,6 +29,7 @@ import com.onelens.plugin.export.ImportsEdge
 import com.onelens.plugin.export.JsFunctionData
 import com.onelens.plugin.export.JsModuleData
 import com.onelens.plugin.framework.vue3.Vue3Context
+import com.onelens.plugin.framework.vue3.VuePsiScope
 import java.nio.file.Paths
 
 /**
@@ -98,7 +101,7 @@ object JsModuleCollector {
                 collectExportedFunctions(psi, relative).forEach { ctx.functions += it }
 
                 // Import edges.
-                collectImports(psi, relative).forEach { ctx.imports += it }
+                collectImports(psi, relative, ctx).forEach { ctx.imports += it }
             }
         }
         LOG.info(
@@ -143,7 +146,7 @@ object JsModuleCollector {
         val out = mutableListOf<JsFunctionData>()
         // Walk every JSFunction; we filter to module-top-level by checking the
         // parent chain stops at the file / an export statement.
-        val fns = PsiTreeUtil.findChildrenOfType(file, JSFunction::class.java)
+        val fns = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSFunction>(file)
         for (fn in fns) {
             val name = fn.name ?: continue
             if (!isTopLevel(fn)) continue
@@ -161,7 +164,7 @@ object JsModuleCollector {
         }
         // `export const foo = () => {}` / `= function () {}` — RHS is a function
         // expression, variable is the named binding.
-        val vars = PsiTreeUtil.findChildrenOfType(file, JSVariable::class.java)
+        val vars = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSVariable>(file)
         for (v in vars) {
             val name = v.name ?: continue
             if (!isTopLevel(v)) continue
@@ -234,26 +237,18 @@ object JsModuleCollector {
      * Walk every `ES6ImportDeclaration` in the file and emit one [ImportsEdge]
      * per imported binding.
      */
-    private fun collectImports(file: PsiFile, sourceModule: String): List<ImportsEdge> {
+    private fun collectImports(file: PsiFile, sourceModule: String, ctx: Vue3Context): List<ImportsEdge> {
         val out = mutableListOf<ImportsEdge>()
-        val decls = PsiTreeUtil.findChildrenOfType(file, ES6ImportDeclaration::class.java)
-        // If the PSI walk finds no imports but the file text contains `import `,
-        // fall back to a regex scan so we still emit module-level edges. Common
-        // causes we observed on a 5000+ file real-world sync where PSI returned
-        // zero declarations: Vue SFC embedded content not recursively walked in
-        // some plugin versions, stub-only access patterns, or language-service
-        // lazy loads. Regex fallback forfeits resolution (unresolved=true) but
-        // preserves the importer-to-module graph shape.
-        if (decls.isEmpty() && file.text.contains("import ")) {
-            return extractImportsTextual(file, sourceModule)
-        }
+        val decls = findImportDeclarations(file)
+        val sourceDir = file.virtualFile?.parent?.path
         for (decl in decls) {
-            val moduleText = decl.importModuleText?.trim()?.trim('\'', '"', '`') ?: continue
+            val rawModule = decl.importModuleText?.trim()?.trim('\'', '"', '`') ?: continue
+            val moduleText = normalizeModuleSpecifier(rawModule, sourceDir, ctx)
             val lineStart = 0 // line numbers require Document — cheap future addition
 
             // Each binding in the declaration produces one edge.
             for (binding in decl.importedBindings) {
-                val resolvedFqn = resolveWithAliasHop(binding)
+                val resolvedFqn = resolveWithAliasHop(binding, ctx)
                 val targetModule = targetModuleFromFqn(resolvedFqn) ?: moduleText
                 out += ImportsEdge(
                     sourceModule = sourceModule,
@@ -268,7 +263,7 @@ object JsModuleCollector {
                 )
             }
             for (spec in decl.importSpecifiers) {
-                val (resolvedFqn, targetModule) = resolveSpecifier(spec, moduleText)
+                val (resolvedFqn, targetModule) = resolveSpecifier(spec, moduleText, ctx)
                 val external = spec.referenceName
                 val local = spec.declaredName
                 val importedName = external ?: local ?: "?"
@@ -306,6 +301,15 @@ object JsModuleCollector {
                 )
             }
         }
+        // Fallback: if the PSI walk yielded no edges for this file but the
+        // text shows `import `, run the regex scanner. Triggered both when
+        // `decls` is empty AND when decls exist but their specifier /
+        // binding arrays came back empty (stub-only trees — common on
+        // stub-backed lazy files in large real-world projects). The regex
+        // emits one edge per specifier with `unresolved=true`.
+        if (out.isEmpty() && file.text.contains("import ")) {
+            return extractImportsTextual(file, sourceModule, ctx)
+        }
         return out
     }
 
@@ -316,7 +320,7 @@ object JsModuleCollector {
      * resolve again on the alias's own reference to reach the original
      * declaration. Verified in ImportResolveTest.testCaseF.
      */
-    private fun resolveSpecifier(spec: ES6ImportSpecifier, moduleText: String): Pair<String?, String> {
+    private fun resolveSpecifier(spec: ES6ImportSpecifier, moduleText: String, ctx: Vue3Context): Pair<String?, String> {
         // `spec.declaredName` is the binding visible in this file. When there's
         // an alias, this is the alias; otherwise it matches the external name.
         val ref = spec.reference ?: return null to moduleText
@@ -326,7 +330,7 @@ object JsModuleCollector {
             target = try { inner?.resolve() } catch (_: Throwable) { null }
         }
         if (target == null) return null to moduleText
-        val fqn = fqnFor(target)
+        val fqn = fqnFor(target, ctx)
         val module = fqn?.substringBefore("::") ?: moduleText
         return fqn to module
     }
@@ -345,12 +349,28 @@ object JsModuleCollector {
      *   import * as ns from '…'
      *   import '…'                       (side-effect only, emits a * edge)
      */
-    private fun extractImportsTextual(file: PsiFile, sourceModule: String): List<ImportsEdge> {
+    private fun extractImportsTextual(file: PsiFile, sourceModule: String, ctx: Vue3Context): List<ImportsEdge> {
         val out = mutableListOf<ImportsEdge>()
         val src = file.text
+        val sourceDir = file.virtualFile?.parent?.path
         IMPORT_STMT_RE.findAll(src).forEach { m ->
-            val clause = m.groupValues[1]
-            val module = m.groupValues[2]
+            var clause = m.groupValues[1].trim()
+            val module = normalizeModuleSpecifier(m.groupValues[2], sourceDir, ctx)
+            // TypeScript `import type { X }` — the regex captures "type { X }"
+            // as the clause. Strip the `type ` prefix so downstream parsing
+            // doesn't emit a phantom default binding named "type". Skip pure
+            // `import type X` (no brace) entirely: type-only default imports
+            // aren't runtime edges.
+            val isTypeOnly = clause == "type" || clause.startsWith("type ")
+            if (isTypeOnly) {
+                clause = clause.removePrefix("type").trim()
+                // Pure `import type Foo from '…'` produces nothing but a
+                // type-level reference; skip it to keep the graph runtime-
+                // accurate.
+                if (clause.isEmpty() || !clause.contains('{') && !clause.contains('*')) {
+                    return@forEach
+                }
+            }
             when {
                 clause.isBlank() -> {
                     // side-effect import: `import '…'`
@@ -425,31 +445,110 @@ object JsModuleCollector {
         return out
     }
 
-    private val IMPORT_STMT_RE = Regex(
-        """import(?:\s+([^'"]+?))?\s+from\s*['"`]([^'"`]+)['"`]""",
-        RegexOption.MULTILINE
-    ).let { re ->
-        // Two forms: `import <clause> from '…'` AND `import '…'` (side-effect).
-        // Union them as alternation via a single regex with both shapes.
-        Regex(
-            """import\s+(?:([^;'"\n][^;\n]*?)\s+from\s+)?['"`]([^'"`\n]+)['"`]""",
-            RegexOption.MULTILINE
-        )
+    /**
+     * Stub-aware import-declaration enumeration.
+     *
+     * `.vue` files embed `<script>` / `<script setup>` as
+     * `JSEmbeddedContent` nodes. A plain `PsiTreeUtil.findChildrenOfType`
+     * walk often misses declarations hiding behind stubs on large real
+     * projects — which is why every `.vue` file in the dogfood repo
+     * produced zero imports before this fix. The Vue plugin exposes
+     * `findModule(file, setup)` → `JSExecutionScope` and pairs it with
+     * `JSResolveUtil.getStubbedChildren(scope, ES6_IMPORT_DECLARATION)`
+     * — the exact pattern `VueExtractComponentDataBuilder` uses internally.
+     *
+     * For plain `.js` / `.ts`, stub-children on the file itself returns
+     * the same set as the tree walk (verified via bytecode: both code
+     * paths surface `ES6ImportDeclaration`).
+     */
+    private fun findImportDeclarations(file: PsiFile): List<ES6ImportDeclaration> {
+        // For .vue files, prefer the stub-aware getStubbedChildren path on the
+        // embedded script module — some real-world files expose imports only
+        // through the stub children API and hide them from the PSI tree walk.
+        // For .js / .ts, VuePsiScope.findAll delegates to PsiTreeUtil (same as
+        // before). Both layers fall back gracefully on any exception.
+        return try {
+            if (file.javaClass.name == "org.jetbrains.vuejs.lang.html.VueFile") {
+                val scopes = VuePsiScope.scriptRoots(file)
+                scopes.asSequence()
+                    .flatMap {
+                        JSResolveUtil.getStubbedChildren(it, ES6ImportPsiUtil.ES6_IMPORT_DECLARATION)
+                            .asSequence()
+                    }
+                    .filterIsInstance<ES6ImportDeclaration>()
+                    .toList()
+            } else {
+                PsiTreeUtil.findChildrenOfType(file, ES6ImportDeclaration::class.java).toList()
+            }
+        } catch (_: Throwable) {
+            PsiTreeUtil.findChildrenOfType(file, ES6ImportDeclaration::class.java).toList()
+        }
     }
+
+    // Import matcher used only by the textual fallback (see extractImportsTextual).
+    // Clause group uses `[\s\S]*?` instead of `[^\n]` so Prettier-formatted
+    // multi-line named imports are captured — the majority of named imports in
+    // a real Vue 3 codebase. The lazy quantifier stops at the first
+    // `from '…'` anchor, so adjacent imports remain separated.
+    // Module specifier excludes only the quote characters — NOT `\n` — because
+    // the full statement is allowed to span lines. Detection of the terminating
+    // quote pair on its own line is sufficient.
+    /**
+     * Normalize a raw import specifier to a project-relative form so it can
+     * be joined directly to `JsModule.filePath` / `Component.filePath`.
+     *
+     *   `@/views/Foo.vue`  → `src/views/Foo.vue`                (alias resolve)
+     *   `./bar`            → `<dir-of-source>/bar`              (relative)
+     *   `some-package`     → unchanged — npm / external stub
+     *
+     * For alias targets, `ctx.aliases` stores absolute paths; we resolve and
+     * relativize through `ctx`. Without this, `@/` imports never matched any
+     * JsModule row and every alias-form IMPORTS edge silently dropped during
+     * the Python join.
+     */
+    private fun normalizeModuleSpecifier(spec: String, sourceDir: String?, ctx: Vue3Context): String {
+        // Alias hit — exact or prefix match, longest alias first to avoid a
+        // shorter alias shadowing a longer one.
+        val sorted = ctx.aliases.entries.sortedByDescending { it.key.length }
+        for ((alias, absBase) in sorted) {
+            val prefix = if (alias.endsWith("/")) alias else "$alias/"
+            val resolved = when {
+                spec == alias -> absBase
+                spec.startsWith(prefix) -> absBase.resolve(spec.substring(prefix.length))
+                else -> null
+            }
+            if (resolved != null) {
+                return ctx.relativize(resolved)
+            }
+        }
+        // Relative — resolve against the source file's directory.
+        if ((spec.startsWith("./") || spec.startsWith("../")) && sourceDir != null) {
+            return try {
+                ctx.relativize(Paths.get(sourceDir).resolve(spec).normalize())
+            } catch (_: Throwable) { spec }
+        }
+        // Bare specifier (npm package) — leave as-is.
+        return spec
+    }
+
+    private val IMPORT_STMT_RE = Regex(
+        """import\s+(?:([\s\S]*?)\s+from\s+)?['"`]([^'"`]+)['"`]""",
+        RegexOption.MULTILINE
+    )
     private val NAMESPACE_RE = Regex("""\*\s+as\s+(\w+)""")
 
     /**
      * Same two-hop resolve for default-binding references, if they ever land
      * on an alias node.
      */
-    private fun resolveWithAliasHop(binding: PsiElement): String? {
+    private fun resolveWithAliasHop(binding: PsiElement, ctx: Vue3Context): String? {
         val ref = binding.references.firstOrNull() ?: return null
         var target: PsiElement? = try { ref.resolve() } catch (_: Throwable) { null }
         if (target is ES6ImportSpecifierAlias) {
             val inner = target.reference
             target = try { inner?.resolve() } catch (_: Throwable) { null }
         }
-        return target?.let(::fqnFor)
+        return target?.let { fqnFor(it, ctx) }
     }
 
     /**
@@ -457,18 +556,20 @@ object JsModuleCollector {
      * Falls back to null when the element doesn't belong to a nameable
      * declaration (built-ins, external libs, etc).
      */
-    private fun fqnFor(element: PsiElement): String? {
-        val containing = element.containingFile?.virtualFile?.path ?: return null
+    private fun fqnFor(element: PsiElement, ctx: Vue3Context): String? {
+        val vf = element.containingFile?.virtualFile ?: return null
         val name = when (element) {
             is JSFunction -> element.name
             is JSVariable -> element.name
             is ES6ImportSpecifier -> element.declaredName
             else -> element.text.takeIf { it.length < 120 }?.substringBefore('(')?.trim()
         } ?: return null
-        // Best effort — we don't have the project base path here, so we return
-        // an absolute path::name; the importer rebases via the relative
-        // `sourceModule` during the Python load pass if needed.
-        return "$containing::$name"
+        // Match JsFunctionData.fqn shape — `<project-relative-path>::<name>`.
+        // Returning absolute paths here broke the IMPORTS join silently: target
+        // side stored relative fqns while resolved edges stored absolute fqns,
+        // so no resolved edge ever matched a JsFunction row.
+        val relative = try { ctx.relativize(Paths.get(vf.path)) } catch (_: Throwable) { vf.path }
+        return "$relative::$name"
     }
 
     /**

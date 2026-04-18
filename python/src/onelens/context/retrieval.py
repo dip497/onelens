@@ -383,10 +383,14 @@ def _semantic_search(
 
 
 def _fetch_locations_batch(db, fqns: list[str]) -> dict[str, dict]:
-    """Fetch {filePath, lineStart, lineEnd, type} for a list of FQNs in one pass.
+    """Fetch {filePath, lineStart, lineEnd, type} for drawer ids in one pass.
 
-    Probes Method, Class, and Endpoint labels in sequence — first match wins.
-    One round-trip per label, regardless of how many FQNs.
+    `fqns` are drawer ids as stored in ChromaDB metadata.fqn — for JVM
+    drawers these are raw FQNs (no prefix, historical schema); for Vue
+    drawers they're prefixed drawer ids like `component:src/foo.vue::script`.
+    This function probes each supported label and dispatches by the
+    observed id shape. Supports Method/Class/Endpoint (JVM) and
+    Component/Composable/Store/Route/ApiCall/JsModule/JsFunction (Vue).
     """
     locations: dict[str, dict] = {}
     remaining = set(fqns)
@@ -394,7 +398,9 @@ def _fetch_locations_batch(db, fqns: list[str]) -> dict[str, dict]:
         return {}
 
     # Methods — also pull pagerank when present (populated at import time).
-    # Missing pagerank is tolerated (pre-B1 graphs, external methods).
+    # JVM metadata.fqn is stored raw (no prefix) — so the whole remaining
+    # set is a candidate until a match narrows it. Missing pagerank is
+    # tolerated (pre-B1 graphs, external methods).
     try:
         rows = db.query(
             """
@@ -469,8 +475,80 @@ def _fetch_locations_batch(db, fqns: list[str]) -> dict[str, dict]:
                         "lineStart": r.get("lineStart", 0) or 0,
                         "lineEnd": r.get("lineEnd", 0) or 0,
                     }
+                    remaining.discard(fqn)
         except Exception as e:
             logger.debug("Endpoint location lookup failed: %s", e)
+
+    # Vue nodes. Drawer-id shapes:
+    #   component:src/foo.vue[@@sig|@@script|@@template]
+    #   composable:<filePath::fnName>
+    #   store:<storeId>[@@schema|@@actions]
+    #   route:<routeName>
+    #   apicall:<fqn>
+    #   jsmodule:<filePath>
+    #   jsfunction:<fqn>
+    # We group ids by prefix, strip the `<type>:` prefix AND any chunk
+    # `::<role>` suffix, and run one Cypher per label. `filePath` for Vue
+    # entities comes straight from the graph node so the snippet reader
+    # can open the source file even when the hit was on a sub-chunk.
+    def _group_by_prefix(ids: set[str]) -> dict[str, list[tuple[str, str]]]:
+        """Return {prefix: [(drawer_id, identifier), ...]}.
+        `identifier` has the `<type>:` prefix stripped — it's what the
+        graph node is keyed on (e.g. Component.filePath, Composable.fqn,
+        Store.id). Composable fqns naturally carry `::` as a module-
+        function separator (`src/helpers.js::useAuth`) — we keep that
+        intact because the graph stores it verbatim.
+        """
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for did in ids:
+            if ":" not in did:
+                continue
+            prefix, _, rest = did.partition(":")
+            grouped.setdefault(prefix, []).append((did, rest))
+        return grouped
+
+    if remaining:
+        grouped = _group_by_prefix(remaining)
+        vue_queries = [
+            ("component", "Component", "filePath"),
+            ("composable", "Composable", "fqn"),
+            ("store", "Store", "id"),
+            ("route", "Route", "name"),
+            ("apicall", "ApiCall", "fqn"),
+            ("jsmodule", "JsModule", "filePath"),
+            ("jsfunction", "JsFunction", "fqn"),
+        ]
+        for prefix, label, key_prop in vue_queries:
+            pairs = grouped.get(prefix, [])
+            if not pairs:
+                continue
+            idents = list({ident for _, ident in pairs})
+            try:
+                rows = db.query(
+                    f"""
+                    UNWIND $idents AS v
+                    MATCH (n:{label} {{{key_prop}: v}})
+                    RETURN v AS ident, n.filePath AS filePath,
+                           n.lineStart AS lineStart, n.lineEnd AS lineEnd,
+                           n.pagerank AS pagerank
+                    """,
+                    {"idents": idents},
+                )
+                by_ident = {r.get("ident", ""): r for r in rows}
+                for did, ident in pairs:
+                    r = by_ident.get(ident)
+                    if r is None:
+                        continue
+                    locations[did] = {
+                        "type": prefix,
+                        "filePath": r.get("filePath", "") or "",
+                        "lineStart": r.get("lineStart", 0) or 0,
+                        "lineEnd": r.get("lineEnd", 0) or 0,
+                        "pagerank": r.get("pagerank") or 0.0,
+                    }
+                    remaining.discard(did)
+            except Exception as e:
+                logger.debug("%s location lookup failed: %s", label, e)
 
     return locations
 

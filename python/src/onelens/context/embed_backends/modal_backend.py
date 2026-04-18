@@ -41,7 +41,7 @@ def _retry_remote(fn, *args, attempts: int = 3, backoff: float = 1.0, **kwargs):
 
 DEFAULT_APP = "onelens-embed"
 DEFAULT_CLASS = "Embedder"
-DEFAULT_CHUNK_SIZE = 128   # docs per Modal call — bigger = better GPU util, worse container fan-out
+DEFAULT_CHUNK_SIZE = 96    # docs per Modal call — L4 24GB OOMs at 256 on Qwen3 seq=512; 96 is safe
 DEFAULT_DIM = 1024         # Qwen3-Embedding-0.6B
 
 
@@ -76,25 +76,44 @@ class ModalEmbedder:
     def model_name(self) -> str:
         return "Qwen/Qwen3-Embedding-0.6B (modal)"
 
+    @property
+    def device(self) -> str:
+        return "modal:L4"
+
     def encode(self, texts: list[str]) -> np.ndarray:
+        """Sequential single-container calls — no `.map()`.
+
+        `.map()` fan-out across multiple GPU containers produced ~85% NaN
+        vectors in dogfood (verified with both Qwen3 and arctic-embed-l
+        models — not model-specific). Same input sent via single
+        `.remote()` returned 0 NaN. Root cause: concurrent cold-boot of
+        several snapshot-restored L4 containers leaves some with broken
+        CUDA / embedder state that silently produces NaN. Single-container
+        sequential is slower but deterministic. fastembed on L4 already
+        batches internally, so one container handles 2-3K docs comfortably.
+
+        For very large imports we chunk client-side and call `.remote()`
+        per chunk — keeps the same container warm across calls.
+        """
         if not texts:
             return np.empty((0, self.dim), dtype=np.float32)
         cls = self._resolve()
         instance = cls()
 
-        # Fan out: one Modal container handles up to `chunk_size` docs per
-        # call. For N > chunk_size we use `.map()` so Modal's autoscaler
-        # parallelizes across containers — this is where bulk imports win.
         if len(texts) <= self.chunk_size:
             vecs = _retry_remote(instance.embed.remote, texts)
             return np.asarray(vecs, dtype=np.float32)
 
         chunks = [texts[i : i + self.chunk_size] for i in range(0, len(texts), self.chunk_size)]
-        logger.info("ModalEmbedder: %d docs → %d chunks via .map()", len(texts), len(chunks))
-        # `map` preserves input order; we re-retry the whole batch if the
-        # generator itself errors (partial state is hard to recover).
-        pieces = _retry_remote(lambda: list(instance.embed.map(chunks)))
-        return np.concatenate([np.asarray(p, dtype=np.float32) for p in pieces], axis=0)
+        logger.info(
+            "ModalEmbedder: %d docs → %d chunks, sequential single-call",
+            len(texts), len(chunks),
+        )
+        pieces = [
+            np.asarray(_retry_remote(instance.embed.remote, chunk), dtype=np.float32)
+            for chunk in chunks
+        ]
+        return np.concatenate(pieces, axis=0)
 
 
 class ModalReranker(RerankerBase):
@@ -118,3 +137,4 @@ class ModalReranker(RerankerBase):
         cls = self._resolve()
         scores = _retry_remote(cls().rerank.remote, query, documents)
         return [float(s) for s in scores]
+ 

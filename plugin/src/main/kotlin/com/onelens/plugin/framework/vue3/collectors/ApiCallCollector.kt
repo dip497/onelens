@@ -91,7 +91,7 @@ object ApiCallCollector {
         val relative = ctx.relativize(abs)
         val out = mutableListOf<ApiCallData>()
 
-        val allCalls = PsiTreeUtil.findChildrenOfType(file, JSCallExpression::class.java)
+        val allCalls = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSCallExpression>(file)
         for (call in allCalls) {
             val callee = call.methodExpression as? JSReferenceExpression ?: continue
             val methodName = callee.referenceName?.lowercase() ?: continue

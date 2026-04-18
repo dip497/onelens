@@ -2,7 +2,7 @@
 
 Source of truth for what's landed, what's in flight, and what's deferred. Append-only per phase; mark status inline. Links point to the canonical artefact so this file stays skimmable.
 
-Last updated: 2026-04-17.
+Last updated: 2026-04-18.
 
 ---
 
@@ -106,6 +106,10 @@ Full-import-only. Delta + auto-sync deferred to Phase B2.
 | B2.JS.3 | Python loader — `JsModule` / `JsFunction` nodes + `IMPORTS` edges (symbol-resolved via `targetFqn`, module-level fallback when unresolved) | ✅ | `python/src/onelens/importer/loader.py` |
 | B2.JS.4 | NODE_TYPES + NODE_SCHEMA + FULLTEXT_SCHEMA extended for JS modules / functions | ✅ | `python/src/onelens/graph/db.py`, `python/src/onelens/importer/schema.py` |
 | B2.JS.5 | Dogfood re-sync and verify business-logic `.js` helpers under `src/data/*` become queryable as `JsFunction` nodes | ⬜ | Needs WebStorm plugin re-install + Sync Graph |
+| B2.JS.5a | `VuePsiScope` stub-aware `<script>` / `<script setup>` root walk; `ComposableCollector.isLocalTopLevelDecl` gate; alias / relative specifier normalization across `JsModuleCollector` + `LazyRouteCollector`; `fqnFor` project-relative. Kills `useI18n × 378` phantom duplication + restores alias-form IMPORTS / DISPATCHES matching on 1500+ component dogfood. | ✅ (2026-04-18) | `plugin/.../framework/vue3/VuePsiScope.kt`, five vue3 collectors |
+| B2.JS.5b | Loader `IMPORTS_FN` Python-side bridge + label-split IMPORTS batching + ES6 candidate expansion + `HAS_FUNCTION` edge + Route `fullPath` walk + `CALLS_API` JsFunction caller rule. | ✅ (2026-04-18) | `python/src/onelens/importer/loader.py`, `python/src/onelens/importer/schema.py` |
+| B2.JS.5c | FTS Vue label expansion (7 labels) + prefixed `<type>:<key>` fqn outputs + `_fetch_locations_batch` Vue block + defensive `_dedupe_by_parent`. | ✅ (2026-04-18) | `python/src/onelens/graph/queries.py`, `python/src/onelens/graph/analysis.py`, `python/src/onelens/context/retrieval.py` |
+| B2.JS.5d | Modal remote — weights baked into image, CUDA base, rerank sigmoid passthrough, chunk size 96 for L4. | ✅ (2026-04-18) | `python/src/onelens/remote/modal_app.py`, `python/src/onelens/context/reranker.py`, `python/src/onelens/context/embed_backends/modal_backend.py`. See ADR-016, ADR-017. |
 | B2.JS.6 | JS `CALLS` edge within + across modules | ⬜ | Raw data (JSCallExpression) available; emitter pending |
 | B2.JS.7 | `Channel` node + `EMITS` / `LISTENS` edges for `mitt`/`Bus.emit`/`Bus.on` — differentiator (no surveyed tool does this) | ⬜ | |
 | B2.JS.8 | `Constant` node for exported object / array literals (rule tables, config) | ⬜ | |

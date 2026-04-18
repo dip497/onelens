@@ -30,78 +30,135 @@ from __future__ import annotations
 import modal
 
 APP_NAME = "onelens-embed"
-HF_MODEL_EMBED = "onnx-community/Qwen3-Embedding-0.6B-ONNX"
+# snowflake/snowflake-arctic-embed-l — 1024-dim, ~55 BEIR, fastembed-
+# native. Qwen3-Embedding-0.6B is higher quality on paper (~62 BEIR) but
+# its ONNX export has an unfixable left-padding + attention bug on CUDA
+# that produces all-NaN vectors when short and long sequences are batched
+# together — reproduced cleanly (8 mixed-length docs → 6/8 NaN, same 8
+# one-at-a-time → 0 NaN). batch_size=1 workaround costs 5-10× throughput
+# for correctness, which isn't worth the quality delta. Arctic-embed-l
+# via fastembed's TextEmbedding path is NaN-free, no custom ORT
+# wrangling, 1024-dim so ChromaDB schema is unchanged.
+HF_MODEL_EMBED = "snowflake/snowflake-arctic-embed-l"
+# BAAI/bge-reranker-base — picked after an A/B with
+# jinaai/jina-reranker-v2-base-multilingual on the Vue 3 + JVM corpus:
+# jina scored higher on "password reset" but worse on "authenticate",
+# "file upload", "notification", "ticket create form" — it over-weights
+# short docs with noisy imports/boilerplate. Real gains (BEIR +7) need
+# mxbai-rerank-large-v2 via sentence-transformers, deferred until the
+# Component embedding doc carries more semantic payload than the
+# current truncated SFC.
 HF_MODEL_RERANK = "BAAI/bge-reranker-base"
 
 app = modal.App(APP_NAME)
 
-# Image mirrors what `onelens[context]` would install, minus chromadb
-# (Modal-side doesn't persist drawers — those stay on the client machine).
+
+def _prefetch_weights():
+    """Run at image-build time: warm the fastembed cache for both embedder
+    and reranker so container cold-starts skip the HF fetch.
+    """
+    import os
+    os.environ.setdefault("HF_HOME", "/cache/hf")
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/cache/hf/hub")
+    from fastembed import TextEmbedding
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+    TextEmbedding(model_name=HF_MODEL_EMBED, cache_dir="/cache/fastembed")
+    TextCrossEncoder(model_name=HF_MODEL_RERANK, cache_dir="/cache/fastembed")
+
+
+# Base image ships CUDA 12.4 + cuDNN 9 runtime libs so onnxruntime-gpu
+# can actually load CUDAExecutionProvider. debian_slim lacks libcublasLt /
+# libcudnn and silently falls back to CPU — strictly worse than no-GPU.
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04",
+        add_python="3.11",
+    )
     .apt_install("libgomp1")
     .pip_install(
         "onnxruntime-gpu>=1.20.0",
-        "fastembed-gpu>=0.4.0",
+        "fastembed-gpu>=0.4.0",  # reranker uses fastembed.rerank.cross_encoder
         "tokenizers>=0.21",
         "huggingface-hub>=0.24",
         "numpy>=1.24",
     )
+    .env({
+        "HF_HOME": "/cache/hf",
+        "HUGGINGFACE_HUB_CACHE": "/cache/hf/hub",
+        "FASTEMBED_CACHE_PATH": "/cache/fastembed",
+    })
+    # Bake weights into the image — runs once per image build, not per
+    # container. Uses build-time network so HF rate limits don't hit
+    # cold-start latency.
+    .run_function(_prefetch_weights)
     # Ship the `onelens` package itself so the container can `import
     # onelens.context.embedder` — the local ORT path this app wraps.
     .add_local_python_source("onelens")
 )
 
-# Named volume — survives deploys, shared across containers; Modal mounts it
-# at /cache/hf so HuggingFace downloads resolve once per workspace.
-models_volume = modal.Volume.from_name("onelens-models", create_if_missing=True)
-
 
 @app.cls(
     image=image,
     gpu="L4",
-    volumes={"/cache/hf": models_volume},
+    # Volume removed — weights now live in the image (see `_prefetch_weights`
+    # above). The `onelens-models` volume was the trigger for the 9p
+    # snapshot-restore failures that added 30s to every cold-start retry.
     enable_memory_snapshot=True,
-    experimental_options={"enable_gpu_snapshot": True},
-    scaledown_window=600,         # 10 min idle → scale to 0
-    max_containers=20,            # cap parallelism for bulk imports
+    # GPU snapshot disabled — the experimental flag crashed container
+    # restores with SIGSEGV (exit 139), which then fell back to full cold
+    # boot and silently re-downloaded weights from HuggingFace on every
+    # container. Plain CPU memory snapshot is more stable; we pay a small
+    # per-cold-start CUDA-init cost (~1-2s) to avoid the segfault loop.
+    scaledown_window=1800,         # 30 min idle → scale to 0 (iteration-friendly)
+    max_containers=12,             # cap parallelism for bulk imports
 )
 class Embedder:
 
+    # Two-phase startup, per Modal's recommendation for CPU-only memory
+    # snapshots. Without `enable_gpu_snapshot`, GPU is NOT available inside
+    # `@modal.enter(snap=True)` — attempting CUDA init there triggers the
+    # SIGSEGV (exit 139) we observed in production logs. Split:
+    #
+    #   1. snap=True   — CPU-safe init (imports, not yet touched)
+    #   2. snap=False  — runs AFTER snapshot restore, with GPU attached;
+    #                    builds ORT session + reranker model.
+    #
+    # Net cold-start with weights baked into image: ~2-5s (CUDA init +
+    # ORT session open), no HF download, no segfault.
+
     @modal.enter(snap=True)
-    def load(self):
-        """Runs once per cold container; output is captured in the snapshot.
+    def _warmup_cpu(self):
+        """Pre-import fastembed on CPU — no CUDA binding yet."""
+        import fastembed  # noqa: F401
+        import fastembed.rerank.cross_encoder  # noqa: F401
 
-        Everything heavy (weight download, ORT session warm-up, tokenizer init,
-        reranker load) happens here so the snapshot contains a fully ready
-        pipeline. Subsequent cold starts replay from the snapshot in ~2s.
-        """
-        import os
-
-        # Redirect HF cache onto the Modal volume so repeated deploys reuse
-        # weights. Must be set BEFORE any HF import.
-        os.environ.setdefault("HF_HOME", "/cache/hf")
-        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/cache/hf/hub")
-
-        from onelens.context.embedder import QwenEmbedder
+    @modal.enter(snap=False)
+    def _init_gpu(self):
+        """Runs after snapshot restore with GPU attached."""
+        from fastembed import TextEmbedding
         from onelens.context.reranker import Reranker
-
-        # Embedder loads ORT session on GPU (CUDA provider) + tokenizer.
-        self._embedder = QwenEmbedder()
-        # Reranker is lazy by default — force-load inside snapshot so the
-        # first warm call doesn't pay for it.
-        self._reranker = Reranker()
+        self._embedder = TextEmbedding(
+            model_name=HF_MODEL_EMBED,
+            cache_dir="/cache/fastembed",
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        self._reranker = Reranker(model_name=HF_MODEL_RERANK)
         self._reranker._ensure_loaded()
 
     @modal.method()
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Return (N, 1024) float32 embeddings as nested lists (JSON-safe)."""
-        vecs = self._embedder.encode(texts)
-        return vecs.tolist()
+        return [v.tolist() for v in self._embedder.embed(texts)]
 
     @modal.method()
     def rerank(self, query: str, documents: list[str]) -> list[float]:
-        """Score (query, doc) pairs; higher = more relevant."""
+        """Score (query, doc) pairs; higher = more relevant.
+
+        Returns sigmoid-normalized 0-1 probabilities. The squash now lives
+        in `Reranker.score` so local and Modal paths produce the same
+        range (retrieval filters on `ONELENS_MIN_RERANK_SCORE=0.02`
+        assuming 0-1). This wrapper is a plain passthrough.
+        """
         return self._reranker.score(query, documents)
 
 
@@ -115,3 +172,4 @@ class Embedder:
 # @app.function(image=image, schedule=modal.Cron("*/5 9-17 * * 1-5"))
 # def heartbeat():
 #     Embedder().embed.remote(["ping"])
+ 

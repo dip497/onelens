@@ -29,6 +29,10 @@ NODE_SCHEMA = {
     # Phase B2 — JS business-logic layer (plain helpers / modules).
     "JsModule": "CREATE INDEX FOR (n:JsModule) ON (n.filePath)",
     "JsFunction": "CREATE INDEX FOR (n:JsFunction) ON (n.fqn)",
+    # IMPORTS_FN bridge matches `(fn:JsFunction {name, filePath})` per import
+    # binding; a composite RANGE index keeps that lookup O(log N) per row.
+    # Without it, tens-of-thousands of rows degrade to full JsFunction scans.
+    "JsFunction_name_file": "CREATE INDEX FOR (n:JsFunction) ON (n.name, n.filePath)",
 }
 
 # Full-text search indexes — FalkorDB CALL procedure syntax.

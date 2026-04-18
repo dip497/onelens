@@ -33,16 +33,20 @@ class OpenAICompatEmbedder:
         api_key: str | None = None,
         model: str | None = None,
         dim: int | None = None,
-        max_per_request: int = 256,
-        max_concurrency: int = 8,
+        max_per_request: int = 2048,
+        max_concurrency: int = 16,
         timeout_s: float = 60.0,
         max_retries: int = 4,
     ):
         self.base_url = (base_url or os.environ.get("ONELENS_EMBED_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
-        self.api_key = api_key or os.environ.get("ONELENS_EMBED_API_KEY", "")
+        self.api_key = api_key or os.environ.get("ONELENS_EMBED_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
         self.model = model or os.environ.get("ONELENS_EMBED_MODEL", "text-embedding-3-small")
         # `dim` is NOT auto-probed — an empty request would cost money. Let
         # the caller declare it (or we infer from the first real batch).
+        # For text-embedding-3-large / -small, passing `dimensions=N` to
+        # the API reduces the output vector size (supported natively by
+        # OpenAI). We only send the `dimensions` field when the user has
+        # explicitly requested a size AND the model supports it.
         env_dim = os.environ.get("ONELENS_EMBED_DIM")
         self._dim: int | None = dim or (int(env_dim) if env_dim else None)
         self.max_per_request = max_per_request
@@ -114,7 +118,15 @@ class OpenAICompatEmbedder:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        payload = {"model": self.model, "input": chunk}
+        payload: dict = {"model": self.model, "input": chunk}
+        # Only the text-embedding-3-* family supports the `dimensions`
+        # reducer. We send it only when the user has explicitly asked
+        # for a size different from the model's default — keeps
+        # compatibility with older endpoints (ada-002) that 400 on
+        # unknown params, and with any OpenAI-compat provider that
+        # ignores the field.
+        if self._dim and self.model.startswith("text-embedding-3"):
+            payload["dimensions"] = self._dim
 
         backoff = 1.0
         async with sem:

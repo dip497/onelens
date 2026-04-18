@@ -14,6 +14,7 @@ Design (2026-04):
 """
 
 import logging
+import math
 import os
 import time
 
@@ -72,7 +73,16 @@ class Reranker:
         logger.info("Reranker ready in %.1fs", time.time() - t0)
 
     def score(self, query: str, documents: list[str]) -> list[float]:
-        """Score (query, doc) pairs. Returns one score per doc. OOM-safe."""
+        """Score (query, doc) pairs. Returns one score per doc, sigmoid-
+        normalized to [0, 1]. OOM-safe.
+
+        fastembed's `TextCrossEncoder.rerank` surfaces raw model logits
+        (bge-reranker-base outputs roughly -10 to +10). Retrieval filters on
+        `ONELENS_MIN_RERANK_SCORE = 0.02` which assumes a 0-1 probability
+        range — so without this squash every hit lands below threshold and
+        `hybrid_retrieve` returns empty. Matches the Modal wrapper's previous
+        squash (which is now a passthrough). Ordering is preserved.
+        """
         if not documents:
             return []
         self._ensure_loaded()
@@ -81,7 +91,7 @@ class Reranker:
         while bs >= 1:
             try:
                 scores = list(self._model.rerank(query, documents, batch_size=bs))
-                return [float(s) for s in scores]
+                return [1.0 / (1.0 + math.exp(-float(s))) for s in scores]
             except RuntimeError as e:
                 msg = str(e).lower()
                 if "out of memory" in msg or ("cuda" in msg and "memory" in msg):

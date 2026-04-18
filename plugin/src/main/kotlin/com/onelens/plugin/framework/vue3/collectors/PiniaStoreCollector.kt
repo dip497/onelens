@@ -98,7 +98,7 @@ object PiniaStoreCollector {
     }
 
     private fun extractStoresFromFile(file: PsiFile, ctx: Vue3Context): List<StoreData> {
-        val calls = PsiTreeUtil.findChildrenOfType(file, JSCallExpression::class.java)
+        val calls = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSCallExpression>(file)
             .filter { it.methodExpression?.text?.endsWith("defineStore") == true }
 
         if (calls.isEmpty()) return emptyList()

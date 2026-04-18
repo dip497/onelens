@@ -27,9 +27,23 @@ def search_code(db: GraphDB, term: str, node_type: str = "") -> list[dict]:
 
     Runs separate queries per node type and merges results,
     because FalkorDB may not support UNION with CALL...YIELD.
+
+    Without including Vue / JS labels the hybrid retrieval FTS source
+    returns empty on a frontend-only graph — RRF collapses to a single-
+    source ranking whose top score is `1/(60+0) ≈ 0.0167`. That matches
+    the exact score floor we observed on the Vue 3 dogfood (all hits
+    clustered at 0.016-0.017). Per-type failures are swallowed so the
+    list stays a superset — missing FTS indexes on a JVM-only graph
+    don't short-circuit the JVM path.
     """
     results = []
-    types_to_search = [node_type] if node_type else ["class", "method", "endpoint"]
+    types_to_search = [node_type] if node_type else [
+        # JVM (Spring Boot)
+        "class", "method", "endpoint",
+        # Vue 3 + JS business-logic layer
+        "component", "composable", "store", "route", "apicall",
+        "jsmodule", "jsfunction",
+    ]
 
     for nt in types_to_search:
         cypher, params = queries.search(term, nt)

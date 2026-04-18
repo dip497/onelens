@@ -87,7 +87,17 @@ object LazyRouteCollector {
                     val cfgPsi = psiManager.findFile(it) ?: return@let emptyMap()
                     readConfigConstants(cfgPsi)
                 } ?: emptyMap()
-                extractRoutes(psi, ctx, configConstants)
+                extractRoutes(psi, ctx, configConstants).map { r ->
+                    // Resolve Vite aliases in componentRef so Python loader
+                    // can directly compare against Component.filePath.
+                    // Without this, every `@/views/Foo.vue` DISPATCHES edge
+                    // silently drops at match time — Component rows store
+                    // `src/views/Foo.vue`, not the aliased form.
+                    val resolvedRef = r.componentRef?.let { resolveComponentRef(it, ctx) }
+                    if (resolvedRef != null && resolvedRef != r.componentRef) {
+                        r.copy(componentRef = resolvedRef)
+                    } else r
+                }
             }
             ctx.routes += routes
             // Emit dispatch edges from Route -> Component for each lazy-imported
@@ -214,6 +224,27 @@ object LazyRouteCollector {
     }
 
     private val IMPORT_LITERAL_RE = Regex("""import\s*\(\s*['"`]([^'"`]+)['"`]\s*\)""")
+
+    /**
+     * Resolve `@/views/Foo.vue` (and any other alias present in `ctx.aliases`)
+     * into a project-relative path. Leaves unrecognized / relative refs
+     * unchanged — the Python loader already handles `./` / `../` against the
+     * route file's directory.
+     */
+    private fun resolveComponentRef(ref: String, ctx: Vue3Context): String {
+        for ((alias, absBase) in ctx.aliases) {
+            val prefix = if (alias.endsWith("/")) alias else "$alias/"
+            val candidate = when {
+                ref == alias -> absBase.toString()
+                ref.startsWith(prefix) -> absBase.resolve(ref.substring(prefix.length)).toString()
+                else -> null
+            }
+            if (candidate != null) {
+                return ctx.relativize(java.nio.file.Paths.get(candidate))
+            }
+        }
+        return ref
+    }
 
     private fun extractMetaKeys(prop: JSProperty?): Map<String, String> {
         val obj = prop?.value as? JSObjectLiteralExpression ?: return emptyMap()

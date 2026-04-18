@@ -365,8 +365,35 @@ class GraphLoader:
         routes = [dict(r, wing=wing) for r in vue3.get("routes", [])]
         for r in routes:
             r["meta"] = ",".join(f"{k}={v}" for k, v in (r.get("meta") or {}).items())
+
+        # Full-path concatenation — walk parent chain and join segments so
+        # queries like `WHERE r.fullPath CONTAINS '/ticket'` work. The raw
+        # `path` is relative-only in vue-router nested configs (`:id`,
+        # `create`, `${config.prefix}`); without a rolled-up path every
+        # nested route appears detached from its domain.
+        by_name = {r["name"]: r for r in routes if r.get("name")}
+
+        def _full_path(r: dict, seen: set[str] | None = None) -> str:
+            seen = seen or set()
+            if not r or r.get("name") in seen:
+                return r.get("path", "") if r else ""
+            seen.add(r.get("name", ""))
+            own = (r.get("path") or "").strip()
+            parent = by_name.get(r.get("parentName") or "")
+            if parent is None:
+                return own if own.startswith("/") else f"/{own}" if own else ""
+            pref = _full_path(parent, seen)
+            # Absolute child path overrides parent prefix (vue-router semantics).
+            if own.startswith("/"):
+                return own
+            joined = f"{pref.rstrip('/')}/{own}" if own else pref
+            return joined or "/"
+
+        for r in routes:
+            r["fullPath"] = _full_path(r)
+
         self._batch_nodes(progress, "Vue Routes", routes, "Route", "name", [
-            "path", "componentRef", "meta", "parentName", "filePath", "wing",
+            "path", "fullPath", "componentRef", "meta", "parentName", "filePath", "wing",
         ])
 
         # ApiCalls — fqn synthesized to be unique even across repeated callers.
@@ -382,8 +409,20 @@ class GraphLoader:
         # `JsFunction` per exported top-level fn. Both carry `wing` so
         # cross-repo graphs can filter.
         modules = [dict(m, wing=wing) for m in vue3.get("modules", [])]
+        # Derive a display `name` from the filePath basename (e.g.
+        # `resource-list-title.vue` → `resource-list-title`). The
+        # collector only emits filePath; without a name the FalkorDB
+        # browser shows only the numeric node id because there's no
+        # human-readable label to render.
+        import os.path as _osp
+        for _m in modules:
+            fp = _m.get("filePath", "")
+            base = _osp.basename(fp)
+            # Strip extension if present (vue / js / ts / mjs).
+            stem = base.rsplit(".", 1)[0] if "." in base else base
+            _m.setdefault("name", stem or fp)
         self._batch_nodes(progress, "JS Modules", modules, "JsModule", "filePath", [
-            "fileKind", "isBarrel", "wing",
+            "name", "fileKind", "isBarrel", "wing",
         ])
 
         functions = [dict(f, wing=wing) for f in vue3.get("functions", [])]
@@ -391,6 +430,24 @@ class GraphLoader:
             "name", "filePath", "exported", "isDefault", "isAsync",
             "lineStart", "lineEnd", "body", "wing",
         ])
+
+        # HAS_FUNCTION: JsModule -> JsFunction by shared filePath. Without
+        # this, cross-stack traversal (Component -[IMPORTS]-> JsModule ->
+        # JsFunction -[CALLS_API]-> ApiCall) requires a filePath join in
+        # Cypher, which is slow and breaks agent-style multi-hop queries.
+        has_fn = [
+            {"fp": f["filePath"], "fqn": f["fqn"]}
+            for f in functions if f.get("filePath") and f.get("fqn")
+        ]
+        if has_fn:
+            self._batch_edges_simple(
+                progress, "HAS_FUNCTION", has_fn,
+                "MATCH (m:JsModule {wing: $wing, filePath: e.fp})",
+                "MATCH (f:JsFunction {wing: $wing, fqn: e.fqn})",
+                "MERGE (m)-[:HAS_FUNCTION]->(f)",
+                wing=wing,
+                src_var="m",
+            )
 
         # Edges — caller match is a 3-way OR because collectors emit
         # `callerFqn` in three shapes:
@@ -481,12 +538,30 @@ class GraphLoader:
         # also picks up ApiCall / Route nodes (they carry filePath) and pairs
         # every such match with every target ApiCall in the batch, which over-
         # produces edges by a factor of ~20 on a 1500-component repo.
+        # JsFunction carries an `fqn` that exactly equals `callerFqn` for api-
+        # wrapper functions (e.g. `src/modules/x/x-api.js::fooApi`). Without
+        # JsFunction in the label set, every CALLS_API edge from a plain-JS
+        # api wrapper drops — the dogfood shipped 0 CALLS_API edges before
+        # this was widened. Component / Composable stay included for callers
+        # declared inline inside `.vue` / composable files.
+        # Caller match rules per label:
+        #   - Component / Composable: filePath == caller OR caller STARTS WITH
+        #     (filePath + '::'). These nodes are keyed on the file itself, so
+        #     the STARTS_WITH lets a `src/x/Foo.vue::fn` caller fqn still hit
+        #     the `src/x/Foo.vue` component row.
+        #   - JsFunction: exact fqn match only. JsFunction nodes all share
+        #     `filePath` with their siblings; the STARTS_WITH fallback would
+        #     match every function in the file, amplifying CALLS_API 15-20x
+        #     (dogfooded — 22974 edges instead of 1404 before this split).
         self._batch_edges_simple(
             progress, "CALLS_API", calls_api,
             "MATCH (c {wing: $wing}) "
-            "WHERE (c:Component OR c:Composable) AND ("
-            "    c.fqn = e.caller OR c.filePath = e.caller "
-            " OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
+            "WHERE ("
+            "  ((c:Component OR c:Composable) AND ("
+            "       c.fqn = e.caller OR c.filePath = e.caller "
+            "    OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
+            "  ))"
+            "  OR (c:JsFunction AND c.fqn = e.caller)"
             ")",
             "MATCH (a:ApiCall {wing: $wing, fqn: e.api})",
             "MERGE (c)-[:CALLS_API]->(a)",
@@ -505,19 +580,49 @@ class GraphLoader:
              "isNamespace": bool(e.get("isNamespace", False))}
             for e in vue3.get("imports", []) if e.get("targetFqn")
         ]
+        # Split per source label so FalkorDB can use the `filePath` RANGE
+        # index on each label individually. A single label-less match
+        # forces a full-node scan (22k+ rows × N batches = minutes of
+        # wall-clock). Extensions pick the correct label by the source
+        # filePath extension, so each row lands on exactly one pass.
+        # Source nodes can wear multiple labels at the same filePath:
+        # a composable file also has a JsModule row; a `.vue` component file
+        # only has a Component row. We route to the label that owns the
+        # richer semantic payload — Composable / Store over JsModule so the
+        # traversal `Composable -[IMPORTS]-> JsModule` is actually populated.
+        composable_paths = {c["filePath"] for c in composables if c.get("filePath")}
+        store_paths = {s["filePath"] for s in stores if s.get("filePath")}
+
+        def _split_by_src_ext(rows: list[dict]) -> dict[str, list[dict]]:
+            buckets: dict[str, list[dict]] = {
+                "JsModule": [], "Component": [], "Composable": [], "Store": [],
+            }
+            for r in rows:
+                s = r.get("src", "")
+                if s.endswith(".vue"):
+                    buckets["Component"].append(r)
+                elif s in store_paths:
+                    buckets["Store"].append(r)
+                elif s in composable_paths:
+                    buckets["Composable"].append(r)
+                else:
+                    buckets["JsModule"].append(r)
+            return buckets
+
         if imports_resolved:
-            self._batch_edges_simple(
-                progress, "IMPORTS (resolved)", imports_resolved,
-                "MATCH (src {wing: $wing}) "
-                "WHERE (src:JsModule OR src:Component OR src:Composable OR src:Store) "
-                "  AND src.filePath = e.src",
-                "MATCH (tgt:JsFunction {wing: $wing, fqn: e.tgt_fqn})",
-                "MERGE (src)-[r:IMPORTS]->(tgt) "
-                "SET r.importedName = e.name, r.alias = e.alias, "
-                "    r.isDefault = e.isDefault, r.isNamespace = e.isNamespace",
-                wing=wing,
-                src_var="src",
-            )
+            for label, rows in _split_by_src_ext(imports_resolved).items():
+                if not rows:
+                    continue
+                self._batch_edges_simple(
+                    progress, f"IMPORTS (resolved · {label})", rows,
+                    f"MATCH (src:{label} {{wing: $wing, filePath: e.src}})",
+                    "MATCH (tgt:JsFunction {wing: $wing, fqn: e.tgt_fqn})",
+                    "MERGE (src)-[r:IMPORTS]->(tgt) "
+                    "SET r.importedName = e.name, r.alias = e.alias, "
+                    "    r.isDefault = e.isDefault, r.isNamespace = e.isNamespace",
+                    wing=wing,
+                    src_var="src",
+                )
 
         imports_modulelevel = [
             {"src": e.get("sourceModule", ""), "tgt": e.get("targetModule", ""),
@@ -526,19 +631,60 @@ class GraphLoader:
              "unresolved": bool(e.get("unresolved", False))}
             for e in vue3.get("imports", []) if not e.get("targetFqn")
         ]
-        if imports_modulelevel:
-            self._batch_edges_simple(
-                progress, "IMPORTS (module-level)", imports_modulelevel,
-                "MATCH (src {wing: $wing}) "
-                "WHERE (src:JsModule OR src:Component OR src:Composable OR src:Store) "
-                "  AND src.filePath = e.src",
-                "OPTIONAL MATCH (tgt:JsModule {wing: $wing, filePath: e.tgt}) "
-                "WITH src, tgt, e WHERE tgt IS NOT NULL",
-                "MERGE (src)-[r:IMPORTS]->(tgt) "
-                "SET r.importedName = e.name, r.alias = e.alias, r.unresolved = e.unresolved",
-                wing=wing,
-                src_var="src",
-            )
+        # ES6 module resolution: `import './config'` resolves to `./config.js`
+        # or `./config/index.js`. Collector emits the bare specifier; the
+        # loader expands candidate filePaths so the match hits. Without
+        # this, every extensionless import (thousands in a typical Vue 3
+        # repo) silently drops at the JsModule join.
+        expanded_imports: list[dict] = []
+        module_paths: set[str] = {m["filePath"] for m in modules}
+        for e in imports_modulelevel:
+            tgt = e["tgt"]
+            candidates = [tgt]
+            if not tgt.endswith((".js", ".ts", ".mjs", ".vue")):
+                candidates += [f"{tgt}.js", f"{tgt}.ts", f"{tgt}/index.js", f"{tgt}/index.ts"]
+            resolved = next((c for c in candidates if c in module_paths), tgt)
+            expanded_imports.append({**e, "tgt": resolved})
+        if expanded_imports:
+            for label, rows in _split_by_src_ext(expanded_imports).items():
+                if not rows:
+                    continue
+                self._batch_edges_simple(
+                    progress, f"IMPORTS (module · {label})", rows,
+                    f"MATCH (src:{label} {{wing: $wing, filePath: e.src}})",
+                    "MATCH (tgt:JsModule {wing: $wing, filePath: e.tgt})",
+                    "MERGE (src)-[r:IMPORTS]->(tgt) "
+                    "SET r.importedName = e.name, r.alias = e.alias, r.unresolved = e.unresolved",
+                    wing=wing,
+                    src_var="src",
+                )
+
+        # IMPORTS_FN bridge — the Kotlin PSI resolve step hits empty
+        # `importedBindings` / `importSpecifiers` on stub-backed files, so
+        # every `import { fooApi } from './x-api'` lands as a module-level
+        # IMPORTS edge without a JsFunction target. We re-derive the
+        # function-level edge in Python using data already in the graph:
+        # for every IMPORTS edge with `importedName`, if a JsFunction with
+        # that name exists at the target module's filePath, emit
+        # IMPORTS_FN. Deterministic, cheap, and bypasses the stub
+        # limitation entirely.
+        fn_bridge_rows = [
+            {"src": e["src"], "tgt": e["tgt"], "name": e["name"]}
+            for e in expanded_imports
+            if e.get("name") and e["name"] not in ("", "*", "default")
+        ]
+        if fn_bridge_rows:
+            for label, rows in _split_by_src_ext(fn_bridge_rows).items():
+                if not rows:
+                    continue
+                self._batch_edges_simple(
+                    progress, f"IMPORTS_FN ({label})", rows,
+                    f"MATCH (src:{label} {{wing: $wing, filePath: e.src}})",
+                    "MATCH (fn:JsFunction {wing: $wing, name: e.name, filePath: e.tgt})",
+                    "MERGE (src)-[:IMPORTS_FN]->(fn)",
+                    wing=wing,
+                    src_var="src",
+                )
 
         # Bridge pass — emit cross-wing HITS edges between Vue ApiCall and Spring Endpoint.
         try:

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# commit-msg — scan the commit message for client / company names.
+#
+# Complements the pre-commit hook (which scans staged diffs). The message
+# itself is never inspected by pre-commit because the staging machinery
+# doesn't have access to it — commit-msg runs LATER with $1 pointing at
+# the message file. Same block list (`.claude/hooks/client-names.txt`),
+# same substring-match rules.
+set -euo pipefail
+
+RED=$'\e[31m'; GRN=$'\e[32m'; CLR=$'\e[0m'
+die() { echo "${RED}commit-msg: $*${CLR}" >&2; exit 1; }
+ok()  { echo "${GRN}commit-msg: $*${CLR}" >&2; }
+
+MSG_FILE="${1:-}"
+[[ -n "$MSG_FILE" && -f "$MSG_FILE" ]] || exit 0
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BLOCK_LIST="$REPO_ROOT/.claude/hooks/client-names.txt"
+[[ -f "$BLOCK_LIST" ]] || exit 0
+
+PATTERNS="$(grep -vE '^\s*(#|$)' "$BLOCK_LIST" || true)"
+[[ -n "$PATTERNS" ]] || exit 0
+
+HIT=""
+while IFS= read -r pattern; do
+  [[ -z "$pattern" ]] && continue
+  if grep -qiE "$pattern" "$MSG_FILE"; then
+    HIT="${HIT}  - ${pattern}"$'\n'
+  fi
+done <<<"$PATTERNS"
+
+if [[ -n "$HIT" ]]; then
+  die "commit message contains forbidden client name(s):
+$HIT
+Rewrite to a generic reference. See .claude/hooks/client-names.txt."
+fi
+
+ok "client-name check passed."
+exit 0
