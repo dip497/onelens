@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OneLens static bundle — consumer side
+# OneLens static bundle — consumer side (multi-graph)
 # Usage: ./restore.sh <bundle.tgz>
 # Prereqs: docker, python3 + pip (onelens wheel ships inside bundle)
 set -euo pipefail
@@ -19,31 +19,47 @@ fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-echo "[1/6] extract bundle..."
+echo "[1/7] extract bundle..."
 tar xzf "$BUNDLE" -C "$STAGE"
 SRC="$STAGE/onelens-bundle"
 [[ -d "$SRC" ]] || { echo "error: malformed bundle (no onelens-bundle/ dir)" >&2; exit 2; }
 [[ -f "$SRC/manifest.json" ]] || { echo "error: missing manifest.json" >&2; exit 2; }
 
-GRAPH="$(python3 -c "import json; print(json.load(open('$SRC/manifest.json'))['graph'])")"
-FALKOR_IMG="$(python3 -c "import json; print(json.load(open('$SRC/manifest.json'))['falkor_image'])")"
-echo "    graph:         $GRAPH"
+# parse manifest (supports schema v1 single-graph and v2 multi-graph)
+read -r SCHEMA FALKOR_IMG GRAPHS_CSV CHROMA_CSV < <(python3 - "$SRC/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+schema = m.get("schema_version", 1)
+if schema == 1:
+    graphs = [m["graph"]]
+    chroma = graphs if m.get("has_chroma") else []
+else:
+    graphs = m.get("graphs", [])
+    chroma = m.get("chroma_graphs", [])
+print(schema, m["falkor_image"], ",".join(graphs), ",".join(chroma))
+PY
+)
+IFS=',' read -ra GRAPHS <<< "$GRAPHS_CSV"
+IFS=',' read -ra CHROMA_GRAPHS <<< "${CHROMA_CSV:-}"
+
+echo "    schema:        v$SCHEMA"
 echo "    falkor image:  $FALKOR_IMG"
+echo "    graphs:        ${GRAPHS[*]}"
 
 echo ""
 echo "!!! WARNING: restore overwrites ENTIRE falkor instance on container '$CONTAINER'."
-echo "!!! All existing graphs on this falkor will be REPLACED by the bundle."
+echo "!!! All existing graphs on this falkor will be REPLACED by the bundle's RDB."
 read -rp "continue? [y/N] " ok
 [[ "$ok" == "y" || "$ok" == "Y" ]] || { echo "aborted."; exit 0; }
 
-echo "[2/6] ensure falkor container exists..."
+echo "[2/7] ensure falkor container exists..."
 if ! docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
   echo "    starting new container '$CONTAINER' from $FALKOR_IMG..."
   docker run -d --name "$CONTAINER" -p "$HOST_PORT:6379" -p 3001:3000 "$FALKOR_IMG" >/dev/null
   sleep 3
 fi
 
-echo "[3/6] stop falkor, load RDB, restart..."
+echo "[3/7] stop falkor, load RDB, restart..."
 docker stop "$CONTAINER" >/dev/null
 docker cp "$SRC/dump.rdb" "$CONTAINER:/var/lib/falkordb/data/dump.rdb"
 docker start "$CONTAINER" >/dev/null
@@ -52,18 +68,35 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
-echo "[4/6] verify graph loaded..."
-if ! docker exec "$CONTAINER" redis-cli -p "$FALKOR_PORT" GRAPH.LIST | grep -qx "$GRAPH"; then
-  echo "error: graph '$GRAPH' not found after RDB load" >&2
-  exit 3
-fi
+echo "[4/7] verify graphs loaded..."
+LOADED="$(docker exec "$CONTAINER" redis-cli -p "$FALKOR_PORT" GRAPH.LIST)"
+for g in "${GRAPHS[@]}"; do
+  if ! echo "$LOADED" | grep -qx "$g"; then
+    echo "error: graph '$g' not found after RDB load" >&2
+    exit 3
+  fi
+  echo "    ok: $g"
+done
 
-echo "[5/6] restore chroma embeddings..."
-if [[ -f "$SRC/chroma.tgz" ]]; then
-  mkdir -p "$ONELENS_HOME/context"
-  rm -rf "$ONELENS_HOME/context/$GRAPH"
+echo "[5/7] restore chroma embeddings..."
+mkdir -p "$ONELENS_HOME/context"
+if [[ "$SCHEMA" == "1" && -f "$SRC/chroma.tgz" ]]; then
+  g="${GRAPHS[0]}"
+  rm -rf "$ONELENS_HOME/context/$g"
   tar xzf "$SRC/chroma.tgz" -C "$ONELENS_HOME/context"
-  echo "    -> $ONELENS_HOME/context/$GRAPH"
+  echo "    -> $ONELENS_HOME/context/$g"
+elif [[ -d "$SRC/chroma" ]]; then
+  for g in "${CHROMA_GRAPHS[@]}"; do
+    [[ -z "$g" ]] && continue
+    tgz="$SRC/chroma/$g.tgz"
+    if [[ ! -f "$tgz" ]]; then
+      echo "    warn: missing $tgz — skip" >&2
+      continue
+    fi
+    rm -rf "$ONELENS_HOME/context/$g"
+    tar xzf "$tgz" -C "$ONELENS_HOME/context"
+    echo "    -> $ONELENS_HOME/context/$g"
+  done
 else
   echo "    (no chroma in bundle — semantic search will be empty)"
 fi
@@ -95,5 +128,6 @@ fi
 
 echo ""
 echo "restore complete. verify:"
-echo "  onelens stats --graph $GRAPH"
-echo "  onelens retrieve --query 'auth flow' --graph $GRAPH"
+for g in "${GRAPHS[@]}"; do
+  echo "  onelens stats --graph $g"
+done

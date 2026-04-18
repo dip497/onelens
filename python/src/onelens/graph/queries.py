@@ -164,6 +164,52 @@ def search(term: str, node_type: str = "") -> tuple[str, dict]:
             RETURN 'Endpoint' AS type, node.id AS fqn, node.path AS name,
                    node.httpMethod AS file, '' AS kind
         """
+    elif node_type == "component":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Component', '{safe_term}') YIELD node
+            RETURN 'Component' AS type, ('component:' + node.filePath) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "composable":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Composable', '{safe_term}') YIELD node
+            RETURN 'Composable' AS type, ('composable:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "store":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Store', '{safe_term}') YIELD node
+            RETURN 'Store' AS type, ('store:' + node.id) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "route":
+        # Prefix matches ChromaDB drawer-id convention (`<type>:<key>`) so
+        # retrieval._fetch_locations_batch's prefix-partition lookup resolves
+        # FTS hits. Without the prefix, location + snippet both drop silently.
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Route', '{safe_term}') YIELD node
+            RETURN 'Route' AS type, ('route:' + node.name) AS fqn,
+                   node.path AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "apicall":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ApiCall', '{safe_term}') YIELD node
+            RETURN 'ApiCall' AS type, ('apicall:' + node.fqn) AS fqn,
+                   node.path AS name, node.filePath AS file,
+                   node.method AS kind
+        """
+    elif node_type == "jsmodule":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('JsModule', '{safe_term}') YIELD node
+            RETURN 'JsModule' AS type, ('jsmodule:' + node.filePath) AS fqn,
+                   node.filePath AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "jsfunction":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('JsFunction', '{safe_term}') YIELD node
+            RETURN 'JsFunction' AS type, ('jsfunction:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
     else:
         # Default: search classes (caller should loop for multi-type)
         cypher = f"""

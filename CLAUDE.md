@@ -185,6 +185,7 @@ python/benchmarks/                # Local only (gitignored)
 - FalkorDB default port: 17532 (mapped from Docker 6379)
 - Before public push: `grep -rIn "<client-name>"` to catch leaked client refs in comments/examples
 - Before committing plugin-side changes: run `./gradlew compileKotlin` — the CLI command rename that slipped through once already (`import` → `import_graph`) would have been caught by CI
+- Git hooks (`.githooks/`) scan BOTH staged diffs (`pre-commit`) AND the commit message (`commit-msg`) against `.claude/hooks/client-names.txt`. Install once per clone with `git config core.hooksPath .githooks`. Don't bypass with `--no-verify` — if a client name is legitimately part of the commit (e.g. referencing a test fixture path that lives outside the repo), rewrite to a generic term instead
 
 ## Tracker + docs — keep them current, every turn
 

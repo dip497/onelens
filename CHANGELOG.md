@@ -7,6 +7,122 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed — scripts/bundle.sh multi-graph (2026-04-18)
+
+- `scripts/bundle.sh` accepts N graph names or `--all`; packs one
+  `chroma/<graph>.tgz` per requested graph. Manifest bumped to
+  `schema_version: 2` with `graphs[]` + `chroma_graphs[]` arrays.
+  Single-graph invocation still works (archive name preserves old
+  `onelens-bundle-<graph>-<ts>.tgz` form).
+- `scripts/restore.sh` parses both v1 (single-graph, legacy
+  `chroma.tgz`) and v2 (multi-graph `chroma/<g>.tgz`) manifests,
+  verifies every listed graph loaded from the RDB, and restores each
+  graph's chroma dir independently. RDB itself already shipped whole
+  falkor state; this closes the gap on embeddings + manifest.
+
+### Added — Vue 3 graph + retrieval hardening (2026-04-18)
+
+- **`VuePsiScope`**: Stub-aware `<script>` / `<script setup>` root
+  resolution via `org.jetbrains.vuejs.index.findModule`. All five Vue
+  collectors (`ApiCall`, `Composable`, `JsModule`, `PiniaStore`,
+  `SfcScriptSetup`) migrated from raw `PsiTreeUtil` walks; kills the
+  `useI18n × 378` phantom composable duplication that showed up on a
+  1500+ component dogfood when stub-backed trees silently missed
+  declarations inside embedded `<script>` nodes.
+- **Composable local-decl gate**: `isLocalTopLevelDecl` filter on
+  `ComposableCollector` restricts emission to declarations in the
+  current file whose parent chain terminates at the file (no nested
+  helpers, no cross-file stub phantoms).
+- **Alias / relative specifier normalization**: `JsModuleCollector.
+  normalizeModuleSpecifier` + `LazyRouteCollector.resolveComponentRef`
+  turn `@/views/Foo.vue` → `src/views/Foo.vue` using `ctx.aliases`.
+  Without this, every alias-form IMPORTS / DISPATCHES edge silently
+  dropped at the Python join.
+- **JsModuleCollector stub-aware import walk**:
+  `findImportDeclarations` uses `JSResolveUtil.getStubbedChildren(scope,
+  ES6_IMPORT_DECLARATION)` on `.vue` files — matches Vue plugin's own
+  `VueExtractComponentDataBuilder` pattern. Textual regex fallback
+  widened to `[\s\S]*?` so Prettier-formatted multi-line imports land
+  and `import type { X }` clauses are parsed correctly.
+- **`fqnFor` relativization**: JsFunction import-resolve fqns now
+  use project-relative paths so they join cleanly against the
+  `JsFunctionData.fqn` target shape.
+- **Route `fullPath`**: Parent-walk roll-up of vue-router nested
+  routes (`r.fullPath CONTAINS '/ticket'` now works); absolute child
+  paths override the parent prefix per vue-router semantics.
+- **`HAS_FUNCTION` edge**: `JsModule -[:HAS_FUNCTION]-> JsFunction` by
+  shared filePath. Cross-stack traversal `Component -[IMPORTS]->
+  JsModule -> JsFunction -[CALLS_API]-> ApiCall` drops the filePath
+  join in Cypher.
+- **`IMPORTS_FN` Python-side bridge**: Derives function-level import
+  edges from module-level IMPORTS by joining `importedName` to
+  `JsFunction {name, filePath}` on the target module. Workaround for
+  stub-empty `importedBindings`. Composite `(name, filePath)` range
+  index (`JsFunction_name_file` in `schema.py`) keeps it O(log N).
+- **Label-split IMPORTS batching**: Loader now splits imports-resolved
+  and imports-modulelevel UNWINDs by source label (`Component` /
+  `Composable` / `Store` / `JsModule`) so each batch uses the
+  per-label `filePath` range index instead of a label-less full-node
+  scan. Eliminates minute-scale waits on 22 k+ edge batches.
+- **ES6 candidate expansion**: Bare `./config` resolves to `./config.js`
+  / `./config.ts` / `./config/index.js` / `./config/index.ts` before
+  the JsModule join. Without this, extensionless imports dropped.
+- **`CALLS_API` label widening**: Matches JsFunction callers (by exact
+  fqn) in addition to Component / Composable (by `STARTS WITH
+  <filePath>::`). Split avoids the 15-20× amplification that would
+  fire if JsFunction used the same `STARTS WITH` rule (every function
+  in the same file would then absorb the edge). Dogfood: 22 974 bogus
+  edges → 1 404 real edges.
+- **FTS Vue label expansion**: `search_code` now covers Component /
+  Composable / Store / Route / ApiCall / JsModule / JsFunction in
+  addition to the JVM trio. All seven queries in `queries.py` return
+  prefixed `<type>:<key>` fqns that match ChromaDB drawer ids and the
+  `_fetch_locations_batch` prefix partition.
+- **Retrieval `_dedupe_by_parent`**: Defensive collapse of sub-chunks
+  via `@@<role>` separator — no-op on current single-drawer mining but
+  ready for later chunking.
+- **`_fetch_locations_batch` Vue block**: Resolves `filePath` +
+  `lineStart` / `lineEnd` for seven Vue labels via one UNWIND per
+  label; grouped by prefix, identifier stripped back to the graph
+  node's key_prop.
+- **`_strip_js_imports`**: Shared utility in `code_miner` that strips
+  ES6 imports from Component / Composable / Store bodies before they
+  become embedding documents. Page-level files routinely used 10-30
+  import lines of their 2 000-char budget on pure boilerplate.
+- **Store id dedup**: `_mine_vue_stores` collapses duplicate
+  `defineStore('id', …)` registrations across feature modules — first
+  row wins. Prevents ChromaDB duplicate-id batch rejection.
+
+### Fixed — Rerank squash + FTS prefix + Modal snapshot (2026-04-18)
+
+- **Rerank 0-1 squash**: `Reranker.score` sigmoid-normalizes raw
+  cross-encoder logits before returning. Retrieval's
+  `ONELENS_MIN_RERANK_SCORE=0.02` assumed a 0-1 range — without the
+  squash every hit dropped below threshold and `hybrid_retrieve`
+  returned empty. Modal wrapper simplified to a pass-through so local
+  and remote paths share one normalization point.
+- **FTS Vue id prefix**: Route / ApiCall / JsModule / JsFunction FTS
+  queries now return `<type>:<key>` fqns instead of raw node values.
+  Without this, RRF treated FTS and semantic hits as different
+  entries and `_fetch_locations_batch`'s prefix-partitioned Vue block
+  never resolved file paths / snippets.
+- **Modal weights-in-image**: `onelens-models` Volume removed; weights
+  baked via `run_function(_prefetch_weights)` at image build.
+  Triggered by recurring 9p snapshot-restore failures (Modal docs:
+  *"Deleting files in a Volume used during restore will cause restore
+  failures"*). Image grows ~2.5 GB; restore failure rate → 0. Base
+  switched to `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` so
+  `onnxruntime-gpu` actually loads CUDAExecutionProvider instead of
+  silently CPU-falling back on `debian_slim`.
+- **`DEFAULT_CHUNK_SIZE` 128 → 96**: L4 24 GB OOMs at 256 on Qwen3
+  seq=512 attention; server-side `ONELENS_EMBED_BATCH=32` caps it.
+- **Vue-only export null-spring crash**: `data.get("spring") or {}`;
+  explicit `"spring": null` used to raise `AttributeError` in
+  `_build_indexes` and `_mine_endpoints`.
+- **MCP `import_graph` stdout chatter**: Prior fix stands; listed here
+  only for context since the underlying Rich-console redirect interacts
+  with the sigmoid / Modal changes above.
+
 ### Added — Enum constants + annotation attributes (2026-04-18)
 
 - New `EnumConstant` node + `HAS_ENUM_CONSTANT` edge. Each constant carries

@@ -394,5 +394,107 @@ one line to `client-names.txt`, retire by deleting the line.
 
 ---
 
+## ADR-016 · 2026-04-18 · Modal remote — bake weights into image, drop the volume
+
+**Decision.** The Modal embed + rerank image (`python/src/onelens/
+remote/modal_app.py`) now pre-fetches `Qwen/Qwen3-Embedding-0.6B` and
+`BAAI/bge-reranker-base` at image-build time via
+`run_function(_prefetch_weights)`; the former `onelens-models`
+`modal.Volume` is removed. The base image also switches from
+`debian_slim` to `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` so
+`onnxruntime-gpu` actually loads the `CUDAExecutionProvider` instead
+of silently falling back to CPU.
+
+**Context.** Cold starts were hitting repeated 9p snapshot-restore
+failures — Modal's docs (explicitly) warn that *"Deleting files in a
+Volume used during restore will cause restore failures"*. Every
+restore failure burned 30 s of tail latency and occasionally wedged
+the container. The offending path was the volume-mounted HF cache;
+models get periodically evicted / refreshed, which races the restore.
+
+**Alternatives.**
+- Keep the volume, make the HF cache read-only (rejected — HF client
+  still writes metadata files on resolve; not truly read-only).
+- Switch to a pre-downloaded image layer without killing the volume
+  (rejected — residual volume mount means same restore race).
+- Bake weights into the image, accept the ~2.5 GB growth (**picked**).
+  Trade image pull cost once per deploy for zero restore failures and
+  strictly-local weight loads on every container.
+
+**Revisit when.** We need > 1 model variant per workspace (Mxbai
+large, multilingual reranker, etc.) and image size blows past the
+per-deploy pull-cost budget — at which point a pinned snapshot tag
+on the volume, combined with `scaledown_window=0` to avoid restores,
+becomes the better deal.
+
+---
+
+## ADR-017 · 2026-04-18 · Rerank scores normalized in `Reranker.score`, Modal wrapper passthrough
+
+**Decision.** `python/src/onelens/context/reranker.py` now squashes
+raw cross-encoder logits through `sigmoid(x)` before returning.
+`python/src/onelens/remote/modal_app.py::Embedder.rerank` is a plain
+passthrough over `Reranker.score` — no further transformation.
+
+**Context.** Retrieval filters on `ONELENS_MIN_RERANK_SCORE=0.02`
+which assumes a 0-1 probability range. `fastembed.TextCrossEncoder.
+rerank` surfaces raw logits (roughly [-10, +10] for bge-reranker-
+base), so every hit dropped below threshold and `hybrid_retrieve`
+returned an empty list — the regression caught in the Vue-3 dogfood.
+A prior fix added the squash only in the Modal wrapper; the local
+path (`ONELENS_RERANK_BACKEND=none` or tests instantiating `Reranker`
+directly) stayed broken.
+
+**Alternatives.**
+- Keep the squash only in Modal, document the local path (rejected —
+  silent divergence between backends, future regression magnet).
+- Move the threshold to logits-space with per-model calibration
+  (rejected — threshold becomes model-specific, breaks the
+  swap-the-reranker-backend contract we want to preserve).
+- Squash once in `Reranker.score`, Modal wrapper passthrough (**picked**
+  — single normalization point, identical range for local and remote).
+
+**Revisit when.** We move to a reranker that already emits
+probabilities (certain MiniLM-class checkpoints do); at that point
+the sigmoid becomes a no-op at best, slightly harmful at worst, and
+should be gated on model metadata.
+
+---
+
+## ADR-018 · 2026-04-18 · FTS Vue query results return prefixed `<type>:<key>` fqns
+
+**Decision.** `python/src/onelens/graph/queries.py` prefixes every
+Vue-label FTS result with the matching ChromaDB drawer-id prefix —
+`component:`, `composable:`, `store:`, `route:`, `apicall:`,
+`jsmodule:`, `jsfunction:`. The returned `fqn` column is treated as
+a drawer id by the retrieval layer.
+
+**Context.** Retrieval fuses FalkorDB FTS results and ChromaDB
+semantic results via RRF (`_rrf_fuse`) and then resolves `filePath`
+/ line ranges with `_fetch_locations_batch`. Both layers key on the
+ChromaDB drawer-id shape (`<type>:<key>`). The original Vue-label
+queries returned `node.name` / `node.fqn` / `node.filePath` raw —
+semantic hits (`route:UsersList`) and FTS hits (`UsersList`) were
+treated as different entries by RRF, and the prefix-partitioned Vue
+block in `_fetch_locations_batch` skipped any id without a `:`.
+
+**Alternatives.**
+- Strip the prefix inside the retrieval layer (rejected — spreads
+  the format contract across two files, every new Vue label drops
+  back into the same trap).
+- Move drawer-id construction into a helper called from both sides
+  (deferred — the single-source-of-truth helper is worth doing but
+  not gating this fix).
+- Prefix at the query source (**picked** — matches the existing
+  Component / Composable / Store convention already in the file;
+  one-line diff per query).
+
+**Revisit when.** The drawer-id prefix scheme changes (e.g. we
+introduce a namespace separator or a wing-scoped id) — at that
+point the helper extraction in the deferred alternative becomes
+the right move.
+
+---
+
 *To append a new ADR, copy the heading format and add at the
 bottom. Do not rewrite or delete earlier entries.*
