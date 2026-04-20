@@ -16,7 +16,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.UsesComposableEdge
 import com.onelens.plugin.export.UsesStoreEdge
@@ -63,7 +62,7 @@ object CallThroughResolver {
             ftm.getFileTypeByExtension("js").takeIf { it != UnknownFileType.INSTANCE },
             ftm.getFileTypeByExtension("ts").takeIf { it != UnknownFileType.INSTANCE }
         )
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = ctx.workspace.scope(project)
         val psiManager = PsiManager.getInstance(project)
 
         val emittedStoreEdges = HashSet<Triple<String, String, Boolean>>()

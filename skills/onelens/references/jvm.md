@@ -1,6 +1,25 @@
 # OneLens — JVM Reference
 
-Applies when the active wing has `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, or `Annotation` nodes. Covers Java, Kotlin, Scala, Groovy — anything IntelliJ resolves via the JVM classpath.
+> **⚠️ Migration notice (2025-01 onwards)** — this file contains JVM/Spring
+> deep-dive patterns. Some CLI examples still use the legacy tool names
+> (`onelens impact`, `onelens trace`, `onelens search`, `onelens retrieve`,
+> `onelens call-tool onelens_status`). Those standalone commands were removed in the unified
+> MCP surface. **Translate invocations as follows:**
+>
+> | Legacy command | New canonical form |
+> |---|---|
+> | `onelens call-tool onelens_status ...` | `onelens call-tool onelens_status ...` |
+> | `onelens call-tool onelens_query --cypher "CYPHER" ...` | `onelens call-tool onelens_query --cypher "CYPHER" ...` |
+> | `onelens search "X" ...` | `onelens call-tool onelens_search --term X ...` |
+> | `onelens call-tool onelens_retrieve --query "Q" ...` | `onelens call-tool onelens_retrieve --query "Q" ...` |
+> | `onelens impact "FQN" ...` | see **`queries-code.md#impact`** — one Cypher pattern via `onelens_query` |
+> | `onelens trace "X" ...` | see **`queries-code.md#trace`** — one Cypher pattern |
+> | `onelens entry-points ...` | see **`queries-code.md#entry-points`** — Cypher pattern |
+>
+> The JVM-specific content below (schema, patterns, gotchas) is still current.
+> Full tool-name migration of every example is tracked as a follow-up.
+
+Applies when the active graph has `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, or `Annotation` nodes. Covers Java, Kotlin, Scala, Groovy — anything IntelliJ resolves via the JVM classpath.
 
 Source of truth is PSI-resolved, not text-matched: overloads, polymorphism, Spring injection, and external-library calls all resolve accurately.
 
@@ -148,9 +167,9 @@ RETURN m.classFqn + "#" + m.name AS unused_method, m.filePath LIMIT 30
 ### 11. Full-Text Search — "Find by name pattern"
 
 ```bash
-~/.onelens/venv/bin/onelens search "User*" --graph <project-name>               # prefix match
-~/.onelens/venv/bin/onelens search "auth" --type method --graph <project-name>   # methods only
-~/.onelens/venv/bin/onelens search "/api/users" --type endpoint --graph <project-name>
+onelens call-tool onelens_search --term "User*" --graph <project-name>               # prefix match
+onelens call-tool onelens_search --term "auth" --type method --graph <project-name>   # methods only
+onelens call-tool onelens_search --term "/api/users" --type endpoint --graph <project-name>
 ```
 
 Or via raw Cypher:
@@ -168,7 +187,7 @@ Under the hood: parallel FalkorDB FTS + ChromaDB semantic (Qwen3), Reciprocal Ra
 ```bash
 # Primary: natural language → top-K with code snippets
 ONELENS_PROJECT_ROOT=/path/to/project-source \
-  ~/.onelens/venv/bin/onelens retrieve "<query>" --graph <project-name>
+  onelens call-tool onelens_retrieve --query "<query>" --graph <project-name>
 
 # Options
   -n 10                     # top-K after fusion/rerank (default 10)
@@ -204,7 +223,7 @@ If `retrieve` returns empty, the concept isn't in the codebase — don't retry w
 **Example:**
 ```bash
 ONELENS_PROJECT_ROOT=~/path/to/project \
-  onelens retrieve "how password encryption works" --graph my-project --neighbors
+  onelens call-tool onelens_retrieve --query "how password encryption works" --graph my-project --neighbors
 ```
 
 **Output per hit:**
@@ -227,8 +246,8 @@ ONELENS_PROJECT_ROOT=~/path/to/project \
 
 **Fallback: standalone semantic search** (returns FQN table, no code):
 ```bash
-~/.onelens/venv/bin/onelens search "<natural query>" --semantic --graph <project-name>
-~/.onelens/venv/bin/onelens search "<q>" --semantic --type method --graph <project-name>
+onelens call-tool onelens_search --term "<natural query>" --semantic --graph <project-name>
+onelens call-tool onelens_search --term "<q>" --semantic --type method --graph <project-name>
 ```
 
 **When the context graph isn't indexed yet:**
@@ -393,7 +412,7 @@ Two layers — both required for execution questions:
 
 ```bash
 # Walk up from the candidate method
-onelens query "MATCH (c:Method)-[:CALLS]->(m:Method) WHERE m.fqn = '<FQN>' RETURN c.classFqn, c.name" --graph <g>
+onelens call-tool onelens_query --cypher "MATCH (c:Method)-[:CALLS]->(m:Method) WHERE m.fqn = '<FQN>' RETURN c.classFqn, c.name" --graph <g>
 # Recurse up until chain terminates
 ```
 
@@ -479,9 +498,12 @@ Proper (right): "Gated by `Context.isFeatureEnabled()` which returns literal `fa
 
 ### Performance tips
 
-- **Start the MCP server as an HTTP daemon** to keep Qwen3 + mxbai-rerank warm: `fastmcp run onelens.mcp_server:mcp --transport http --port 8765`, then export `ONELENS_SERVER_URL=http://127.0.0.1:8765`. Every `retrieve` call otherwise pays ~30s model-load (cold stdio subprocess); with the daemon up: 1-4s per query.
+- **In-process CLI** — `onelens call-tool` runs the MCP server in-process;
+  no subprocess, no PATH dependency on the `fastmcp` binary. For
+  cross-invocation warmth (shell loops, batch scripts) use `onelens daemon
+  start` to keep embeddings + reranker loaded between invocations.
 - **`--no-rerank`** drops ~2-3s for a slight quality loss — fine for exploratory queries where top-20 is enough.
-- **`--no-snippets`** skips source reads — use when you only need FQNs to chain into `impact` / `trace`.
+- **`--no-snippets`** skips source reads — use when you only need FQNs to chain into cross-stack queries.
 
 ## Tips
 

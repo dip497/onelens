@@ -16,6 +16,16 @@ Performance (measured on RTX A2000 4GB, large Spring monorepo, 2026-04):
 import json
 import logging
 import time
+
+# Fast-path JSON parse — same pattern as the loader. code_miner reads the
+# same 500 MB+ export when `--context` is on, so the stdlib vs orjson gap
+# is ~8 s per sync.
+try:
+    import orjson as _orjson
+    _USE_ORJSON = True
+except ImportError:  # pragma: no cover
+    _orjson = None
+    _USE_ORJSON = False
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -136,9 +146,14 @@ class CodeMiner:
 
         print(f"Loading JSON ({export_path.name})...", flush=True)
         t1 = time.time()
-        with open(export_path) as f:
-            data = json.load(f)
-        print(f"  JSON loaded in {time.time() - t1:.1f}s — "
+        with open(export_path, "rb") as f:
+            raw = f.read()
+        if _USE_ORJSON:
+            data = _orjson.loads(raw)
+        else:
+            data = json.loads(raw.decode("utf-8"))
+        print(f"  JSON loaded in {time.time() - t1:.1f}s "
+              f"[{'orjson' if _USE_ORJSON else 'stdlib'}] — "
               f"{len(data.get('methods', []))} methods, "
               f"{len(data.get('classes', []))} classes, "
               f"{len(data.get('callGraph', []))} call edges", flush=True)

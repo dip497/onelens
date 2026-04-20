@@ -11,6 +11,13 @@ dependencies = [
     "cyclopts>=3.0.0",
     "networkx>=3.0",          # PageRank centrality prebake at import time
     "pyyaml>=6.0",            # Benchmark cases.yaml + agent configs
+    "sqlglot>=25.0",          # Phase C6 — parse Flyway migrations + custom SQL queries (AST-level table/column extraction)
+    "orjson>=3.9",            # 3-5× faster JSON loads on big exports (500MB+ the reference project takes ~10s with stdlib, ~2s with orjson)
+    # Embedded FalkorDB — bundled Redis + FalkorDB module (.so). Default backend
+    # for zero-Docker OSS UX. `pip install onelens` → ready to sync. Docker path
+    # (`falkordb` backend) stays available for production / browser-UI use.
+    # Linux + macOS only; Windows users must use the Docker backend.
+    "falkordblite>=0.9.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +33,8 @@ context = [
     "httpx>=0.27",                # OpenAI-compat bulk-concurrent embedding calls
     "numpy>=1.24",
 ]
+# `lite` extra kept for backward compat — falkordblite is already in the base
+# dep list, so this resolves to a no-op. Remove in v0.3.
 lite = ["falkordblite>=0.9.0"]
 neo4j = ["neo4j>=5.0.0"]
 dev = [
@@ -36,6 +45,10 @@ dev = [
 ]
 
 [project.scripts]
+# Single unified CLI — palace tools (drawer / kg / diary / tunnels) are now
+# subcommands of `onelens call-tool` via the unified MCP server. The previous
+# `onelens-palace` entry point is removed; import `onelens.palace.*` directly
+# if you need the business modules outside the MCP surface.
 onelens = "onelens.cli_generated:main"
 
 [build-system]

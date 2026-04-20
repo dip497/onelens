@@ -1,8 +1,14 @@
 """Delta (incremental) import into any Cypher-compatible graph DB."""
 
-import json
 import logging
 from pathlib import Path
+
+try:
+    import orjson as _json  # type: ignore[import-not-found]
+    _USE_ORJSON = True
+except ImportError:  # pragma: no cover
+    import json as _json  # type: ignore[no-redef]
+    _USE_ORJSON = False
 
 from onelens.graph.db import GraphDB
 
@@ -28,8 +34,9 @@ class DeltaLoader:
            provided. Uses CodeMiner's deterministic IDs — incremental re-embed
            is O(changed methods), not full re-mine.
         """
-        with open(delta_path) as f:
-            data = json.load(f)
+        with open(delta_path, "rb") as f:
+            raw = f.read()
+        data = _json.loads(raw) if _USE_ORJSON else _json.loads(raw.decode("utf-8"))
 
         deleted = data.get("deleted", {})
         upserted = data.get("upserted", {})

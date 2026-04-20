@@ -22,6 +22,13 @@ HALL_RUNTIME = "hall_runtime"
 HALL_DECISIONS = "hall_decisions"
 HALL_DOCS = "hall_docs"
 
+# Palace content-type halls (orthogonal to source-type halls above).
+# See docs/design/palace-mcp.md and LESSONS-LEARNED "dual hall taxonomy".
+HALL_SIGNATURE = "hall_signature"
+HALL_EVENT = "hall_event"
+HALL_FACT = "hall_fact"
+HALL_DOC = "hall_doc"
+
 # ── Input validation (from MemPalace) ────────────────────────────────────────
 
 MAX_NAME_LENGTH = 128

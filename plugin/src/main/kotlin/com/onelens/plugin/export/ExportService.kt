@@ -13,6 +13,8 @@ import com.onelens.plugin.framework.springboot.SpringBootCollectionResult
 import com.onelens.plugin.framework.springboot.SpringBootCollector
 import com.onelens.plugin.framework.vue3.Vue3Collector
 import com.onelens.plugin.framework.vue3.Vue3Context
+import com.onelens.plugin.framework.workspace.Workspace
+import com.onelens.plugin.framework.workspace.WorkspaceLoader
 import com.onelens.plugin.ui.OneLensEvent
 import com.onelens.plugin.ui.OneLensEventBus
 import com.onelens.plugin.ui.OneLensState
@@ -59,7 +61,27 @@ class ExportService {
         publish(OneLensEvent.StatusChange(OneLensState.SYNCING))
         publish(OneLensEvent.Info("Full export starting for ${project.name}"))
 
-        val basePath = project.basePath ?: return ExportResult.Error("Project has no base path")
+        if (project.basePath == null) return ExportResult.Error("Project has no base path")
+
+        // Block until IntelliJ indexes are ready. Every JVM collector hits
+        // `JavaPsiFacade.findClass`, `PsiShortNamesCache`, or
+        // `AnnotatedElementsSearch` inside a plain ReadAction — those throw
+        // `IndexNotReadyException` if the project is still in dumb mode.
+        // Per JetBrains threading docs: wait for smart mode once at the entry
+        // boundary, not per-collector. Safe from a background thread.
+        indicator?.text = "Waiting for indexes…"
+        com.intellij.openapi.project.DumbService.getInstance(project).waitForSmartMode()
+
+        // Resolve workspace once at the entry boundary: explicit
+        // `onelens.workspace.yaml` if present, else implicit single-root. Every
+        // collector downstream treats the workspace as authoritative — nothing
+        // falls back to `project.basePath` / `projectScope(project)`.
+        val workspace = try {
+            WorkspaceLoader.load(project)
+        } catch (e: Exception) {
+            return ExportResult.Error("Could not resolve workspace: ${e.message}")
+        }
+        LOG.info("Workspace '${workspace.name}' with ${workspace.roots.size} root(s); graphId='${workspace.graphId}'")
 
         // Discover active adapters. EP lookup falls back to a hard-coded list when the
         // extension point hasn't been registered yet (e.g. in tests or if the config-file
@@ -80,7 +102,12 @@ class ExportService {
                 is SpringBootAdapter -> 0.0
                 else -> 0.5   // Vue + future adapters start at the half-way mark
             }
-            val ctx = CollectContext(project = project, indicator = indicator, progressFraction = fraction)
+            val ctx = CollectContext(
+                project = project,
+                indicator = indicator,
+                progressFraction = fraction,
+                workspace = workspace,
+            )
             for (collector in adapter.collectors()) {
                 try {
                     collector.collect(ctx)
@@ -105,10 +132,51 @@ class ExportService {
         val annotations = springResult?.annotations ?: emptyList()
         val enumConstants = springResult?.enumConstants ?: emptyList()
         val spring = if (config.includeSpring) springResult?.spring else null
+        val jpa = if (config.includeSpring) springResult?.jpa else null
+        val tests = springResult?.tests ?: emptyList()
+        val mockBeans = springResult?.mockBeans ?: emptyList()
+        val spyBeans = springResult?.spyBeans ?: emptyList()
         val diagnostics = if (config.includeDiagnostics) {
             springResult?.diagnostics ?: emptyList()
         } else emptyList()
         val vue3Data = vueCtx?.snapshot()
+
+        val springApps = springResult?.apps ?: emptyList()
+        val springPackages = springResult?.packages ?: emptyList()
+
+        // Vue3 App = one per Vue root detected in the workspace. Packages = one per
+        // top-level `src/<segment>` folder. Lightweight — just reads the filesystem;
+        // no PSI. Lets `(App)-[:CONTAINS]->(Component|Store|Module)` land in the
+        // graph without a heavy Vue3-side collector change for Phase C2.
+        val vueApps = mutableListOf<AppData>()
+        val vuePackages = mutableListOf<PackageData>()
+        if (vueCtx != null) {
+            for (root in workspace.roots) {
+                val rootDir = root.path.toFile()
+                val pkgJson = java.io.File(rootDir, "package.json")
+                if (!pkgJson.isFile) continue
+                val vueRootName = rootDir.name.ifBlank { workspace.name }
+                val appId = "app:vue3:${workspace.relativePath(rootDir.absolutePath).ifBlank { vueRootName }}"
+                val srcDir = java.io.File(rootDir, "src")
+                val topLevelSegments = if (srcDir.isDirectory) {
+                    srcDir.listFiles { f -> f.isDirectory }?.map { it.name } ?: emptyList()
+                } else emptyList()
+                vueApps += AppData(
+                    id = appId,
+                    name = vueRootName,
+                    type = "vue3",
+                    rootPath = rootDir.absolutePath,
+                    scanPackages = topLevelSegments,
+                )
+                for (seg in topLevelSegments) {
+                    val pkgId = "vue:$vueRootName:$seg"
+                    vuePackages += PackageData(id = pkgId, name = seg, parentId = null, appId = appId)
+                }
+            }
+        }
+
+        val apps = springApps + vueApps
+        val packages = springPackages + vuePackages
 
         val durationMs = System.currentTimeMillis() - startTime
 
@@ -120,8 +188,15 @@ class ExportService {
             exportType = "full",
             timestamp = Instant.now().toString(),
             project = ProjectInfo(
-                name = project.name,
-                basePath = basePath,
+                name = workspace.name,
+                basePath = workspace.primaryRoot.toString(),
+            ),
+            workspace = WorkspaceInfo(
+                name = workspace.name,
+                graphId = workspace.graphId,
+                roots = workspace.roots.map { it.path.toString() },
+                duplicateFqnPolicy = workspace.policies.duplicateFqn,
+                configFile = workspace.configFile?.toString(),
             ),
             classes = classes,
             methods = members.methods,
@@ -133,6 +208,12 @@ class ExportService {
             modules = modules,
             annotations = annotations,
             enumConstants = enumConstants,
+            jpa = jpa,
+            apps = apps,
+            packages = packages,
+            tests = tests,
+            mockBeans = mockBeans,
+            spyBeans = spyBeans,
             diagnostics = diagnostics,
             stats = ExportStats(
                 classCount = classes.size,
@@ -163,7 +244,7 @@ class ExportService {
         indicator?.fraction = 0.95
         val outputDir = config.outputPath
         Files.createDirectories(outputDir)
-        val fileName = "${project.name}-full-${System.currentTimeMillis()}.json"
+        val fileName = "${workspace.graphId}-full-${System.currentTimeMillis()}.json"
         val outputFile = outputDir.resolve(fileName)
         Files.newOutputStream(outputFile).use { out ->
             @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
@@ -184,7 +265,7 @@ class ExportService {
             (v?.dispatches?.size ?: 0) + (v?.callsApi?.size ?: 0) +
             (v?.imports?.size ?: 0)
         publish(OneLensEvent.SyncComplete(
-            graphName = project.name,
+            graphName = workspace.graphId,
             classes = document.stats.classCount,
             methods = document.stats.methodCount,
             callEdges = document.stats.callEdgeCount,
@@ -199,7 +280,7 @@ class ExportService {
 
         // Auto-import into graph DB if onelens CLI is available
         if (config.autoImport) {
-            val importResult = syncToGraph(outputFile, project.name, config)
+            val importResult = syncToGraph(outputFile, workspace.graphId, config)
             if (importResult != null) {
                 LOG.info("Auto-import: $importResult")
                 publish(OneLensEvent.Info("CLI import: $importResult"))
@@ -250,12 +331,20 @@ class ExportService {
             //   Delta: ~seconds (only changed methods re-embed via deterministic IDs)
             // `--clear` wipes the graph before import — full path only; passing
             // it on delta would destroy the graph.
+            // Post-unification CLI shape (2025-01+): tools live under
+            // `call-tool <onelens_*>` instead of flat verbs. `onelens_import`
+            // still auto-detects full vs delta from the export header.
             val command = mutableListOf(
-                cliPath, "import_graph", exportFile.toString(),
+                cliPath, "call-tool", "onelens_import",
+                "--export-path", exportFile.toString(),
                 "--graph", graphName,
                 "--backend", config.graphBackend,
-                "--context"
             )
+            // `--context` triggers the ChromaDB semantic layer (Qwen3 + mxbai).
+            // Graph-only mode skips it → ~30 s full sync, structural queries only.
+            if (config.buildSemanticIndex) {
+                command += "--context"
+            }
             if (isFull) {
                 command += "--clear"
             }

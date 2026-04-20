@@ -8,6 +8,8 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.OneLensConstants
 import com.onelens.plugin.export.*
 import com.onelens.plugin.export.collectors.*
+import com.onelens.plugin.framework.workspace.Workspace
+import com.onelens.plugin.framework.workspace.WorkspaceLoader
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -89,7 +91,7 @@ object DeltaExportService {
      * @return Path to delta JSON file, or null if no changes detected
      */
     fun exportDelta(project: Project, config: ExportConfig): DeltaResult {
-        val basePath = project.basePath ?: return DeltaResult.Error("No project base path")
+        if (project.basePath == null) return DeltaResult.Error("No project base path")
         val state = ExportState.getInstance(project)
 
         // 1. Detect changed files
@@ -117,7 +119,16 @@ object DeltaExportService {
         deletedFiles: List<String> = emptyList()
     ): DeltaResult {
         val startTime = System.currentTimeMillis()
-        val basePath = project.basePath ?: return DeltaResult.Error("No project base path")
+        if (project.basePath == null) return DeltaResult.Error("No project base path")
+        // Delta collectors hit the PSI index through JavaPsiFacade.findClass etc.
+        // Wait for smart mode once at the entry boundary rather than scattering
+        // `DumbService.isDumb` guards across every collector (see ExportService).
+        com.intellij.openapi.project.DumbService.getInstance(project).waitForSmartMode()
+        val workspace = try {
+            WorkspaceLoader.load(project)
+        } catch (e: Exception) {
+            return DeltaResult.Error("Could not resolve workspace: ${e.message}")
+        }
         val state = ExportState.getInstance(project)
 
         if (state.state.lastExportTimestamp == 0L) {
@@ -140,24 +151,24 @@ object DeltaExportService {
 
         // 3. For modified files: re-collect classes in those files
         val affectedClasses = ReadAction.compute<List<ClassData>, Throwable> {
-            collectClassesFromFiles(project, modifiedFiles, basePath)
+            collectClassesFromFiles(project, modifiedFiles, workspace)
         }
 
         // 4. Collect members, calls, inheritance for affected classes
-        val members = MemberCollector.collect(project, affectedClasses)
-        val callGraph = CallGraphCollector.collect(project, affectedClasses)
-        val inheritance = InheritanceCollector.collect(project, affectedClasses)
-        val annotations = AnnotationCollector.collect(project, affectedClasses)
+        val members = MemberCollector.collect(project, affectedClasses, workspace)
+        val callGraph = CallGraphCollector.collect(project, affectedClasses, workspace)
+        val inheritance = InheritanceCollector.collect(project, affectedClasses, workspace)
+        val annotations = AnnotationCollector.collect(project, affectedClasses, workspace)
 
         // 4b. Spring + modules: full re-scan (indexed, cheap). Per-class
         // filtering would miss cross-class injection edges and newly-added
         // @RestController / @Service annotations on changed files.
         val spring = if (config.includeSpring) {
-            try { SpringCollector.collect(project) } catch (e: Throwable) {
+            try { SpringCollector.collect(project, workspace) } catch (e: Throwable) {
                 LOG.warn("Delta Spring collection failed: ${e.message}"); null
             }
         } else null
-        val modules = try { ModuleCollector.collect(project) } catch (e: Throwable) {
+        val modules = try { ModuleCollector.collect(project, workspace) } catch (e: Throwable) {
             LOG.warn("Delta module collection failed: ${e.message}"); emptyList()
         }
 
@@ -206,7 +217,7 @@ object DeltaExportService {
         // 6. Write delta JSON
         val outputDir = config.outputPath
         Files.createDirectories(outputDir)
-        val fileName = "${project.name}-delta-${System.currentTimeMillis()}.json"
+        val fileName = "${workspace.graphId}-delta-${System.currentTimeMillis()}.json"
         val outputFile = outputDir.resolve(fileName)
         // Stream JSON to disk to avoid OOM on large deltas.
         Files.newOutputStream(outputFile).use { out ->
@@ -214,8 +225,8 @@ object DeltaExportService {
             json.encodeToStream(delta, out)
         }
 
-        // 7. Update state
-        val newHash = DeltaTracker.getCurrentGitHash(basePath)
+        // 7. Update state — git hash tracked against workspace primary root.
+        val newHash = DeltaTracker.getCurrentGitHash(workspace.primaryRoot.toString())
         state.state.lastExportTimestamp = System.currentTimeMillis()
         state.state.lastExportPath = outputFile.toString()
         if (newHash.isNotEmpty()) state.state.lastGitHash = newHash
@@ -238,20 +249,25 @@ object DeltaExportService {
     }
 
     /**
-     * Collect ClassData for classes found in specific files.
+     * Collect ClassData for classes found in specific files. Relative paths are
+     * resolved against each workspace root in order — first hit wins. This is
+     * what lets a delta on a sibling-repo root work without the caller having
+     * to know which root the file lives in.
      */
     private fun collectClassesFromFiles(
         project: Project,
         filePaths: List<String>,
-        basePath: String
+        workspace: Workspace
     ): List<ClassData> {
         val result = mutableListOf<ClassData>()
         val psiManager = PsiManager.getInstance(project)
         val fs = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
 
         for (relativePath in filePaths) {
-            val absolutePath = java.nio.file.Paths.get(basePath, relativePath).toString()
-            val virtualFile = fs.findFileByPath(absolutePath) ?: continue
+            val virtualFile = workspace.roots.asSequence()
+                .map { root -> root.path.resolve(relativePath).toString() }
+                .mapNotNull { fs.findFileByPath(it) }
+                .firstOrNull() ?: continue
             val psiFile = psiManager.findFile(virtualFile) as? PsiJavaFile ?: continue
 
             for (psiClass in psiFile.classes) {

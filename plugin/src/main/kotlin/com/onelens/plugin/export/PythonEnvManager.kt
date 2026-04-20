@@ -98,6 +98,10 @@ object PythonEnvManager {
         if (ONELENS_BIN.toFile().exists()) {
             LOG.info("OneLens CLI ready at: $ONELENS_BIN")
             OneLensEvents.info("OneLens CLI ready at: $ONELENS_BIN")
+            // Best-effort symlink into ~/.local/bin so a bare `onelens` works
+            // in external shells (Claude Code terminal, /onelens skill, CI).
+            // No-op on failure (Windows without developer mode, read-only FS).
+            linkIntoLocalBin()
             OneLensEvents.status(OneLensState.READY)
             return ONELENS_BIN.toString()
         }
@@ -398,6 +402,24 @@ object PythonEnvManager {
             LOG.debug("Command failed: ${e.message}")
             OneLensEvents.warn("Command raised: ${e.message}")
             false
+        }
+    }
+
+    private fun linkIntoLocalBin() {
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        if (isWindows) return // symlinks need dev-mode / admin; skip silently
+        val localBin = Paths.get(System.getProperty("user.home"), ".local", "bin")
+        try {
+            Files.createDirectories(localBin)
+            val link = localBin.resolve("onelens")
+            if (Files.isSymbolicLink(link) || Files.exists(link)) {
+                Files.delete(link)
+            }
+            Files.createSymbolicLink(link, ONELENS_BIN)
+            LOG.info("Symlinked $link → $ONELENS_BIN")
+            OneLensEvents.info("Linked 'onelens' into ~/.local/bin (available in any shell on PATH)")
+        } catch (e: Exception) {
+            LOG.info("Could not create ~/.local/bin/onelens symlink: ${e.message}")
         }
     }
 }

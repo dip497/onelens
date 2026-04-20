@@ -8,6 +8,7 @@ import com.intellij.openapi.vfs.newvfs.events.VFileDeleteEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileMoveEvent
 import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent
+import com.onelens.plugin.framework.workspace.WorkspaceLoader
 
 /**
  * Listens for VFS changes and notifies AutoSyncService when .java files change.
@@ -57,9 +58,12 @@ class AutoSyncFileListener : BulkFileListener {
         val project = ProjectLocator.getInstance().guessProjectForFile(file) ?: return
         val service = project.getService(AutoSyncService::class.java) ?: return
         if (!service.isEnabled()) return
-        val basePath = project.basePath ?: return
-        val relativePath = file.path.removePrefix(basePath).removePrefix("/")
-        service.onJavaFileChanged(relativePath)
+        // Workspace-relative path — only events inside a workspace root trigger a
+        // sync. WorkspaceLoader.load throws on a project with no basePath; we
+        // swallow and skip the event rather than letting the VFS listener crash.
+        val workspace = try { WorkspaceLoader.load(project) } catch (_: Exception) { return }
+        if (!workspace.contains(file.path)) return
+        service.onJavaFileChanged(workspace.relativePath(file))
     }
 
     private fun handleDelete(file: VirtualFile?, oldPath: String? = null) {
@@ -76,8 +80,8 @@ class AutoSyncFileListener : BulkFileListener {
             ?: return
         val service = project.getService(AutoSyncService::class.java) ?: return
         if (!service.isEnabled()) return
-        val basePath = project.basePath ?: return
-        val relativePath = path.removePrefix(basePath).removePrefix("/")
-        service.onJavaFileDeleted(relativePath)
+        val workspace = try { WorkspaceLoader.load(project) } catch (_: Exception) { return }
+        if (!workspace.contains(path)) return
+        service.onJavaFileDeleted(workspace.relativePath(path))
     }
 }

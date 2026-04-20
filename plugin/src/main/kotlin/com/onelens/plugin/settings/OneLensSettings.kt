@@ -27,6 +27,14 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         // Stored as String so kotlinx-serialization-style nulls survive round-trip
         // through IntelliJ's XmlSerializer, which treats Boolean? fields inconsistently.
         var vueAdapterOverride: String = "auto",
+        // Build ChromaDB semantic index alongside the graph. OFF by default —
+        // graph-only is ~30 s full sync and covers structural queries (impact /
+        // trace / Cypher / search). Flip ON to spend ~20 min on Qwen3 embeddings
+        // and unlock natural-language retrieval (`onelens retrieve`).
+        var buildSemanticIndex: Boolean = false,
+        // Graph backend: "falkordblite" (embedded, no Docker) or "falkordb" (Docker on :17532).
+        // Default flipped to lite in v0.2 for zero-setup UX. Windows users must pick "falkordb".
+        var graphBackend: String = "falkordblite",
     )
 
     private var state = State()

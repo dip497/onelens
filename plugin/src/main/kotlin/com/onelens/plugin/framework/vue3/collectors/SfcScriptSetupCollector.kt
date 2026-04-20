@@ -14,7 +14,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComponentData
 import com.onelens.plugin.export.PropData
@@ -50,7 +49,7 @@ object SfcScriptSetupCollector {
             return
         }
 
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = ctx.workspace.scope(project)
         // FileTypeIndex.getFiles() is index-backed and must run inside a read
         // action AND with the indexes ready. WebStorm 2026.1+ throws
         // `Read access is allowed from inside read-action only` if we call it

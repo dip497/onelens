@@ -13,6 +13,7 @@ import com.onelens.plugin.export.StoreData
 import com.onelens.plugin.export.UsesComposableEdge
 import com.onelens.plugin.export.UsesStoreEdge
 import com.onelens.plugin.export.Vue3Data
+import com.onelens.plugin.framework.workspace.Workspace
 import java.nio.file.Path
 
 /**
@@ -24,7 +25,9 @@ import java.nio.file.Path
 class Vue3Context(
     val projectBase: Path,
     val aliases: Map<String, Path>,
-    val symlinks: List<com.onelens.plugin.framework.vue3.resolver.SymlinkResolver.SymlinkEntry>
+    val symlinks: List<com.onelens.plugin.framework.vue3.resolver.SymlinkResolver.SymlinkEntry>,
+    /** Workspace driving root scope. Every collector + resolver scopes through this. */
+    val workspace: Workspace,
 ) {
     val components: MutableList<ComponentData> = mutableListOf()
     val composables: MutableList<ComposableData> = mutableListOf()

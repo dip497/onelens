@@ -86,7 +86,13 @@ class Vue3Collector : Collector {
 
     override fun collect(ctx: CollectContext): CollectorOutput {
         val project = ctx.project
-        val base = project.basePath?.let(Paths::get) ?: return emptyOutput()
+        val workspace = ctx.workspace
+        // Prefer workspace primary root so a multi-root config with a Vue app as the
+        // second root still produces correct relative paths. Implicit single-root
+        // workspace yields the same base as `project.basePath` did before.
+        val base = workspace?.primaryRoot
+            ?: project.basePath?.let(Paths::get)
+            ?: return emptyOutput()
 
         val aliases = ViteAliasResolver.resolveFromBase(base)
         val symlinks = try {
@@ -94,7 +100,12 @@ class Vue3Collector : Collector {
         } catch (_: Throwable) {
             emptyList()
         }
-        val vueCtx = Vue3Context(projectBase = base, aliases = aliases, symlinks = symlinks)
+        val vueCtx = Vue3Context(
+            projectBase = base,
+            aliases = aliases,
+            symlinks = symlinks,
+            workspace = workspace,
+        )
         lastContext = vueCtx
 
         val indicator = ctx.indicator

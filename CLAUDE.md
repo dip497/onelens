@@ -27,7 +27,7 @@ Monorepo, three shipped components + one local:
 - **IntelliJ PSI over tree-sitter**: 100% accurate type resolution. Tree-sitter misses overloads, polymorphism, Spring injection. This is the moat.
 - **FalkorDB default**: localhost:3001 browser UI + Cypher. Pluggable via `GraphDB` interface — swap to `falkordblite` (embedded, no Docker) or `neo4j` with one flag.
 - **ChromaDB semantic layer**: Qwen3-Embedding-0.6B for method body / javadoc / signature. Mxbai-rerank-base cross-encoder for top-K re-ranking. Optional — install via `pip install onelens[context]`.
-- **MCP server = source of truth for the CLI**. `python/src/onelens/mcp_server.py` defines every operation as an `@mcp.tool`. `cli_generated.py` is produced by `fastmcp generate-cli` from that server. Change tools in one place.
+- **MCP server = source of truth for the CLI**. `python/src/onelens/mcp_server.py` defines every operation as an `@mcp.tool`. `cli_generated.py` is produced by `python/scripts/regen_cli.sh` (wraps `fastmcp generate-cli` and patches `CLIENT_SPEC` to in-process `FastMCPTransport` — no `fastmcp` binary on PATH required). Never run `fastmcp generate-cli` directly; use the script so the patch survives regeneration.
 - **Plugin bundles the skill**: `skills/onelens/SKILL.md` is copied into the plugin JAR at build (`processResources` in `build.gradle.kts`). `InstallSkillAction` drops it to `~/.claude/skills/onelens/`. No manual copy step.
 - **Auto-sync ON by default**: VFS BulkFileListener debounces `.java` saves (5 s), fires `DeltaExportService` → `delta_import`. Toggle via Tools → OneLens.
 - **Plugin auto-installs Python**: `PythonEnvManager` creates `~/.onelens/venv/` via `uv` on first sync. Installs `onelens[context]` so semantic retrieval works out of the box.

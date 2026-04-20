@@ -5,10 +5,10 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.PsiShortNamesCache
 import com.onelens.plugin.export.AnnotationData
 import com.onelens.plugin.export.ClassData
+import com.onelens.plugin.framework.workspace.Workspace
 
 /**
  * Collects all classes, interfaces, enums, records, and annotation types from the project.
@@ -19,17 +19,16 @@ object ClassCollector {
 
     private val LOG = logger<ClassCollector>()
 
-    fun collect(project: Project): List<ClassData> {
+    fun collect(project: Project, workspace: Workspace): List<ClassData> {
         // Step 1: get all class names (quick ReadAction)
         val allNames = ReadAction.compute<Array<String>, Throwable> {
             PsiShortNamesCache.getInstance(project).allClassNames
         }
         LOG.info("Found ${allNames.size} unique class names")
 
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = workspace.scope(project)
         val result = mutableListOf<ClassData>()
         val seen = mutableSetOf<String>()
-        val basePath = project.basePath ?: ""
 
         // Step 2: process each name in a small ReadAction (UI stays responsive)
         for (name in allNames) {
@@ -45,7 +44,10 @@ object ClassCollector {
                     if (!seen.add(fqn)) continue
 
                     val file = psiClass.containingFile?.virtualFile ?: continue
-                    val filePath = file.path.removePrefix(basePath).removePrefix("/")
+                    // Filter to workspace roots — prevents sibling-repo / library
+                    // leakage when the scope union is permissive for type resolution.
+                    if (!workspace.contains(file.path)) continue
+                    val filePath = workspace.relativePath(file)
 
                     batch.add(extractClassData(psiClass, fqn, filePath, project))
                 }
