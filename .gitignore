@@ -66,3 +66,8 @@ AGENTS.local.md
 # terms we don't want leaking. The hook (`block-client-names.sh`) reads it
 # from the working tree; contributors populate their local copy.
 .claude/hooks/client-names.txt
+
+# Local session state + host identifiers (never commit).
+.claude/scheduled_tasks.lock
+scripts/*.tgz
+scripts/*@*
