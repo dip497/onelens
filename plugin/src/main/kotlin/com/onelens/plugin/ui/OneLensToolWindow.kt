@@ -61,6 +61,8 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
     private val branchLabel = JBLabel(" ")
     private val seedLabel = JBLabel(" ")
     private val checklistPanel = JPanel()
+    private val prereqSummary = JBLabel(" ")
+    private var checklistForceVisible = false
     private val statsLabel = JBLabel(" ")
     private val resourcesLabel = JBLabel(" ")
     private val lastSyncLabel = JBLabel(" ")
@@ -91,6 +93,7 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
         add(top, BorderLayout.NORTH)
         add(console.component, BorderLayout.CENTER)
+        console.component.isVisible = false // show after first event
 
         subscribe()
         refreshAsync()
@@ -156,6 +159,22 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         }
         checklistPanel.layout = GridBagLayout()
         checklistPanel.border = BorderFactory.createTitledBorder("Prerequisites")
+        prereqSummary.apply {
+            foreground = java.awt.Color(0x3A, 0x9B, 0x3A)
+            cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+            addMouseListener(object : java.awt.event.MouseAdapter() {
+                override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                    checklistForceVisible = !checklistForceVisible
+                    checklistPanel.isVisible = checklistForceVisible
+                    prereqSummary.text = if (checklistForceVisible)
+                        "✓ Prerequisites OK (click to collapse)"
+                    else
+                        "✓ Prerequisites OK (click to expand)"
+                    revalidate(); repaint()
+                }
+            })
+        }
+        panel.add(prereqSummary)
         panel.add(checklistPanel)
 
         val stats = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
@@ -246,6 +265,10 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         ApplicationManager.getApplication().invokeLater({
             val ts = SimpleDateFormat("HH:mm:ss").format(Date())
             console.print("[$ts] $text\n", type)
+            if (!console.component.isVisible) {
+                console.component.isVisible = true
+                revalidate(); repaint()
+            }
         }, ModalityState.any())
     }
 
@@ -322,6 +345,21 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
     private fun renderChecklist(s: OneLensStatus) {
         checklistPanel.removeAll()
+        val failures = listOfNotNull(
+            if (!s.falkordbReachable && s.backend != "falkordblite") "backend" else null,
+            if (s.uvPath == null) "uv" else null,
+            if (!s.venvExists) "venv" else null,
+            if (s.cliPath == null) "cli" else null,
+        )
+        val allOk = failures.isEmpty()
+        if (allOk) {
+            prereqSummary.isVisible = true
+            prereqSummary.text = "✓ Prerequisites OK (click to expand)"
+            checklistPanel.isVisible = checklistForceVisible
+        } else {
+            prereqSummary.isVisible = false
+            checklistPanel.isVisible = true
+        }
         val backendCheck = when (s.backend) {
             "falkordblite" -> checkItem(
                 s.falkordbReachable, "FalkorDB Lite",
@@ -514,8 +552,12 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         }
     }
 
-    private inner class ClearLogAction : AnAction("Clear Log", "Clear the event log", AllIcons.Actions.GC) {
-        override fun actionPerformed(e: AnActionEvent) = console.clear()
+    private inner class ClearLogAction : AnAction("Clear / Hide Log", "Clear the event log + hide it until next event", AllIcons.Actions.GC) {
+        override fun actionPerformed(e: AnActionEvent) {
+            console.clear()
+            console.component.isVisible = false
+            revalidate(); repaint()
+        }
     }
 
     private fun readSeedTag(graphId: String?): String? {
