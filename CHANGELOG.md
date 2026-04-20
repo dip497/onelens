@@ -7,6 +7,703 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Phase R Stage 1d · Snapshot-as-seed for onboarding (2026-04-21)
+
+"Start working from this snapshot" — new dev installs a shared release
+snapshot and seeds their live graph from it, so the next Sync Graph
+deltas only the branch diff since the tag's commit instead of a 20-min
+full reindex.
+
+- `python/src/onelens/snapshots/seed.py` (new, ~140 LoC) — atomic
+  promote with bail-on-failure ordering (rdb → GRAPH.COPY rename →
+  context → marker). Tag-commit fallback resolves missing `commitSha`
+  via `git rev-parse <tag>` when publisher ran outside a git context.
+- `python/src/onelens/snapshots/consumer.py` — install path now copies
+  `manifest.json` alongside the rdb so promote can read
+  `commitSha`/`schemaVersion` without re-extracting the tgz.
+- `python/src/onelens/mcp_server.py` — new `@mcp.tool`
+  `onelens_snapshot_promote(graph, tag)`. Tool count: 18 → 19.
+- `plugin/.../export/delta/DeltaTracker.kt` — consumes
+  `~/.onelens/graphs/<g>/.onelens-baseline` at entry (one-shot, delete
+  before diff runs, race-safe). Schema-version mismatch discards the
+  marker + falls back to full sync (SharedIndexes precedent). Overrides
+  the "No previous export → full" path when a valid seed is present.
+- `plugin/.../actions/StartFromSnapshotAction.kt` (new) — off-EDT ancestor
+  check via `git merge-base --is-ancestor`, confirm dialog with 2
+  guards (live-overwrite, non-ancestor), install-then-promote via CLI
+  in a `Task.Backgroundable`. Notification on completion.
+- `plugin/.../ui/OneLensSnapshotsToolWindow.kt` — right-click `Start
+  working from this snapshot` added to both Published and Installed
+  rows.
+- `docs/design/phase-r-stage-1d-snapshot-as-seed.md` (new) — full
+  spec: UX guards, atomicity order, marker format, risk register,
+  validation smoke test. Design validated against SCIP/LSIF, Bazel
+  remote cache, Nix substituters, Docker BuildKit, IntelliJ
+  SharedIndexes before implementation.
+
+### Added — Phase R Stage 1c · Snapshots UX gap-close (2026-04-21)
+
+Plugin UI UX pass closing gaps surfaced during Stage 1b smoke-test: the
+Snapshots tab only listed extracted snapshots from `~/.onelens/graphs/`
+and silently hid published tgz archives in `~/.onelens/bundles/`, so a
+fresh publish looked like nothing happened.
+
+- `plugin/.../snapshots/SnapshotModels.kt` — new `PublishedBundle` data
+  class (graph/tag/tgzPath/tgzBytes/lastModified).
+- `plugin/.../snapshots/SnapshotManager.kt`:
+  - `listPublished(graph)` scans `~/.onelens/bundles/onelens-snapshot-<g>-<t>.tgz`.
+  - `install(bundle, indicator)` shells `onelens_snapshots_pull --repo local`
+    for the published → installed flow (same code path as remote pull).
+- `plugin/.../ui/OneLensSnapshotsToolWindow.kt`:
+  - Two-section list: `⇡ Published (N)` + `⌂ Installed (N)`.
+  - Published row shows `✓ installed` badge when its tag is also in the
+    extracted graphs dir; download icon otherwise.
+  - Double-click Published → install + auto-refresh list.
+  - Right-click Published → `Install / Re-install`, `Open bundles
+    folder`, `Delete tgz…` (cascades to `.sha256` sidecar; preserves
+    installed copy).
+  - Right-click Installed unchanged (`Copy --graph`, `Open folder`,
+    `Delete…`).
+- `plugin/.../ui/OneLensToolWindow.kt` (Status tab UX):
+  - Header shows `Branch: <cur> · HEAD: <sha7>` below the backend line
+    (git info computed off-EDT during `refreshAsync`).
+  - Swing Timer ticks the "Last sync: X ago" label every 30 s using the
+    cached timestamp — no status poll, no git shell-out.
+  - Resources line (`Venv: X GB · Exports on disk: Y MB`) demoted to
+    smaller, dimmer font so it reads as secondary detail.
+
+### Added — Phase R Stage 1b · Plugin UI for snapshots (2026-04-20)
+
+Plugin-side UI for publish + list + delete of **local** release
+snapshots, merged into the existing OneLens tool window. No new panels
+clutter the sidebar — Snapshots is a second tab next to Status. GitHub
+Releases publish + remote list/pull are **not** surfaced in the plugin
+UI (scoped out per explicit preference — Python MCP tools remain for
+CLI use).
+
+- `plugin/.../snapshots/SnapshotManager.kt` — project service wrapping the
+  Python CLI (`onelens call-tool onelens_snapshot_*`). Uses `HttpRequests`
+  for the `snapshots.json` fetch with 404 → empty-index fallback, and
+  `GeneralCommandLine` + `CapturingProcessHandler` for publish/pull with
+  30-min timeout under a `Task.Backgroundable` indicator.
+- `plugin/.../snapshots/PublishSnapshotDialog.kt` — tag, repo,
+  include-embeddings toggle, local-vs-GitHub backend radios. Pre-fills
+  tag from `GitInfo.latestTag()` (semver-sorted). Shows
+  `Branch: <cur> · HEAD: <sha7>` info line, computed off-EDT.
+- `plugin/.../snapshots/GitInfo.kt` — thin wrapper over `git4idea.repo`
+  gated by `safe {}` (catches `NoClassDefFoundError` when Git4Idea
+  isn't loaded). Returns `null` gracefully on missing Git plugin or no
+  repo, so the dialog still opens with defaults.
+- `plugin/.../snapshots/SnapshotModels.kt` — `SnapshotIndex`,
+  `SnapshotEntry`, `LocalSnapshot` (kotlinx.serialization).
+- `plugin/.../actions/PublishSnapshotAction.kt` — reads tag/branch/sha in
+  `Task.Backgroundable`, opens dialog on EDT via `invokeLater`, then runs
+  the CLI in another `Task.Backgroundable`. Fixes an EDT violation that
+  tripped IntelliJ's `checkEdtAndReadAction` guard on `git tag -l`.
+- `plugin/.../actions/PullSnapshotAction.kt` — programmatic entrypoint
+  for the Snapshots tab row-activate.
+- `plugin/.../ui/OneLensSnapshotsToolWindow.kt` — `OneLensSnapshotsPanel`
+  with JBList of remote/local snapshot rows, bold section headers,
+  install-state badges. Hyperlink in the header opens
+  `onelens.workspace.yaml` when repo not configured. Right-click on a
+  local row → `Copy --graph`, `Open folder`, `Delete…` (confirm dialog;
+  cascade-deletes both the graph dir and the matching
+  `~/.onelens/context/<graph>@<tag>/` drawer dir).
+- `plugin/.../ui/OneLensToolWindow.kt` — factory now registers two
+  `Content`s: Status + Snapshots. Publish action mirrored on the Status
+  toolbar via `ActionManager` lookup (`onelens.PublishSnapshot`) so users
+  don't need to switch tabs for the common case.
+- `plugin/.../framework/workspace/Workspace.kt` — optional
+  `snapshots: { repo: <org/repo> }` block. Loader parses + exposes
+  `SnapshotsConfig`.
+- `plugin/src/main/resources/META-INF/plugin.xml` — removes the second
+  `OneLens Snapshots` tool window declaration (merged). Adds
+  `onelens.PublishSnapshot` action registration + optional
+  `<depends optional="true" config-file="git-features.xml">Git4Idea</depends>`
+  so `git4idea.*` resolves in our classloader when the bundled Git
+  plugin is present.
+- `plugin/src/main/resources/META-INF/git-features.xml` — empty config
+  stub required by the optional-dep contract.
+- `plugin/gradle.properties` — `Git4Idea` added to
+  `platformBundledPlugins` so the devkit resolves `git4idea` classpath
+  at compile time.
+
+### Added — Phase R Stage 1a · Release snapshots (CLI + skill) (2026-04-20)
+
+Developer-triggered release snapshots — immutable per-release graph
+bundles, shareable via GitHub Releases, queryable side-by-side with the
+live dev graph for API-diff / regression-hunt workflows.
+
+- `python/src/onelens/snapshots/publisher.py` — Lite-first producer.
+  Reads `~/.onelens/graphs/<graph>/<graph>.rdb` + optional context dir,
+  writes `manifest.json` v3 (schemaVersion, commitSha, embedder,
+  falkordbLite, includesEmbeddings), packages as
+  `onelens-snapshot-<graph>-<tag>.tgz`, computes SHA256, and optionally
+  (a) signs via `cosign sign-blob` keyless when the binary is on PATH,
+  (b) uploads to GitHub Release `<tag>` on `<repo>` via `gh release
+  upload`, and (c) maintains a pinned `onelens-index` tag hosting a
+  stable-URL `snapshots.json` catalog.
+- `python/src/onelens/snapshots/consumer.py` — list + pull + verify +
+  unpack. Fetches `snapshots.json` (one HTTPS GET), downloads bundle,
+  verifies SHA256 against the index (authoritative) with sidecar
+  fallback, cosign-verifies when the `.sig` asset is present, and
+  unpacks to `~/.onelens/graphs/<graph>@<tag>/`. Critically: runs
+  `GRAPH.COPY` + `GRAPH.DELETE` inside the restored rdb so the internal
+  graph key matches the `<graph>@<tag>` name (FalkorDB Lite binds the
+  graph key into the rdb — file rename alone doesn't rename the graph).
+  Guards against tarball path traversal via `extractall(filter='data')`.
+- `python/src/onelens/mcp_server.py` — 3 new `@mcp.tool` entries:
+  `onelens_snapshot_publish`, `onelens_snapshots_list`,
+  `onelens_snapshots_pull`. Tool count: 15 → 18.
+- `python/scripts/regen_cli.sh` hardened — resolves `fastmcp` via
+  `$HOME/.onelens/venv/bin/fastmcp`, exports the venv bin on PATH for
+  `generate-cli`'s internal subprocess spawn, adds `-f` (overwrite),
+  appends `main = app` alias so pyproject's `onelens` entry point
+  resolves. Previously the script failed silently on a fresh regen.
+- `skills/onelens/SKILL.md` — decision-tree rows for "compare two
+  releases / API diff" and "pull a release snapshot".
+- `skills/onelens/references/recipes.md` — recipe #16 cross-release diff
+  (endpoint surface, method signature drift, dead-code delta, SQL
+  migration inventory) with FalkorDB-safe two-query set-diff pattern.
+- `docs/design/phase-r-release-snapshots.md` — full spec covering OSS
+  vs Cloud split, signing (Sigstore keyless + SLSA L3), distribution
+  (GitHub Releases primary, S3/MinIO self-host planned), schema-version
+  forward-compat, risks, and a staged OSS-first ship order.
+
+Smoke-tested end-to-end on myapp:
+`onelens_snapshot_publish --backend local` → 31.3 MB tarball →
+GRAPH.COPY rename on unpack → `onelens_status --graph
+myapp@v0.1.0` returns the same 199,794 nodes / 1,044,467 edges /
+2,312 endpoints as the live graph.
+
+Plugin UX (Stage 1b — snapshot tool window + Publish / Pull actions)
+tracked separately.
+
+### Fixed — CLI no longer needs `fastmcp` on PATH (2026-04-20)
+
+`cli_generated.py` previously spawned `fastmcp run mcp_server.py` as a
+subprocess, which failed with `[Errno 2] No such file or directory:
+'fastmcp'` whenever the venv's `bin/` wasn't on `PATH` (common when users
+invoke `~/.onelens/venv/bin/onelens` directly). Rewired `CLIENT_SPEC` to
+the in-process `FastMCPTransport` — `Client(mcp_server)` talks to the
+server object in memory, no subprocess, no PATH dependency. Also faster
+startup (no Python re-import).
+
+Since `fastmcp generate-cli` has no flag for transport selection (confirmed
+against fastmcp docs + repo — manual `CLIENT_SPEC` edit is the documented
+pattern), added `python/scripts/regen_cli.sh` which wraps the generator and
+re-applies the patch. CLAUDE.md now points at the script instead of the raw
+generator to keep the fix alive across regenerations.
+
+### Changed — Dual-label consolidation (2026-04-20)
+
+Four conceptually-duplicate node pairs collapsed to single dual-labeled
+nodes. Same queries still work — both labels resolve to the same node.
+
+- `Field` ∪ `JpaColumn` → one node carrying both labels. Was emitting a
+  `JpaColumn` node per entity field AND the `Field` node MemberCollector
+  already wrote (~5.8k duplicates on motadata).
+- `Field` ∪ `EnumConstant` → one node. PSI returns enum constants as
+  fields; MemberCollector already emitted them. Was ~10k duplicates.
+- `Class` ∪ `JpaEntity` → one node (~748 duplicates).
+- `Class` ∪ `JpaRepository` → one node (~504 duplicates).
+
+Implementation: new `_batch_add_label` loader helper MERGEs the base
+node (`Field` / `Class`) and `SET n:ExtraLabel` tags the richer label
+while writing its domain props. Edges rewired to match on the base
+node's primary key (`fqn`), not the extra label's legacy key
+(`fieldFqn` / `classFqn`) — so `HAS_COLUMN`, `RELATES_TO`,
+`REPOSITORY_FOR`, `QUERIES` now query `fqn` on both sides.
+
+Bridge, not collapse: `Class -[:REGISTERED_AS]-> SpringBean` — @Bean
+factories don't have 1:1 class identity (bean class = return type, not
+the declaring class), so SpringBean stays separate. The edge still
+gives one-hop "is this class exposed as a bean?" queries.
+
+Breaking for cached Cypher: queries that did
+`MATCH (e:JpaEntity {classFqn: 'x'})` must now use `{fqn: 'x'}`.
+Same for `:JpaRepository`, `:JpaColumn` (use `fqn` not `fieldFqn`).
+Skill references + mental model updated in same push.
+
+### Fixed — No-duplicate pass on C2 / C3 collectors (2026-04-20)
+
+- `JpaCollector` now iterates `psiClass.fields` (own only) — inherited
+  fields from `@MappedSuperclass` are no longer re-emitted per subclass,
+  which was inflating `JpaColumn` counts and creating duplicate
+  `HAS_COLUMN` edges.
+- `AutoConfigCollector` dedupes by `classFqn` with autoconfig.imports
+  winning over spring.factories during Boot 2.7 migrations.
+- `SpringModelCollector` replaces the `bean.javaClass.getMethod` reflection
+  hack with direct PSI annotation reads for `@Scope` / `@Primary`
+  (handles annotation, `@Bean`, JAM, XML variants uniformly). Factory
+  method resolution now uses `CommonSpringBean.identifyingPsiElement`.
+- Loader side: `JpaColumn`, `HAS_COLUMN`, and Vue3 `Package→…` edges all
+  carry a collector-level `seen` set so re-entry is harmless. Vue3
+  `Package` now has `CONTAINS` edges to `Component` / `Composable` /
+  `Store` / `JsModule` via segment match on their `filePath`.
+
+### Changed — Phase 0.2 · Skill rewrite (wake-up protocol + reference split) (2026-04-20)
+
+Skill reorganised around the mempalace-style wake-up pattern that the new
+`onelens_status` enables.
+
+- **`SKILL.md`** rewritten — opens with the mandatory first-call protocol
+  (`onelens_status`), a decision tree keyed on `capabilities.*`, and a
+  Reads/Writes-split tool catalog. No project-specific graph names in
+  examples — generic placeholders for OSS portability.
+- **`references/capabilities.md`** (new) — what each status flag unlocks
+  and how the agent should branch.
+- **`references/graph-schema.md`** (new) — full node + edge vocabulary
+  (Class, Method, SpringBean, Endpoint, JpaEntity, JpaColumn, Migration,
+  SqlQuery, SqlStatement, TestCase, Drawer, …) with primary keys and key
+  properties.
+- **`references/queries-code.md`** (new) — Cypher patterns that replace
+  the dropped `impact` / `trace` / `entry_points` tools: polymorphic impact
+  via `OVERRIDES*0..` + `CALLS*1..5`, BFS trace, entry-point union,
+  bean injection, cross-stack trace.
+- **`references/queries-sql.md`** (new) — C6/C6.1 patterns: migration
+  timeline per entity, column-rename impact, exact-SELECT lookup,
+  coupling analysis.
+- **`references/queries-tests.md`** (new) — Q.code patterns: testKind
+  breakdown, coverage gaps, `MOCKS`/`SPIES` queries, tag taxonomy.
+- **`references/retrieval.md`** (new) — when to call `onelens_retrieve`
+  vs fallback to `onelens_search`; parameter guide.
+- `references/memory.md` / `PALACE.md` both deleted — memory/palace is
+  still an internal capability (not yet an OSS-user-facing feature), so
+  the deep guide is held back. Individual tools (`onelens_kg_*`,
+  `onelens_add_drawer`, `onelens_diary_*`, `onelens_find_tunnels`) stay
+  registered in the MCP server and listed in `SKILL.md`'s tool catalog
+  for agents that need them.
+- **`references/jvm.md`** / **`references/vue3.md`** — kept; prepended
+  migration banners mapping legacy tool commands to new call-tool forms.
+  Full body rewrite deferred (tracked follow-up).
+- Deleted `skills/onelens/PALACE.md` — content absorbed into `memory.md`.
+
+### Changed — Phase 0.1 · Unified MCP server, `onelens_*` namespace, tool consolidation (2026-04-20)
+
+One MCP server, one CLI, one namespace. The separate `onelens-palace` server
+and its `palace_*` tools are gone; all 15 surviving tools live under
+`onelens_*` in a single `mcp_server.py`.
+
+**Tool naming (all renamed to `onelens_*`)**:
+```
+Wake-up                 :: onelens_status
+Universal query         :: onelens_query
+Search                  :: onelens_search
+Hybrid retrieval        :: onelens_retrieve
+Imports (writes)        :: onelens_import, onelens_delta_import
+Memory (palace merged)  :: onelens_add_drawer, onelens_delete_drawer,
+                           onelens_check_duplicate,
+                           onelens_kg_add, onelens_kg_invalidate, onelens_kg_timeline,
+                           onelens_find_tunnels,
+                           onelens_diary_read, onelens_diary_write
+```
+
+**Tools dropped — promoted to skill patterns** (parameterised Cypher, no
+real app-side logic, keeping them was tool-surface bloat):
+- `trace`, `impact`, `entry_points` — replaced by documented Cypher in
+  `skills/onelens/references/queries-code.md` (skill rewrite in Phase 0.3).
+- `stats`, `context_stats`, `context_wakeup`, `context_recall`,
+  `context_import`, `context_search` — folded into `onelens_status` (the
+  capabilities probe tells the agent which paths are live) and
+  `onelens_import --context`.
+- `palace_status`, `palace_kg_query`, `palace_list_wings`,
+  `palace_list_rooms`, `palace_get_taxonomy`, `palace_search`,
+  `palace_kg_stats`, `palace_graph_stats`, `palace_traverse`,
+  `palace_get_aaak_spec` — folded into `onelens_status` / `onelens_query`.
+
+**`onelens_status` capabilities probe** — returned on every wake-up call so
+the skill's decision tree branches without guessing:
+```json
+"capabilities": {
+  "has_structural": true, "has_semantic": false,
+  "has_spring": true,     "has_jpa": true,
+  "has_sql": true,        "has_tests": false,
+  "has_vue3": false,      "has_memory": false,
+  "has_apps": true
+}
+```
+
+**Files**:
+- Deleted: `python/src/onelens/palace/server.py`,
+  `python/src/onelens/palace/cli_palace_generated.py`
+- Kept: palace business modules (`kg.py`, `drawers.py`, `diary.py`,
+  `tunnels.py`, `store.py`, `taxonomy.py`, `navigation.py`, `wal.py`,
+  `schemas.py`, `aaak.py`, `paths.py`, `protocol.py`) — the new unified
+  server imports them directly.
+- Regenerated: `python/src/onelens/cli_generated.py` via
+  `fastmcp generate-cli src/onelens/mcp_server.py`.
+- Dropped: `onelens-palace` entry point from `pyproject.toml`.
+
+**Breaking change for MCP clients**: any caller using the old
+`palace_*` or `impact` / `trace` / `entry_points` / `context_*` / `stats`
+tool names must migrate. Skill reference in Phase 0.3 documents the
+replacements.
+
+### Changed — Phase L · FalkorDB Lite is now the default backend (2026-04-20)
+
+Zero-Docker OSS UX. `pip install onelens` bundles Redis + FalkorDB as shared
+objects via `falkordblite`; the Python CLI spawns a local Redis subprocess
+with FalkorDB loaded, talking over a Unix socket. No TCP port, no
+`docker run`.
+
+- `ExportConfig.graphBackend` default flipped from `"falkordb"` → `"falkordblite"`.
+  Existing users who want the Docker path (for the :3001 browser UI or multi-
+  process access) can pin `graphBackend: falkordb` in settings; ExportService
+  preflight unchanged.
+- `pyproject.toml`: `falkordblite>=0.9.0` moved from `[lite]` extra into base
+  dependencies. The `[lite]` extra remains as a no-op for backward compat.
+- `falkordb_lite.py` rewritten — the previous version had a broken import
+  (`from falkordblite import FalkorDB`; real module is `redislite.falkordb_client`).
+  Never worked before this fix because Docker was the plugin default. Now
+  properly persists via per-graph `<db_path>/<graph_name>.rdb` files and
+  rebinds the graph handle after `clear()`.
+- **Benchmark** (motadata, 548 MB export, 10k classes, 80k methods, 630k call
+  edges): Docker 219.8 s vs Lite 279.7 s. ~27 % slower — acceptable for the
+  zero-setup win. Slowest delta is small-batch edge writes (higher Unix-socket
+  per-roundtrip latency).
+- **Feature parity verified**: Cypher, FTS (`db.idx.fulltext.createNodeIndex`),
+  vector indexes (`CREATE VECTOR INDEX ... cosine`), UNWIND batching — all
+  work identically to the Docker backend.
+- **Platform**: Linux + macOS only for v0.2 (bundled `.so` / `.dylib`). Windows
+  users must use the Docker backend until FalkorDB ships Windows binaries.
+- **No browser UI** — FalkorDB Docker ships :3001; Lite has none. Not a blocker
+  for CLI / skill / MCP-driven workflows; power users who want the visual
+  graph explorer keep using Docker.
+
+### Added — Phase Q.code · Test cases as first-class graph nodes (2026-04-20)
+
+Tests become a dual-labelled `:Method:TestCase` in the graph with structured
+classification. Detection is PSI-native via IntelliJ's `AnnotationUtil.CHECK_HIERARCHY`
+flag — same annotation-resolution Spring itself uses, so:
+
+- Direct `@SpringBootTest` on a test class ✅
+- `@SpringBootTest` on a superclass up the chain (motadata's
+  `CommonTest → MockHelper → BaseTest → …` pattern) ✅
+- `@SpringBootTest` on a meta-annotation (`@MyIntegrationTest`) ✅
+- Slices (`@DataJpaTest`, `@WebMvcTest`, `@JsonTest`, `@RestClientTest`, other `@AutoConfigureXxx`) ✅
+- Mockito-driven unit tests (`@ExtendWith(MockitoExtension.class)`) ✅
+- Cucumber step defs (`@Given` / `@When` / `@Then` / `@And`) ✅
+- JUnit 4 `@Test`, JUnit 5 `@Test` / `@ParameterizedTest` / `@RepeatedTest` /
+  `@TestFactory` / `@TestTemplate`, TestNG `@Test` ✅
+
+**`testKind` vocabulary** (10 fixed values for cross-project Cypher portability):
+`unit` · `unit-mocked` · `integration` · `slice-jpa` · `slice-web` ·
+`slice-json` · `slice-rest-client` · `slice-other` · `bdd` · `unknown`.
+
+**Captured properties**: `testClass`, `testFramework`, `tags` (@Tag values),
+`disabled`, `activeProfiles`, `springBootApp`, `usesMockito`, `usesTestcontainers`,
+`displayName`.
+
+**Edges added**:
+- `(:TestCase)-[:TESTS]->(:Method)` — derived from direct CALLS where the
+  target isn't itself a test. One-Cypher-pass post-dual-label.
+- `(:Class)-[:MOCKS]->(:SpringBean)` — from `@MockBean` fields.
+- `(:Class)-[:SPIES]->(:SpringBean)` — from `@SpyBean` fields.
+
+**Files**: `plugin/.../export/collectors/TestCollector.kt`,
+`ExportModels.TestCaseData/TestBeanBinding`, `loader._load_tests`.
+
+**OSS-ready**: zero yaml config for standard Spring/JUnit layouts — pet
+clinic, plain JUnit, and deep-hierarchy projects all classify correctly
+out of the box via CHECK_HIERARCHY.
+
+### Performance — orjson JSON parse (2026-04-20)
+
+- `loader.py`, `delta_loader.py`, `code_miner.py` swap stdlib `json.load` →
+  `orjson.loads` (falls back cleanly when orjson missing). Benchmarked 25%
+  faster on 120 MB synthetic exports; ~2-3 s saved per sync on motadata's
+  500 MB exports. Zero API change — same dicts out.
+- `pyproject.toml` adds `orjson>=3.9`.
+- `loader.load_full()` now logs JSON parse time so future perf regressions
+  surface in the log.
+
+### Added — Phase C6.1 · Column-level SQL → JPA mapping (2026-04-20)
+
+Beyond table-level edges, each `:SqlStatement` now links to the specific
+`:JpaColumn` nodes it references.
+
+- `sql_miner.StatementOut.columnRefs` — `[(tableName, columnName)]` extracted
+  via sqlglot's `scope.build_scope` for alias resolution. Qualified refs
+  (`r.priorityId`) bind via alias → table; unqualified refs bind only when
+  the scope has exactly one FROM source (otherwise dropped — ambiguous).
+  Nested subqueries/CTEs handled via recursive scope walk.
+- Loader: `(SqlStatement)-[:REFERENCES_COLUMN]->(JpaColumn)` edge. Lookup
+  map built via `:EXTENDS*0..6` walk so inherited columns
+  (e.g. `Request` table inherits `priorityId` from `TicketBase`,
+  `createdTime` from `FlotoBase`) resolve correctly.
+- Enables precise impact queries: "rename `Request.priorityId` — what
+  reports break?", "every query that reads FlotoBase.createdTime", column
+  popularity rankings.
+- 77.9% alias-resolution rate on motadata's 201 customer queries (9807
+  column refs, 7640 resolved). Remaining unresolved = unqualified columns
+  in multi-FROM statements (kept honest rather than guessing).
+
+### Added — Phase C6 · SQL surface (Flyway migrations + custom queries) (2026-04-20)
+
+First-class SQL in the graph alongside Java/JPA. Two opt-in kinds: `migration`
+(Flyway V-files) and `query` (custom customer SQL). Both split per-statement,
+so Cypher can pinpoint the exact `SELECT`/`ALTER` that touches an entity.
+
+- `miners/flyway_detector.py` — auto-scans `application*.{properties,yml}` for
+  `spring.flyway.locations`, resolves `classpath:X` → `src/main/resources/X/`
+  across every workspace root and every nested Maven module. Falls back to the
+  Flyway default (`classpath:db/migration`) when the dep is present but no
+  explicit location. `extraLocations` knob for non-standard setups (e.g.
+  motadata's `classpath:db/migration/tenants` which uses a custom loader).
+- `miners/sql_miner.py` — sqlglot-based parser, Postgres dialect,
+  `error_level=IGNORE`. Per-statement split (one `:SqlStatement` node per
+  `;`-separated statement), `opKind` vocabulary (`SELECT` / `CREATE_TABLE` /
+  `ALTER_TABLE` / `DROP_TABLE` / `UPDATE` / etc.), case-insensitive table
+  extraction. Body-size cap 200 KB per file + per statement.
+- Loader: new `_load_sql()` phase emits
+  `:Migration {version, description, dbKind, body}` /
+  `:SqlQuery {filename, body}` / `:SqlStatement {sql, opKind}` nodes,
+  wired via `:HAS_STATEMENT` (file → statement), `:QUERIES_TABLE`
+  (statement → JpaEntity), and DDL-specific `:CREATES_TABLE` /
+  `:ALTERS_TABLE` / `:DROPS_TABLE` edges.
+- Workspace yaml schema:
+  ```yaml
+  sql:
+    flyway:
+      autoDetect: true              # default
+      extraLocations: [classpath:…] # optional
+    queries:
+      - "<glob relative to any root>"
+  ```
+- `pyproject.toml` — adds `sqlglot>=25.0`.
+- Fixed-kind decision documented (see ADR-024 when landed).
+
+### Added — Phase C2 · App + Package primitives (2026-04-20)
+
+- `ExportDocument.apps: List<AppData>` / `ExportDocument.packages: List<PackageData>`
+  top-level keys. Spring: one `App` per `@SpringBootApplication` with
+  `scanBasePackages` / `scanBasePackageClasses` / `@ComponentScan` aliases
+  resolved. Vue3: one `App` per workspace root with `package.json` + `src/`
+  child folders as packages.
+- New collectors: `AppCollector.kt`, `PackageCollector.kt`. PSI-native
+  (Spring side) and filesystem-only (Vue3 side). No new plugin deps.
+- Loader emits `App` + `Package` nodes and three edge kinds: `PARENT_OF`
+  (Package→Package hierarchy), `CONTAINS` (App→Package, Package→Class).
+  `Class.packageName` is already stamped, so traversals like
+  `MATCH (a:App {type:'spring-boot'})-[:CONTAINS]->(:Package)-[:CONTAINS]->(c:Class) RETURN c.fqn`
+  work out of the box.
+- Package→App assignment uses longest-prefix match against each app's
+  scan packages; a class in `com.acme.order.service` correctly binds to
+  the order-service app even when the auth-service shares `com.acme`.
+- Per-app PageRank deferred to C2.1 — today's PageRank prebake runs
+  globally and remains correct; per-app scoping is a re-run of the same
+  algorithm over a sub-selection of (Method, CALLS) and lands next.
+
+### Added — Phase C3b · @Qualifier + spring.factories / AutoConfiguration.imports (2026-04-20)
+
+- `SpringInjection.qualifier: String?` — `SpringCollector` now reads
+  `@Qualifier("…")` on fields and constructor params; propagated to
+  `INJECTS` edges as an edge property so Cypher can filter wiring by
+  qualifier name.
+- `SpringAutoConfig` nodes — `AutoConfigCollector` scans the project's
+  filename index for `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`
+  (Boot 2.7+) and `META-INF/spring.factories` (legacy, keys ending in
+  `EnableAutoConfiguration` only). Each discovered class lands as a
+  `SpringAutoConfig` node with `source` (`autoconfig.imports` | `spring.factories`)
+  and originating file path.
+
+### Added — Phase C3c · JPA / Spring Data entity + repository graph (2026-04-20)
+
+- `JpaData` payload — new collector `JpaCollector` emits `JpaEntity` /
+  `JpaColumn` / `JpaRepository` nodes via PSI annotation scanning
+  (jakarta.persistence + javax.persistence). Captures `@Table` name and
+  schema, `@Id` / `@Column` / `@JoinColumn` metadata, and OneToOne /
+  OneToMany / ManyToOne / ManyToMany relations with inferred target
+  entity FQN.
+- Repository detection via `ClassInheritorsSearch` on Spring Data's
+  `Repository` / `CrudRepository` / `PagingAndSortingRepository` /
+  `JpaRepository` / `ReactiveCrudRepository` / `MongoRepository`. Type
+  parameter resolves the entity. Derived-query methods (`findBy…`,
+  `countBy…`, `existsBy…`, `deleteBy…`, etc.) emit `QUERIES` edges from
+  repo → method.
+- Loader wiring: `HAS_COLUMN` (`JpaEntity → JpaColumn`), `RELATES_TO`
+  (`JpaEntity → JpaEntity`, relation + owning field on the edge),
+  `REPOSITORY_FOR` (`JpaRepository → JpaEntity`), `QUERIES`
+  (`JpaRepository → Method`).
+- PSI-native — does NOT require `com.intellij.jpa` / `com.intellij.spring.data`
+  plugins. Works on IC, IU, WebStorm, PyCharm alike.
+
+### Added — Phase C3a · Spring-plugin model collector (2026-04-20)
+
+- `plugin/.../framework/springboot/SpringModelCollector.kt` — enumerates
+  beans via `SpringManager.getCombinedModel(module).getAllCommonBeans()`
+  per module. Picks up @Bean factory methods, XML beans, JAM beans,
+  aliases, @Primary, and scope resolved by the Spring plugin. Filtered
+  to `workspace.contains(file.path)` so library beans (starters, JDK)
+  don't pollute the graph.
+- `SpringBootCollector` merges annotation-scraped beans (existing
+  `SpringCollector`) with Spring-model beans. Dedupe key is
+  `classFqn|name|factoryMethodFqn` so an XML or @Bean definition for
+  the same class doesn't collapse into the stereotype bean. Runtime
+  guard `PluginManagerCore.getPlugin("com.intellij.spring")?.isEnabled`
+  prevents the JVM from resolving `SpringManager` on IDEs without the
+  Spring plugin (JAR still loads on IC / WebStorm).
+- `SpringBean` schema gets four additive fields: `primary: Boolean`,
+  `source: String` (`annotation | java-config | xml | jam`),
+  `factoryMethodFqn: String?`, `activeProfiles: List<String>`. All
+  default to stable values so legacy annotation-only output is
+  byte-compatible.
+- `gradle.properties` — `com.intellij.spring` and `com.intellij.spring.boot`
+  added to `platformBundledPlugins` so the Spring API jars are on the
+  compile classpath (IU ships them bundled).
+
+### Changed — Phase C1 · Workspace is now mandatory (non-null) (2026-04-19)
+
+- `CollectContext.workspace`, all JVM + Vue3 collector parameters, and
+  `Vue3Context.workspace` are non-nullable. Dual-path code
+  (`workspace?.scope(project) ?: projectScope(project)` and the
+  equivalent path-relativisation fork) is gone — one resolution at each
+  entry boundary (`ExportService.exportFull`,
+  `DeltaExportService.exportDelta*`, `ExportFullAction.actionPerformed`,
+  `AutoSyncFileListener`), propagated down.
+- `WorkspaceLoader.load(project)` returns non-null; implicit single-root
+  fallback handles the zero-config case inside the loader. Throws on
+  `project.basePath == null`; callers handle once, not every collector.
+- `ModuleCollector.detectBuildSystem` now probes every workspace root
+  (not just the primary) — a sibling Gradle root no longer resolves to
+  UNKNOWN because the primary root is Maven.
+- `ExportFullAction.countJavaFiles` sums every workspace root for the
+  >30% change heuristic.
+- Unused `GlobalSearchScope` imports stripped from JVM + Vue3 files.
+
+### Added — Phase C1 · Workspace abstraction landed (2026-04-19)
+
+- `plugin/.../framework/workspace/Workspace.kt` — adapter-agnostic
+  data class carrying N roots, a stable `graphId`, and policy knobs
+  (`duplicateFqn`, `deltaTracker`, `pagerankPerApp`). Exposes
+  `scope(project)` (GlobalSearchScope union across roots) and
+  `relativePath(file)` (first root match wins) so collectors no
+  longer depend on `project.basePath` / `projectScope(project)`.
+- `plugin/.../framework/workspace/WorkspaceLoader.kt` — parses
+  `onelens.workspace.yaml` (SnakeYAML) with relative `../sibling`
+  roots resolving against the config's directory, so the motadata
+  pattern (`- path: ../motadata_plugins`) just works. Absent config
+  falls back to an implicit single-root workspace → zero-config
+  compatibility with every existing single-repo user.
+- `CollectContext.workspace` — new field plumbed through
+  `FrameworkAdapter` SPI. SpringBoot + Vue3 adapters forward it.
+- All 7 JVM collectors (`ClassCollector`, `MemberCollector`,
+  `CallGraphCollector`, `InheritanceCollector`, `AnnotationCollector`,
+  `SpringCollector`, `ModuleCollector`) accept `workspace: Workspace?`
+  and swap `projectScope(project)` → `workspace.scope(project)` when
+  provided; null = legacy behaviour.
+- All 5 Vue3 collectors + `ModuleNameBinder` + `CallThroughResolver`
+  read `ctx.workspace?.scope(project)` with the same fallback.
+- `DeltaExportService` resolves the workspace per invocation and
+  resolves relative file paths against every root (first hit wins) —
+  lets a delta on a sibling-repo root work without the caller
+  knowing which root the file lives in.
+- `AutoSyncFileListener` filters events via `workspace.contains(path)`
+  and derives relative paths via `workspace.relativePath(file)`, so
+  auto-sync on a file in a secondary root no longer emits an
+  absolute path that the importer can't reconcile.
+- `ExportModels.ExportDocument` gains `workspace: WorkspaceInfo?` —
+  Python loader reads `graphId` for the `wing` stamp and logs when
+  `duplicateFqnPolicy` is non-default (only `merge` is enforced
+  today; other policies land in a follow-up).
+- `ExportService` / `ExportFullAction` / `AutoSyncService` now use
+  `workspace.graphId` (falling back to `project.name`) for the
+  graph name passed to `onelens import_graph`, plus the output JSON
+  filename — so a user-chosen `graph: myapp` in the YAML
+  lands consistently across full sync, delta, and auto-sync.
+
+Known limitations tracked in Phase C PROGRESS:
+
+- `DeltaTracker` still runs `git diff` against the primary root
+  only; secondary-root commits fall through to VFS timestamp /
+  ChangeListManager. Multi-git tracker per root is C1.1 follow-up.
+- `duplicateFqn` policy values other than `merge` log a warning and
+  fall back to `merge`; `warn` / `error` / `suffix-by-module`
+  enforcement is C1.2 follow-up.
+- App / Package adapter-agnostic primitives (ADR-022) not yet
+  emitted — targeted for C2.
+
+### Fixed — Full loader tolerates duplicate FQNs (2026-04-18)
+
+- `python/src/onelens/importer/loader.py::_batch_nodes` now uses
+  `MERGE` instead of `CREATE` in the bulk UNWIND query (and in the
+  per-item fallback path). Duplicate primary keys within a single
+  export — or across re-imports — now upsert with last-write-wins
+  semantics instead of aborting the batch. Unblocks multi-module
+  and plugin-fork JVM workspaces where the same class FQN
+  legitimately appears in multiple compile units (e.g. one-off
+  `com.acme.Constants` forks per client plugin).
+- Behaviour on non-duplicate graphs is unchanged; `MERGE` on the PK
+  when no existing node matches is equivalent to `CREATE` plus
+  property assignment.
+
+### Added — Workspace abstraction design spec (2026-04-18)
+
+- `docs/workspaces.md` — design doc for a declarative
+  `onelens.workspace.yaml` that names N roots, a stable graph id,
+  and policies for duplicate FQNs / multi-git delta / per-app
+  PageRank. Backward-compatible: absent config = current single-
+  root implicit workspace.
+- `docs/DECISIONS.md` ADR-021 — "Workspace abstraction for
+  multi-repo / multi-module indexing" records the motivation (three
+  independent hardcoded assumptions around `project.basePath`,
+  `projectScope`, and `CREATE` that all fall out of the same
+  missing concept) and the migration contract.
+- `docs/DECISIONS.md` ADR-022 — "App and Package as adapter-
+  agnostic graph primitives" — promotes `App` (per
+  `@SpringBootApplication`, per Vue root, per future entrypoint)
+  and `Package` to core node types owned by the schema, emitted by
+  whichever `FrameworkAdapter` detects them. Enables
+  cross-adapter queries like "which Vue apps hit endpoints defined
+  by which Spring apps" without per-adapter vocabulary
+  negotiation.
+- `docs/DECISIONS.md` ADR-023 — "Dual engine — PSI in-IDE,
+  metadata in CI" — long-term architecture for an
+  IntelliJ-optional import path that parses Spring Boot's
+  standardised metadata files
+  (`spring-configuration-metadata.json`,
+  `AutoConfiguration.imports`, `spring.factories`,
+  `spring.binders`) plus ASM bytecode. Same export schema, same
+  loader, either engine.
+
+### Added — Palace MCP (2026-04-18)
+
+- New parallel MCP server `onelens-palace` (console entry `onelens-palace`),
+  mirroring MemPalace's 19-tool surface over OneLens's FalkorDB + ChromaDB.
+  Existing `onelens.mcp_server` untouched. HTTP transport on port **8766**
+  (distinct from existing onelens MCP at 8765) when
+  `ONELENS_PALACE_HTTP=1`; otherwise stdio.
+- `onelens-palace` CLI auto-generated via `fastmcp generate-cli` →
+  `python/src/onelens/palace/cli_palace_generated.py`. Regen script
+  `scripts/regenerate-palace-cli.sh` post-processes fastmcp 3.x output
+  (flattens `call-tool` subcommand to top-level, pins fastmcp binary to
+  the venv, renames app). Console script points at the generated `app`.
+- `python/src/onelens/palace/`: 13 modules — `server` (FastMCP app),
+  `store`, `taxonomy`, `drawers`, `kg`, `tunnels`, `navigation`, `diary`,
+  `wal`, `paths`, `schemas`, `aaak`, `protocol`.
+- Tools: status / list_wings / list_rooms / get_taxonomy / search /
+  check_duplicate / get_aaak_spec / add_drawer / delete_drawer /
+  kg_add / kg_query / kg_invalidate / kg_timeline / kg_stats /
+  traverse / find_tunnels / graph_stats / diary_write / diary_read.
+  Positional args mirror MemPalace exactly; OneLens extensions are
+  keyword-only for drop-in compatibility.
+- Temporal KG lives in dedicated FalkorDB graph `onelens_palace_kg`
+  (Entity + ASSERTS edges). `kg_query` auto-projects structural edges
+  (CALLS/EXTENDS/...) from code wings when `entity` matches an FQN —
+  hand-authored facts and code structure unify in a single call.
+- WAL at `~/.onelens/palace/wal/write_log.jsonl` records every write.
+- Content-axis halls (`hall_signature`, `hall_event`, `hall_fact`,
+  `hall_doc`) added to `context/config.py` alongside existing
+  source-axis halls.
+- Skill cheat sheet `skills/onelens/PALACE.md` with tool-use guide.
+- New activated skill at `~/.claude/skills/onelens-palace/SKILL.md` (global) — triggers on
+  fact/memory/diary/cross-repo prompts (wings, rooms, tunnels,
+  kg_add/query, diary_write/read) with per-playbook tool sequences.
+- Design doc `docs/design/palace-mcp.md` (rev-1 plan).
+- Approved implementation plan captured at
+  `~/.claude/plans/parsed-launching-wolf.md`.
+
 ### Changed — scripts/bundle.sh multi-graph (2026-04-18)
 
 - `scripts/bundle.sh` accepts N graph names or `--all`; packs one

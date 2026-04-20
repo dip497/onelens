@@ -23,6 +23,10 @@
          IDEA Community/Ultimate once installed from Marketplace. -->
     <depends optional="true" config-file="framework-vue3.xml">org.jetbrains.plugins.vue</depends>
 
+    <!-- Git4Idea — enables GitInfo for Publish dialog tag pre-fill. Optional so
+         the plugin still loads on WebStorm without Git plugin. -->
+    <depends optional="true" config-file="git-features.xml">Git4Idea</depends>
+
     <!-- Framework adapter extension point. Each language/framework contributes an adapter. -->
     <extensionPoints>
         <extensionPoint name="frameworkAdapter"
@@ -64,10 +68,18 @@
                 class="com.onelens.plugin.actions.ToggleAutoSyncAction"
                 text="Toggle Auto-Sync"
                 description="Enable/disable automatic graph sync on file save"/>
+            <action id="OneLens.ToggleSemanticIndex"
+                class="com.onelens.plugin.actions.ToggleSemanticIndexAction"
+                text="Build Semantic Index"
+                description="ON = graph + ChromaDB embeddings for NL retrieve (slow first sync). OFF = graph-only, fast, structural queries only."/>
             <action id="OneLens.InstallSkill"
                 class="com.onelens.plugin.skill.InstallSkillAction"
                 text="Install Skill for Claude Code"
                 description="Copy OneLens skill (SKILL.md) to ~/.claude/skills/. Claude Code invokes `onelens` via its Bash tool — no daemon, no MCP."/>
+            <action id="onelens.PublishSnapshot"
+                class="com.onelens.plugin.actions.PublishSnapshotAction"
+                text="Publish Snapshot…"
+                description="Bundle the current graph as a release snapshot — local file or GitHub Release upload."/>
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </group>
     </actions>

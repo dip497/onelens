@@ -9,51 +9,20 @@ import sys
 from typing import Annotated
 
 import cyclopts
+import mcp.types
+from rich.console import Console
 
-# NOTE: fastmcp.Client + mcp.types + rich.Console + pydantic pull in ~3s of
-# eager imports. Defer them to the first tool invocation so `--help`,
-# `daemon status`, and anything that doesn't actually hit the server stay
-# sub-second.
+from fastmcp import Client
 
+# In-process transport — no subprocess, no PATH dependency on `fastmcp` binary.
+from onelens.mcp_server import mcp as _server
+CLIENT_SPEC = _server
 
-def _build_client_spec():
-    """Lazily pick HTTP daemon (warm, ~200ms) or stdio spawn (cold, ~30s)."""
-    import os as _os
+app = cyclopts.App(name="mcp_server", help="CLI for mcp_server MCP server")
+call_tool_app = cyclopts.App(name="call-tool", help="Call a tool on the server")
+app.command(call_tool_app)
 
-    from fastmcp.client.transports import StdioTransport
-    from onelens.daemon import DEFAULT_PORT as _DAEMON_PORT, status as _daemon_status
-
-    url = _os.environ.get("ONELENS_SERVER_URL")
-    if not url and _daemon_status(_DAEMON_PORT)["reachable"]:
-        url = f"http://127.0.0.1:{_DAEMON_PORT}/mcp/"
-    if url:
-        return url
-    return StdioTransport(command=sys.executable, args=["-m", "onelens.mcp_server"])
-
-
-class _LazyConsole:
-    """Proxy for `rich.console.Console` that defers the import until used."""
-
-    _inner = None
-
-    def _get(self):
-        if self._inner is None:
-            from rich.console import Console
-
-            self._inner = Console()
-        return self._inner
-
-    def __getattr__(self, name):
-        return getattr(self._get(), name)
-
-
-def _get_console():
-    return console
-
-
-console = _LazyConsole()
-
-app = cyclopts.App(name="onelens", help="OneLens - Code Knowledge Graph for Java/Spring Boot")
+console = Console()
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +31,9 @@ app = cyclopts.App(name="onelens", help="OneLens - Code Knowledge Graph for Java
 
 
 def _print_tool_result(result):
-    import mcp.types as _mcp_types
-
-    console = _get_console()
     if result.is_error:
         for block in result.content:
-            if isinstance(block, _mcp_types.TextContent):
+            if isinstance(block, mcp.types.TextContent):
                 console.print(f"[bold red]Error:[/bold red] {block.text}")
             else:
                 console.print(f"[bold red]Error:[/bold red] {block}")
@@ -78,25 +44,24 @@ def _print_tool_result(result):
         return
 
     for block in result.content:
-        if isinstance(block, _mcp_types.TextContent):
+        if isinstance(block, mcp.types.TextContent):
             console.print(block.text)
-        elif isinstance(block, _mcp_types.ImageContent):
+        elif isinstance(block, mcp.types.ImageContent):
             size = len(block.data) * 3 // 4
             console.print(f"[dim][Image: {block.mimeType}, ~{size} bytes][/dim]")
-        elif isinstance(block, _mcp_types.AudioContent):
+        elif isinstance(block, mcp.types.AudioContent):
             size = len(block.data) * 3 // 4
             console.print(f"[dim][Audio: {block.mimeType}, ~{size} bytes][/dim]")
 
 
 async def _call_tool(tool_name: str, arguments: dict) -> None:
-    from fastmcp import Client
-
+    # Filter out None values and empty lists (defaults for optional array params)
     filtered = {
         k: v
         for k, v in arguments.items()
         if v is not None and (not isinstance(v, list) or len(v) > 0)
     }
-    async with Client(_build_client_spec()) as client:
+    async with Client(CLIENT_SPEC) as client:
         result = await client.call_tool(tool_name, filtered, raise_on_error=False)
         _print_tool_result(result)
         if result.is_error:
@@ -111,8 +76,7 @@ async def _call_tool(tool_name: str, arguments: dict) -> None:
 @app.command
 async def list_tools() -> None:
     """List available tools."""
-    from fastmcp import Client as _Client
-    async with _Client(_build_client_spec()) as client:
+    async with Client(CLIENT_SPEC) as client:
         tools = await client.list_tools()
         if not tools:
             console.print("[dim]No tools found.[/dim]")
@@ -137,8 +101,7 @@ async def list_tools() -> None:
 @app.command
 async def list_resources() -> None:
     """List available resources."""
-    from fastmcp import Client as _Client
-    async with _Client(_build_client_spec()) as client:
+    async with Client(CLIENT_SPEC) as client:
         resources = await client.list_resources()
         if not resources:
             console.print("[dim]No resources found.[/dim]")
@@ -155,8 +118,7 @@ async def list_resources() -> None:
 @app.command
 async def read_resource(uri: Annotated[str, cyclopts.Parameter(help="Resource URI")]) -> None:
     """Read a resource by URI."""
-    from fastmcp import Client as _Client
-    async with _Client(_build_client_spec()) as client:
+    async with Client(CLIENT_SPEC) as client:
         contents = await client.read_resource(uri)
         for block in contents:
             if isinstance(block, mcp.types.TextResourceContents):
@@ -169,8 +131,7 @@ async def read_resource(uri: Annotated[str, cyclopts.Parameter(help="Resource UR
 @app.command
 async def list_prompts() -> None:
     """List available prompts."""
-    from fastmcp import Client as _Client
-    async with _Client(_build_client_spec()) as client:
+    async with Client(CLIENT_SPEC) as client:
         prompts = await client.list_prompts()
         if not prompts:
             console.print("[dim]No prompts found.[/dim]")
@@ -200,8 +161,7 @@ async def get_prompt(
         key, value = arg.split("=", 1)
         parsed[key] = value
 
-    from fastmcp import Client as _Client
-    async with _Client(_build_client_spec()) as client:
+    async with Client(CLIENT_SPEC) as client:
         result = await client.get_prompt(name, parsed or None)
         for msg in result.messages:
             console.print(f"[bold]{msg.role}:[/bold]")
@@ -219,256 +179,324 @@ async def get_prompt(
 # Tool commands (generated from server schema)
 # ---------------------------------------------------------------------------
 
-@app.command(name='import_graph')
-async def import_graph(
-    export_path: Annotated[str, cyclopts.Parameter(help="")],
+@call_tool_app.command(name='onelens_status')
+async def onelens_status(
     *,
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
     db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
-    clear: Annotated[bool, cyclopts.Parameter(help="")] = False,
-    context: Annotated[bool, cyclopts.Parameter(help="")] = False,
 ) -> None:
-    '''Import an export JSON (auto-detects full vs delta) into the knowledge graph.
+    '''Session wake-up. First tool to call in every session.
 
-Set context=True to also index methods/classes into ChromaDB for semantic search.'''
-    await _call_tool('import_graph', {'export_path': export_path, 'graph': graph, 'backend': backend, 'db_path': db_path, 'clear': clear, 'context': context})
+Returns capabilities + node counts so the skill\'s decision tree knows
+which subsequent tools to invoke (semantic retrieve vs FTS search,
+SQL-surface queries vs code-only, …). Works on any graph — code
+graphs, Vue3 graphs, and the palace memory graph alike.'''
+    await _call_tool('onelens_status', {'graph': graph, 'backend': backend, 'db_path': db_path})
 
 
-@app.command(name='delta_import')
-async def delta_import(
-    delta_path: Annotated[str, cyclopts.Parameter(help="")],
+@call_tool_app.command(name='onelens_query')
+async def onelens_query(
     *,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
-    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
-) -> None:
-    '''Apply a delta export to an existing graph.'''
-    await _call_tool('delta_import', {'delta_path': delta_path, 'graph': graph, 'backend': backend, 'db_path': db_path})
-
-
-@app.command(name='stats')
-async def stats(
-    *,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
-    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
-) -> None:
-    '''Return node counts per label for a graph.'''
-    await _call_tool('stats', {'graph': graph, 'backend': backend, 'db_path': db_path})
-
-
-@app.command(name='query')
-async def query(
     cypher: Annotated[str, cyclopts.Parameter(help="")],
-    *,
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
     db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
     limit: Annotated[int, cyclopts.Parameter(help="")] = 100,
 ) -> None:
-    '''Run a raw Cypher query. Returns up to `limit` rows.'''
-    await _call_tool('query', {'cypher': cypher, 'graph': graph, 'backend': backend, 'db_path': db_path, 'limit': limit})
+    '''Run raw Cypher against any graph. Returns up to `limit` rows.
+
+Use this for impact analysis, trace, entry-point enumeration, schema
+introspection — the skill docs have ready-made patterns for each of
+those. Works on code graphs and the palace memory graph uniformly.'''
+    await _call_tool('onelens_query', {'cypher': cypher, 'graph': graph, 'backend': backend, 'db_path': db_path, 'limit': limit})
 
 
-@app.command(name='search')
-async def search(
-    term: Annotated[str, cyclopts.Parameter(help="")],
+@call_tool_app.command(name='onelens_search')
+async def onelens_search(
     *,
+    term: Annotated[str, cyclopts.Parameter(help="")],
     node_type: Annotated[str, cyclopts.Parameter(help="")] = '',
-    semantic: Annotated[bool, cyclopts.Parameter(help="")] = False,
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
     db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
     n_results: Annotated[int, cyclopts.Parameter(help="")] = 50,
 ) -> None:
-    '''Search code by name (FTS, supports User*, %auth%1) or by meaning (semantic=True).
+    '''Name-based search across graph nodes (FTS, supports `User*`, `%auth%`).
 
-node_type: one of "class", "method", "endpoint", or "" for any.
-Semantic requires the graph to have been imported with context=True (ChromaDB).'''
-    await _call_tool('search', {'term': term, 'node_type': node_type, 'semantic': semantic, 'graph': graph, 'backend': backend, 'db_path': db_path, 'n_results': n_results})
+`node_type`: one of "class", "method", "endpoint", "drawer", or "" for any.
+For conceptual / natural-language questions, use `onelens_retrieve`
+instead — that one reads actual code content.'''
+    await _call_tool('onelens_search', {'term': term, 'node_type': node_type, 'graph': graph, 'backend': backend, 'db_path': db_path, 'n_results': n_results})
 
 
-@app.command(name='trace')
-async def trace(
-    target: Annotated[str, cyclopts.Parameter(help="")],
+@call_tool_app.command(name='onelens_retrieve')
+async def onelens_retrieve(
     *,
-    entry_type: Annotated[str, cyclopts.Parameter(help="")] = 'method',
-    depth: Annotated[int, cyclopts.Parameter(help="")] = 5,
-    http_method: Annotated[str, cyclopts.Parameter(help="")] = '',
-    include_external: Annotated[bool, cyclopts.Parameter(help="")] = False,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
-    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
-) -> None:
-    '''Trace execution flow forward from an entry point.
-
-target: method FQN or endpoint path. depth: 1-5.'''
-    await _call_tool('trace', {'target': target, 'entry_type': entry_type, 'depth': depth, 'http_method': http_method, 'include_external': include_external, 'graph': graph, 'backend': backend, 'db_path': db_path})
-
-
-@app.command(name='entry_points')
-async def entry_points(
-    *,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
-    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
-) -> None:
-    '''List all entry points (REST endpoints, @Scheduled methods, main()).'''
-    await _call_tool('entry_points', {'graph': graph, 'backend': backend, 'db_path': db_path})
-
-
-@app.command(name='impact')
-async def impact(
-    method_fqn: Annotated[str, cyclopts.Parameter(help="")],
-    *,
-    depth: Annotated[int, cyclopts.Parameter(help="")] = 5,
-    polymorphic: Annotated[bool, cyclopts.Parameter(help="")] = True,
-    bean_filter: Annotated[bool, cyclopts.Parameter(help="")] = True,
-    precise_only: Annotated[bool, cyclopts.Parameter(help="")] = False,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
-    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
-) -> None:
-    '''Find REST endpoints impacted if method_fqn changes.
-
-polymorphic: walk OVERRIDES for interface/template-method dispatch (default on).
-bean_filter: narrow polymorphic hits to controllers with a field of the target\'s type.
-precise_only: show only endpoints reached via direct CALLS edges.'''
-    await _call_tool('impact', {'method_fqn': method_fqn, 'depth': depth, 'polymorphic': polymorphic, 'bean_filter': bean_filter, 'precise_only': precise_only, 'graph': graph, 'backend': backend, 'db_path': db_path})
-
-
-@app.command(name='retrieve')
-async def retrieve(
     query: Annotated[str, cyclopts.Parameter(help="")],
-    *,
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
     n_results: Annotated[int, cyclopts.Parameter(help="")] = 10,
     fanout: Annotated[int, cyclopts.Parameter(help="")] = 50,
     include_snippets: Annotated[bool, cyclopts.Parameter(help="")] = True,
     include_neighbors: Annotated[bool, cyclopts.Parameter(help="")] = False,
     rerank: Annotated[bool, cyclopts.Parameter(help="")] = True,
-    rerank_pool: Annotated[int, cyclopts.Parameter(help="")] = 50,
+    rerank_pool: Annotated[int, cyclopts.Parameter(help="")] = 100,
     project_root: Annotated[str, cyclopts.Parameter(help="")] = '',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
     db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
 ) -> None:
-    '''Hybrid FTS + semantic retrieval with source code snippets (Augment-parity).
+    '''Hybrid FTS + semantic retrieval with source code snippets.
 
-Returns top-K ranked hits with actual source code ready for an LLM to read.
-Requires both FalkorDB (structural) and --context (ChromaDB) indexed.
-project_root can be set via ONELENS_PROJECT_ROOT env if not passed.'''
-    await _call_tool('retrieve', {'query': query, 'graph': graph, 'n_results': n_results, 'fanout': fanout, 'include_snippets': include_snippets, 'include_neighbors': include_neighbors, 'rerank': rerank, 'rerank_pool': rerank_pool, 'project_root': project_root, 'backend': backend, 'db_path': db_path})
+Gated by `onelens_status.capabilities.has_semantic` — if false, fall back
+to `onelens_search`. Returns top-K ranked hits with actual source code,
+not just FQNs, so an LLM can read the methods directly.'''
+    await _call_tool('onelens_retrieve', {'query': query, 'graph': graph, 'n_results': n_results, 'fanout': fanout, 'include_snippets': include_snippets, 'include_neighbors': include_neighbors, 'rerank': rerank, 'rerank_pool': rerank_pool, 'project_root': project_root, 'backend': backend, 'db_path': db_path})
 
 
-@app.command(name='context_import')
-async def context_import(
+@call_tool_app.command(name='onelens_import')
+async def onelens_import(
+    *,
     export_path: Annotated[str, cyclopts.Parameter(help="")],
-    *,
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-) -> None:
-    '''Index a JSON export into ChromaDB for semantic search (standalone, no FalkorDB).'''
-    await _call_tool('context_import', {'export_path': export_path, 'graph': graph})
-
-
-@app.command(name='context_search')
-async def context_search(
-    query: Annotated[str, cyclopts.Parameter(help="")],
-    *,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    entity_type: Annotated[str, cyclopts.Parameter(help="")] = '',
-    room: Annotated[str, cyclopts.Parameter(help="")] = '',
-    n_results: Annotated[int, cyclopts.Parameter(help="")] = 10,
-) -> None:
-    '''Pure semantic search over ChromaDB (no FalkorDB).
-
-entity_type: one of "method", "class", "endpoint", or "" for any.
-room: Java package name filter, or "" for none.'''
-    await _call_tool('context_search', {'query': query, 'graph': graph, 'entity_type': entity_type, 'room': room, 'n_results': n_results})
-
-
-@app.command(name='context_wakeup')
-async def context_wakeup(
-    *,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordb',
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
     db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
+    clear: Annotated[bool, cyclopts.Parameter(help="")] = False,
+    context: Annotated[bool, cyclopts.Parameter(help="")] = False,
 ) -> None:
-    '''Generate L0+L1 context (~900 tokens) for AI system prompt injection.'''
-    await _call_tool('context_wakeup', {'graph': graph, 'backend': backend, 'db_path': db_path})
+    '''Import an export JSON (auto-detects full vs delta).
+
+`context=True` also runs the ChromaDB semantic mining pass so
+`onelens_retrieve` works afterwards.'''
+    await _call_tool('onelens_import', {'export_path': export_path, 'graph': graph, 'backend': backend, 'db_path': db_path, 'clear': clear, 'context': context})
 
 
-@app.command(name='context_recall')
-async def context_recall(
+@call_tool_app.command(name='onelens_delta_import')
+async def onelens_delta_import(
     *,
+    delta_path: Annotated[str, cyclopts.Parameter(help="")],
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
-    room: Annotated[str, cyclopts.Parameter(help="")] = '',
-    entity_type: Annotated[str, cyclopts.Parameter(help="")] = '',
-    n_results: Annotated[int, cyclopts.Parameter(help="")] = 10,
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
+    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
+    context: Annotated[bool, cyclopts.Parameter(help="")] = False,
 ) -> None:
-    '''L2 filtered retrieval by package (room) or entity type.
-
-entity_type: "method", "class", "endpoint", or "" for any.'''
-    await _call_tool('context_recall', {'graph': graph, 'room': room, 'entity_type': entity_type, 'n_results': n_results})
+    '''Apply a delta export explicitly (bypasses the auto-detect in onelens_import).'''
+    await _call_tool('onelens_delta_import', {'delta_path': delta_path, 'graph': graph, 'backend': backend, 'db_path': db_path, 'context': context})
 
 
-@app.command(name='context_stats')
-async def context_stats(
+@call_tool_app.command(name='onelens_add_drawer')
+async def onelens_add_drawer(
     *,
-    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
+    wing: Annotated[str, cyclopts.Parameter(help="")],
+    room: Annotated[str, cyclopts.Parameter(help="")],
+    content: Annotated[str, cyclopts.Parameter(help="")],
+    source_file: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    added_by: Annotated[str, cyclopts.Parameter(help="")] = 'mcp',
+    hall: Annotated[str, cyclopts.Parameter(help="")] = 'hall_fact',
+    kind: Annotated[str, cyclopts.Parameter(help="")] = 'note',
+    importance: Annotated[float, cyclopts.Parameter(help="")] = 1.0,
+    fqn: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    force: Annotated[bool, cyclopts.Parameter(help="")] = False,
 ) -> None:
-    '''Show context graph (ChromaDB) statistics.'''
-    await _call_tool('context_stats', {'graph': graph})
+    '''Store content in a wing/room drawer. Runs embedding + dedups unless force=True.'''
+    # Parse JSON parameters
+    source_file_parsed = json.loads(source_file) if isinstance(source_file, str) else source_file
+    fqn_parsed = json.loads(fqn) if isinstance(fqn, str) else fqn
+
+    await _call_tool('onelens_add_drawer', {'wing': wing, 'room': room, 'content': content, 'source_file': source_file_parsed, 'added_by': added_by, 'hall': hall, 'kind': kind, 'importance': importance, 'fqn': fqn_parsed, 'force': force})
 
 
-# ---------------------------------------------------------------------------
-# Daemon lifecycle (not MCP tools — manage the long-running warm server)
-# ---------------------------------------------------------------------------
-
-daemon_app = cyclopts.App(name="daemon", help="Manage the long-running warm MCP HTTP server")
-app.command(daemon_app)
-
-
-@daemon_app.command(name="start")
-def daemon_start(
+@call_tool_app.command(name='onelens_delete_drawer')
+async def onelens_delete_drawer(
     *,
-    port: Annotated[int, cyclopts.Parameter(help="Bind port")] = 8765,
+    drawer_id: Annotated[str, cyclopts.Parameter(help="")],
 ) -> None:
-    """Start the MCP HTTP daemon with eager Qwen3 + mxbai-rerank warmup (~30s).
-
-    Subsequent `onelens` calls auto-detect it and use warm path (~200ms).
-    """
-    from onelens import daemon as _d
-
-    console.print_json(json.dumps(_d.start(port)))
+    '''Delete one drawer by id.'''
+    await _call_tool('onelens_delete_drawer', {'drawer_id': drawer_id})
 
 
-@daemon_app.command(name="stop")
-def daemon_stop(
+@call_tool_app.command(name='onelens_check_duplicate')
+async def onelens_check_duplicate(
     *,
-    port: Annotated[int, cyclopts.Parameter(help="Daemon port")] = 8765,
+    content: Annotated[str, cyclopts.Parameter(help="")],
+    threshold: Annotated[float, cyclopts.Parameter(help="")] = 0.9,
+    wing: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
 ) -> None:
-    """Stop the MCP HTTP daemon."""
-    from onelens import daemon as _d
+    '''Semantic dedup check before `onelens_add_drawer`. Returns hits ≥ threshold.'''
+    # Parse JSON parameters
+    wing_parsed = json.loads(wing) if isinstance(wing, str) else wing
 
-    console.print_json(json.dumps(_d.stop(port)))
+    await _call_tool('onelens_check_duplicate', {'content': content, 'threshold': threshold, 'wing': wing_parsed})
 
 
-@daemon_app.command(name="status")
-def daemon_status(
+@call_tool_app.command(name='onelens_kg_add')
+async def onelens_kg_add(
     *,
-    port: Annotated[int, cyclopts.Parameter(help="Daemon port")] = 8765,
+    subject: Annotated[str, cyclopts.Parameter(help="")],
+    predicate: Annotated[str, cyclopts.Parameter(help="")],
+    object: Annotated[str, cyclopts.Parameter(help="")],
+    valid_from: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    confidence: Annotated[float, cyclopts.Parameter(help="")] = 1.0,
+    source_closet: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    ended: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    wing: Annotated[str, cyclopts.Parameter(help="")] = 'global',
 ) -> None:
-    """Show daemon status (pid, reachable, log path)."""
-    from onelens import daemon as _d
+    '''Add a temporal fact triple. Dedupes by hash(s|p|o|valid_from).'''
+    # Parse JSON parameters
+    valid_from_parsed = json.loads(valid_from) if isinstance(valid_from, str) else valid_from
+    source_closet_parsed = json.loads(source_closet) if isinstance(source_closet, str) else source_closet
+    ended_parsed = json.loads(ended) if isinstance(ended, str) else ended
 
-    console.print_json(json.dumps(_d.status(port)))
+    await _call_tool('onelens_kg_add', {'subject': subject, 'predicate': predicate, 'object': object, 'valid_from': valid_from_parsed, 'confidence': confidence, 'source_closet': source_closet_parsed, 'ended': ended_parsed, 'wing': wing})
 
 
-def main() -> None:
-    """Entry point for the `onelens` console script."""
-    app()
+@call_tool_app.command(name='onelens_kg_invalidate')
+async def onelens_kg_invalidate(
+    *,
+    fact_id: Annotated[str, cyclopts.Parameter(help="")],
+    ended_at: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    reason: Annotated[str, cyclopts.Parameter(help="")] = '',
+) -> None:
+    '''Close an existing fact by id (temporal retraction; history preserved).'''
+    # Parse JSON parameters
+    ended_at_parsed = json.loads(ended_at) if isinstance(ended_at, str) else ended_at
+
+    await _call_tool('onelens_kg_invalidate', {'fact_id': fact_id, 'ended_at': ended_at_parsed, 'reason': reason})
+
+
+@call_tool_app.command(name='onelens_kg_timeline')
+async def onelens_kg_timeline(
+    *,
+    entity: Annotated[str, cyclopts.Parameter(help="")],
+    predicate: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    since: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    until: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+) -> None:
+    '''Time-bucketed view of facts touching an entity — see how knowledge evolved.'''
+    # Parse JSON parameters
+    predicate_parsed = json.loads(predicate) if isinstance(predicate, str) else predicate
+    since_parsed = json.loads(since) if isinstance(since, str) else since
+    until_parsed = json.loads(until) if isinstance(until, str) else until
+
+    await _call_tool('onelens_kg_timeline', {'entity': entity, 'predicate': predicate_parsed, 'since': since_parsed, 'until': until_parsed})
+
+
+@call_tool_app.command(name='onelens_find_tunnels')
+async def onelens_find_tunnels(
+    *,
+    wing_a: Annotated[str, cyclopts.Parameter(help="")],
+    wing_b: Annotated[str, cyclopts.Parameter(help="")],
+    threshold: Annotated[float, cyclopts.Parameter(help="")] = 0.7,
+    n_results: Annotated[int, cyclopts.Parameter(help="")] = 20,
+) -> None:
+    '''Cross-wing semantic similarity — concepts shared across repos / subsystems.'''
+    await _call_tool('onelens_find_tunnels', {'wing_a': wing_a, 'wing_b': wing_b, 'threshold': threshold, 'n_results': n_results})
+
+
+@call_tool_app.command(name='onelens_diary_write')
+async def onelens_diary_write(
+    *,
+    wing: Annotated[str, cyclopts.Parameter(help="")],
+    content: Annotated[str, cyclopts.Parameter(help="")],
+    author: Annotated[str, cyclopts.Parameter(help="")] = 'mcp',
+    date: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+) -> None:
+    '''Append a diary entry for `wing`. WAL-backed — crash-safe.'''
+    # Parse JSON parameters
+    date_parsed = json.loads(date) if isinstance(date, str) else date
+
+    await _call_tool('onelens_diary_write', {'wing': wing, 'content': content, 'author': author, 'date': date_parsed})
+
+
+@call_tool_app.command(name='onelens_diary_read')
+async def onelens_diary_read(
+    *,
+    wing: Annotated[str, cyclopts.Parameter(help="")],
+    since: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    until: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    limit: Annotated[int, cyclopts.Parameter(help="")] = 50,
+) -> None:
+    '''Read diary entries for a wing, optionally time-ranged.'''
+    # Parse JSON parameters
+    since_parsed = json.loads(since) if isinstance(since, str) else since
+    until_parsed = json.loads(until) if isinstance(until, str) else until
+
+    await _call_tool('onelens_diary_read', {'wing': wing, 'since': since_parsed, 'until': until_parsed, 'limit': limit})
+
+
+@call_tool_app.command(name='onelens_snapshot_publish')
+async def onelens_snapshot_publish(
+    *,
+    graph: Annotated[str, cyclopts.Parameter(help="")],
+    tag: Annotated[str, cyclopts.Parameter(help="")],
+    repo: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
+    include_embeddings: Annotated[bool, cyclopts.Parameter(help="")] = False,
+    sign: Annotated[bool, cyclopts.Parameter(help="")] = True,
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'local',
+) -> None:
+    '''Bundle `<graph>` as `<graph>@<tag>` snapshot.
+
+Writes an immutable tarball with bundle-internal `manifest.json`,
+SHA256 checksum, and (when cosign is on PATH) a Sigstore signature.
+`backend=\'github\'` uploads to GitHub Release `<tag>` on `<repo>` and
+maintains a `snapshots.json` index on the pinned `onelens-index` tag.'''
+    # Parse JSON parameters
+    repo_parsed = json.loads(repo) if isinstance(repo, str) else repo
+
+    await _call_tool('onelens_snapshot_publish', {'graph': graph, 'tag': tag, 'repo': repo_parsed, 'include_embeddings': include_embeddings, 'sign': sign, 'backend': backend})
+
+
+@call_tool_app.command(name='onelens_snapshots_list')
+async def onelens_snapshots_list(
+    *,
+    graph: Annotated[str, cyclopts.Parameter(help="")],
+    repo: Annotated[str, cyclopts.Parameter(help="")],
+) -> None:
+    '''List release snapshots available for `<graph>` in GitHub `<repo>`.
+
+Reads the `snapshots.json` asset on the pinned `onelens-index` tag —
+one HTTPS GET, no pagination. Returns an empty list when the repo has
+never published a snapshot.'''
+    await _call_tool('onelens_snapshots_list', {'graph': graph, 'repo': repo})
+
+
+@call_tool_app.command(name='onelens_snapshots_pull')
+async def onelens_snapshots_pull(
+    *,
+    graph: Annotated[str, cyclopts.Parameter(help="")],
+    tag: Annotated[str, cyclopts.Parameter(help="")],
+    repo: Annotated[str, cyclopts.Parameter(help="")],
+    verify: Annotated[bool, cyclopts.Parameter(help="")] = True,
+) -> None:
+    '''Download, verify, and install a release snapshot as `<graph>@<tag>`.
+
+Authoritative SHA256 comes from the `snapshots.json` index, falling
+back to the `.sha256` sidecar. Optionally cosign-verifies when the
+`.sig` asset is present. Restored graph appears in subsequent
+`onelens_status` calls under `--graph <graph>@<tag>`.'''
+    await _call_tool('onelens_snapshots_pull', {'graph': graph, 'tag': tag, 'repo': repo, 'verify': verify})
+
+
+@call_tool_app.command(name='onelens_snapshot_promote')
+async def onelens_snapshot_promote(
+    *,
+    graph: Annotated[str, cyclopts.Parameter(help="")],
+    tag: Annotated[str, cyclopts.Parameter(help="")],
+) -> None:
+    '''Seed the live graph from an installed `<graph>@<tag>` snapshot.
+
+Copies the snapshot rdb + context dir into the live-graph slot,
+renames the internal FalkorDB Lite graph key back to `<graph>`, and
+writes `~/.onelens/graphs/<graph>/.onelens-baseline` so the next
+delta sync uses the snapshot\'s commit SHA as the diff base
+(avoiding a full reindex when onboarding from a release snapshot).
+
+Marker is one-shot — DeltaTracker consumes and deletes it on the
+next sync. Prerequisite: the snapshot is installed (via
+`onelens_snapshots_pull --repo local`).'''
+    await _call_tool('onelens_snapshot_promote', {'graph': graph, 'tag': tag})
 
 
 if __name__ == "__main__":
-    main()
+    app()
+
+main = app
