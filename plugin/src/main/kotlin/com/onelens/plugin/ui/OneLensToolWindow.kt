@@ -218,6 +218,10 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
                     }
                     is OneLensEvent.Progress -> logLine("[${(event.fraction * 100).toInt()}%] ${event.label}", ConsoleViewContentType.LOG_INFO_OUTPUT)
                     is OneLensEvent.SyncComplete -> {
+                        // Release the sync-running guard — the StatusChange →
+                        // READY event that was supposed to do this doesn't
+                        // always fire, so SyncComplete is the reliable signal.
+                        syncRunning.set(false)
                         // Render counts per active adapter. On Java-only projects
                         // we show the classes/methods/edges line; Vue-only projects
                         // showed "0 classes · 0 methods" before, which looked like
@@ -229,6 +233,9 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
                         )
                         lastSyncInfo = "Last sync: ${if (event.isDelta) "delta" else "full"} — " +
                             "$summary · ${event.durationMs}ms"
+                        // refreshAsync re-reads the .onelens-baseline marker so the
+                        // "⚑ Seeded from @<tag>" banner disappears once DeltaTracker
+                        // has consumed it (marker file is gone → banner hides).
                         refreshAsync()
                     }
                 }
