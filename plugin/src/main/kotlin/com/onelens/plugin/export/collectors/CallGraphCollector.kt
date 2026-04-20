@@ -5,10 +5,10 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.CallEdge
 import com.onelens.plugin.export.ClassData
+import com.onelens.plugin.framework.workspace.Workspace
 
 /**
  * Collects the complete call graph with 100% accurate type resolution.
@@ -18,7 +18,7 @@ object CallGraphCollector {
 
     private val LOG = logger<CallGraphCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>): List<CallEdge> {
+    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): List<CallEdge> {
         // Use half the available cores — keep system responsive
         val threads = maxOf(1, Runtime.getRuntime().availableProcessors() / 2)
         val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
@@ -36,7 +36,7 @@ object CallGraphCollector {
                         try {
                             val classEdges = ReadAction.compute<List<CallEdge>, Throwable> {
                                 val facade = JavaPsiFacade.getInstance(project)
-                                val scope = GlobalSearchScope.projectScope(project)
+                                val scope = workspace.scope(project)
                                 val psiClass = facade.findClass(classData.fqn, scope)
                                     ?: return@compute emptyList()
                                 val batch = mutableListOf<CallEdge>()

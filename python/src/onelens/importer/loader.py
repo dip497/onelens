@@ -1,9 +1,17 @@
 """Full JSON import into any Cypher-compatible graph DB using batch UNWIND."""
 
-import json
 import logging
 import time
 from pathlib import Path
+
+# orjson parses the 500 MB+ a 500 MB export in ~2 s vs ~10 s with stdlib json.
+# Falls back cleanly if the dep ever goes missing.
+try:
+    import orjson as _json  # type: ignore[import-not-found]
+    _USE_ORJSON = True
+except ImportError:  # pragma: no cover
+    import json as _json  # type: ignore[no-redef]
+    _USE_ORJSON = False
 
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from onelens.graph.db import GraphDB
@@ -36,10 +44,23 @@ class GraphLoader:
             TimeElapsedColumn(),
         ) as progress:
 
-            # Parse JSON
+            # Parse JSON — orjson.loads takes bytes + returns dict; stdlib
+            # json.load takes a text stream. Normalize by reading bytes once.
             task = progress.add_task("Loading JSON...", total=1)
-            with open(export_path) as f:
-                data = json.load(f)
+            t_json = time.time()
+            with open(export_path, "rb") as f:
+                raw = f.read()
+            if _USE_ORJSON:
+                data = _json.loads(raw)
+            else:
+                # stdlib json needs str not bytes on 3.10+; decode.
+                data = _json.loads(raw.decode("utf-8"))
+            logger.info(
+                "JSON parse: %.2fs (%s, %.1f MB)",
+                time.time() - t_json,
+                "orjson" if _USE_ORJSON else "stdlib",
+                len(raw) / 1024 / 1024,
+            )
             progress.update(task, completed=1)
 
             # Create indexes (idempotent)
@@ -86,8 +107,14 @@ class GraphLoader:
             # FalkorDB stores arrays natively — no per-token explosion needed. Absent
             # in pre-1.1 exports; `data.get` returns [] so older graphs no-op.
             enum_constants = data.get("enumConstants", [])
-            self._batch_nodes(progress, "Enum Constants", enum_constants,
-                              "EnumConstant", "fqn", [
+            # Dual-label: an EnumConstant IS a Field. MemberCollector already
+            # emits a Field with matching fqn for each enum constant; rather than
+            # duplicating the node, tag the existing Field with :EnumConstant +
+            # the enum-only props (args / argList).
+            self._batch_add_label(progress, "Enum Constants", enum_constants,
+                              base_label="Field", base_pk="fqn", pk_field="fqn",
+                              add_label="EnumConstant",
+                              props=[
                                   "name", "ordinal", "enumFqn",
                                   "args", "argList", "argTypes",
                                   "filePath", "lineStart",
@@ -113,12 +140,39 @@ class GraphLoader:
             # same FalkorDB instance. Without `wing` on Endpoint the bridge
             # query's `e.wing IS NOT NULL` check is always false and zero HITS
             # edges are emitted.
-            graph_wing = data.get("project", {}).get("name", "") or "default"
+            # Phase C: prefer the workspace header's graphId so multi-repo exports
+            # tagged with a user-chosen graph id stamp the right wing. Falls back
+            # to project.name for pre-workspace exports.
+            workspace_header = data.get("workspace") or {}
+            graph_wing = (
+                workspace_header.get("graphId")
+                or data.get("project", {}).get("name", "")
+                or "default"
+            )
+            dup_policy = workspace_header.get("duplicateFqnPolicy", "merge")
+            if dup_policy != "merge":
+                # MERGE is the only policy wired today — warn/error/suffix are
+                # tracked in Phase C PROGRESS; keep the log loud so adopters see it.
+                print(
+                    f"[onelens] workspace duplicateFqnPolicy='{dup_policy}' is not yet"
+                    f" enforced — falling back to MERGE (duplicates upsert silently).",
+                    flush=True,
+                )
             spring = data.get("spring")
             if spring:
-                beans = [dict(b, wing=graph_wing) for b in spring.get("beans", [])]
+                beans = []
+                for b in spring.get("beans", []):
+                    b2 = dict(b, wing=graph_wing)
+                    # Stringify activeProfiles so FalkorDB stores it as a scalar;
+                    # arrays are supported but inconsistent across client drivers.
+                    b2["activeProfiles"] = ",".join(b.get("activeProfiles") or [])
+                    b2["primary"] = bool(b.get("primary", False))
+                    b2["source"] = b.get("source") or "annotation"
+                    b2["factoryMethodFqn"] = b.get("factoryMethodFqn") or ""
+                    beans.append(b2)
                 self._batch_nodes(progress, "Spring Beans", beans, "SpringBean", "name", [
                     "classFqn", "scope", "profile", "type", "wing",
+                    "primary", "source", "factoryMethodFqn", "activeProfiles",
                 ])
                 endpoints = spring.get("endpoints", [])
                 for ep in endpoints:
@@ -128,6 +182,84 @@ class GraphLoader:
                 self._batch_nodes(progress, "Endpoints", endpoints, "Endpoint", "id", [
                     "path", "httpMethod", "controllerFqn", "handlerMethodFqn", "wing",
                 ])
+
+                autoconfigs = [dict(ac, wing=graph_wing) for ac in spring.get("autoConfigs", [])]
+                if autoconfigs:
+                    self._batch_nodes(progress, "Auto-Configs", autoconfigs,
+                                      "SpringAutoConfig", "classFqn",
+                                      ["source", "sourceFile", "wing"])
+
+            # --- APPS + PACKAGES (Phase C2) ---
+            # Apps = one per @SpringBootApplication / Vue root. Packages mirror the
+            # Java package hierarchy (Spring) or `src/<segment>` folders (Vue3).
+            # Emitted before class-level edges so CONTAINS can wire in one pass.
+            apps = [dict(a, wing=graph_wing) for a in data.get("apps", [])]
+            if apps:
+                self._batch_nodes(progress, "Apps", apps, "App", "id", [
+                    "name", "type", "rootFqn", "rootPath", "scanPackages",
+                    "moduleNames", "wing",
+                ])
+
+            packages = [dict(p, wing=graph_wing) for p in data.get("packages", [])]
+            if packages:
+                self._batch_nodes(progress, "Packages", packages, "Package", "id", [
+                    "name", "parentId", "appId", "wing",
+                ])
+
+            jpa = data.get("jpa")
+            if jpa:
+                entities = [dict(e, wing=graph_wing) for e in jpa.get("entities", [])]
+                if entities:
+                    # Dual-label: a JpaEntity IS a Class. Tag the existing Class
+                    # node with :JpaEntity + the JPA-specific props. Avoids a
+                    # duplicate node per @Entity class (was 748 extra nodes on
+                    # myapp) and lets queries use either label.
+                    self._batch_add_label(progress, "JPA Entities", entities,
+                                      base_label="Class", base_pk="fqn",
+                                      pk_field="classFqn",
+                                      add_label="JpaEntity",
+                                      props=["tableName", "schema", "wing"])
+                    # Flatten columns into their own nodes so Cypher can query by
+                    # column name / nullability / relation. ID format:
+                    #   column:<entity-fqn>#<field-name>
+                    # Dedupe on fieldFqn in case the collector ever re-emits a
+                    # parent's column via inheritance (belt-and-suspenders — the
+                    # JpaCollector now uses `psiClass.fields` not `allFields`).
+                    columns = []
+                    seen_cols = set()
+                    for e in entities:
+                        for col in e.get("columns", []):
+                            key = col.get("fieldFqn", "")
+                            if not key or key in seen_cols:
+                                continue
+                            seen_cols.add(key)
+                            columns.append({
+                                "fieldFqn": col["fieldFqn"],
+                                "columnName": col.get("columnName", ""),
+                                "nullable": bool(col.get("nullable", True)),
+                                "unique": bool(col.get("unique", False)),
+                                "relation": col.get("relation") or "",
+                                "targetEntityFqn": col.get("targetEntityFqn") or "",
+                                "wing": graph_wing,
+                            })
+                    if columns:
+                        # Dual-label: a JpaColumn IS a Field. MemberCollector
+                        # already emits the Field node with the same fqn.
+                        self._batch_add_label(progress, "JPA Columns", columns,
+                                          base_label="Field", base_pk="fqn",
+                                          pk_field="fieldFqn",
+                                          add_label="JpaColumn",
+                                          props=["columnName", "nullable", "unique",
+                                                 "relation", "targetEntityFqn", "wing"])
+
+                repos = [dict(r, wing=graph_wing) for r in jpa.get("repositories", [])]
+                if repos:
+                    # Dual-label: a JpaRepository IS a Class (interface).
+                    self._batch_add_label(progress, "JPA Repositories", repos,
+                                      base_label="Class", base_pk="fqn",
+                                      pk_field="classFqn",
+                                      add_label="JpaRepository",
+                                      props=["entityFqn", "wing"])
 
             # --- EXTERNAL STUB NODES ---
             # Create stub nodes for external (library) classes/methods referenced in edges.
@@ -284,19 +416,177 @@ class GraphLoader:
                 self._batch_edges(progress, "HANDLES", handles, "Method", "fqn", "Endpoint", "id")
 
                 injects = [{"src": inj["targetClassFqn"], "dst": inj["injectedClassFqn"],
-                            "field": inj.get("targetFieldOrParam", ""), "type": inj.get("injectionType", "")}
+                            "field": inj.get("targetFieldOrParam", ""),
+                            "type": inj.get("injectionType", ""),
+                            "qualifier": inj.get("qualifier") or ""}
                            for inj in spring.get("injections", [])]
                 self._batch_edges_with_props(progress, "INJECTS", injects,
                                              "SpringBean", "classFqn", "SpringBean", "classFqn",
-                                             ["field", "type"])
+                                             ["field", "type", "qualifier"])
+
+                # Class ↔ SpringBean bridge. We can't dual-label here — @Bean
+                # factory methods produce beans without a 1:1 class identity (the
+                # class is the bean's return type, not a registration marker on
+                # itself). An explicit edge keeps the two concepts separate while
+                # still letting `MATCH (c:Class {fqn:$x})-[:REGISTERED_AS]->(:SpringBean)`
+                # answer "is this class exposed as a bean?" in one hop.
+                reg_as = [{"src": b["classFqn"], "dst": b["name"]}
+                          for b in spring.get("beans", [])
+                          if b.get("classFqn") and b.get("name")]
+                if reg_as:
+                    self._batch_edges(progress, "REGISTERED_AS", reg_as,
+                                      "Class", "fqn", "SpringBean", "name")
+
+            if jpa:
+                # HAS_COLUMN: JpaEntity → JpaColumn. Edge source = entity classFqn,
+                # target = column fieldFqn (already unique by entity + field).
+                has_column = []
+                seen_hc = set()
+                for e in jpa.get("entities", []):
+                    for col in e.get("columns", []):
+                        key = (e["classFqn"], col.get("fieldFqn", ""))
+                        if not key[1] or key in seen_hc:
+                            continue
+                        seen_hc.add(key)
+                        has_column.append({"src": e["classFqn"], "dst": col["fieldFqn"]})
+                if has_column:
+                    # After dual-labeling, JpaEntity nodes are Class nodes keyed by
+                    # `fqn` and JpaColumn nodes are Field nodes keyed by `fqn`.
+                    self._batch_edges(progress, "HAS_COLUMN", has_column,
+                                      "JpaEntity", "fqn", "JpaColumn", "fqn")
+
+                # RELATES_TO: JpaEntity → JpaEntity with relation type on the edge.
+                relates = []
+                for e in jpa.get("entities", []):
+                    for col in e.get("columns", []):
+                        target = col.get("targetEntityFqn")
+                        rel = col.get("relation")
+                        if target and rel:
+                            relates.append({
+                                "src": e["classFqn"], "dst": target,
+                                "relation": rel,
+                                "field": col["fieldFqn"].split("#", 1)[-1] if "#" in col["fieldFqn"] else "",
+                            })
+                if relates:
+                    self._batch_edges_with_props(progress, "RELATES_TO", relates,
+                                                 "JpaEntity", "fqn",
+                                                 "JpaEntity", "fqn",
+                                                 ["relation", "field"])
+
+                # REPOSITORY_FOR: JpaRepository → JpaEntity
+                repo_for = [{"src": r["classFqn"], "dst": r["entityFqn"]}
+                            for r in jpa.get("repositories", [])
+                            if r.get("entityFqn")]
+                if repo_for:
+                    self._batch_edges(progress, "REPOSITORY_FOR", repo_for,
+                                      "JpaRepository", "fqn",
+                                      "JpaEntity", "fqn")
+
+                # QUERIES: JpaRepository → Method (derived-query methods). The Method
+                # node already exists from MemberCollector — we just wire the edge.
+                queries = []
+                for r in jpa.get("repositories", []):
+                    for q in r.get("derivedQueries", []):
+                        queries.append({
+                            "src": r["classFqn"], "dst": q["methodFqn"],
+                            "methodName": q.get("methodName", ""),
+                            "kind": q.get("kind", "derived"),
+                        })
+                if queries:
+                    self._batch_edges_with_props(progress, "QUERIES", queries,
+                                                 "JpaRepository", "fqn",
+                                                 "Method", "fqn",
+                                                 ["methodName", "kind"])
+
+            # --- APP / PACKAGE EDGES (Phase C2) ---
+            if packages:
+                parent_edges = [{"src": p["parentId"], "dst": p["id"]}
+                                for p in packages if p.get("parentId")]
+                if parent_edges:
+                    self._batch_edges(progress, "PARENT_OF", parent_edges,
+                                      "Package", "id", "Package", "id")
+
+            if apps and packages:
+                # App → Package for every package whose scan prefix matches the app.
+                # Materialising at every package (not only scan roots) so one-hop
+                # queries like `MATCH (a:App)-[:CONTAINS]->(p:Package) WHERE p.name =~
+                # 'com.acme.order.*'` just work. For 10-app / 500-package projects
+                # this stays well under 5000 edges.
+                app_contains_pkg = [{"src": p["appId"], "dst": p["id"]}
+                                    for p in packages if p.get("appId")]
+                if app_contains_pkg:
+                    self._batch_edges(progress, "CONTAINS (App→Package)",
+                                      app_contains_pkg,
+                                      "App", "id", "Package", "id",
+                                      rel_type="CONTAINS")
+
+            if packages and classes:
+                pkg_ids = {p["id"] for p in packages}
+                pkg_contains_class = [{"src": c["packageName"], "dst": c["fqn"]}
+                                      for c in classes
+                                      if c.get("packageName") in pkg_ids]
+                if pkg_contains_class:
+                    self._batch_edges(progress, "CONTAINS (Package→Class)",
+                                      pkg_contains_class,
+                                      "Package", "id", "Class", "fqn",
+                                      rel_type="CONTAINS")
 
             # Vue 3 — load the frontend subdoc if present. Kept inside the
             # `with Progress(...)` context so `progress.add_task` has a live
             # context (Rich raises on a stopped progress). Java-only exports
             # pass through unchanged: `data.get("vue3")` is None.
+            # Tests (Phase Q.code) — dual-label :Method:TestCase + MOCKS/SPIES
+            # edges + derived :TESTS edges from direct CALLS.
+            self._load_tests(progress, data, graph_wing)
+
+            # SQL surface (Phase C6) — migrations + custom queries. Opt-in via
+            # `sql:` section of onelens.workspace.yaml (auto-detected Flyway is
+            # the default). Reads the yaml directly from disk because the plugin
+            # only forwards its *effective* fields; keeping the SQL config
+            # loader-side lets us extend without rebuilding the plugin.
+            self._load_sql(progress, workspace_header, graph_wing)
+
             vue3 = data.get("vue3")
             if vue3:
-                self._load_vue3(progress, vue3, graph_name=data.get("project", {}).get("name", ""))
+                self._load_vue3(progress, vue3, graph_name=graph_wing)
+
+                # Package → Vue member CONTAINS edges (Phase C2). Packages carry
+                # `id = vue:<rootName>:<segment>`, `name = segment`. A member
+                # whose relative filePath starts with `<segment>/` (or `src/<segment>/`)
+                # belongs to that package. The segment-only match can fire for
+                # multi-root workspaces that share a segment name — accepted
+                # trade-off until per-member appId lands in C2.1.
+                vue_pkgs = [p for p in packages if p.get("id", "").startswith("vue:")]
+                if vue_pkgs:
+                    def _top(fp: str) -> str:
+                        p = fp.lstrip("/").removeprefix("src/")
+                        return p.split("/", 1)[0] if "/" in p else ""
+
+                    pkg_by_name = {p["name"]: p["id"] for p in vue_pkgs}
+
+                    def _emit(label, items, key):
+                        edges = []
+                        seen = set()
+                        for it in items:
+                            fp = it.get("filePath", "")
+                            seg = _top(fp)
+                            pid = pkg_by_name.get(seg)
+                            if not pid or not it.get(key):
+                                continue
+                            dedup = (pid, it[key])
+                            if dedup in seen:
+                                continue
+                            seen.add(dedup)
+                            edges.append({"src": pid, "dst": it[key]})
+                        if edges:
+                            self._batch_edges(progress, f"CONTAINS (Package→{label})",
+                                              edges, "Package", "id", label, key,
+                                              rel_type="CONTAINS")
+
+                    _emit("Component", vue3.get("components", []), "filePath")
+                    _emit("Composable", vue3.get("composables", []), "fqn")
+                    _emit("Store", vue3.get("stores", []), "id")
+                    _emit("JsModule", vue3.get("modules", []), "filePath")
 
         # Post-import phase: compute PageRank on the call graph and write
         # it back as Method.pagerank + Class.pagerank. One-time cost (~5-15s
@@ -695,6 +985,348 @@ class GraphLoader:
         except Exception as e:
             logger.warning("Vue 3 bridge pass failed: %s", e)
 
+    def _load_tests(self, progress, data: dict, graph_wing: str):
+        """
+        Phase Q.code — tests as dual-label :Method:TestCase.
+
+        Three things in order:
+          1. Dual-label each test method by methodFqn and set its test-specific
+             props (testKind, tags, disabled, …).
+          2. Emit `(TestCase)-[:MOCKS]->(SpringBean)` / `-[:SPIES]->` edges from
+             `@MockBean` / `@SpyBean` field bindings. Match SpringBean by
+             classFqn (the target type).
+          3. Derive `(TestCase)-[:TESTS]->(Method)` edges from direct CALLS
+             where the target is NOT itself a TestCase. Depth-1 only — gets
+             the production method the test directly invokes.
+
+        If the export carries no tests, this is a no-op. Safe to call
+        unconditionally.
+        """
+        tests = data.get("tests", []) or []
+        mock_beans = data.get("mockBeans", []) or []
+        spy_beans = data.get("spyBeans", []) or []
+
+        if not tests and not mock_beans and not spy_beans:
+            return
+
+        if tests:
+            # Stringify list props — FalkorDB stores them fine, but comma-joined
+            # stays queryable via CONTAINS for skill-style patterns.
+            prepped = []
+            for t in tests:
+                prepped.append({
+                    "methodFqn": t.get("methodFqn", ""),
+                    "testClass": t.get("testClass", ""),
+                    "testKind": t.get("testKind", "unknown"),
+                    "testFramework": t.get("testFramework", "unknown"),
+                    "tags": ",".join(t.get("tags") or []),
+                    "disabled": bool(t.get("disabled", False)),
+                    "activeProfiles": ",".join(t.get("activeProfiles") or []),
+                    "springBootApp": t.get("springBootApp") or "",
+                    "usesMockito": bool(t.get("usesMockito", False)),
+                    "usesTestcontainers": bool(t.get("usesTestcontainers", False)),
+                    "displayName": t.get("displayName") or "",
+                    "wing": graph_wing,
+                })
+            self._batch_add_label(
+                progress, "Tests", prepped,
+                base_label="Method", base_pk="fqn", pk_field="methodFqn",
+                add_label="TestCase",
+                props=["testClass", "testKind", "testFramework", "tags",
+                       "disabled", "activeProfiles", "springBootApp",
+                       "usesMockito", "usesTestcontainers", "displayName",
+                       "wing"],
+            )
+
+        # MOCKS / SPIES: testClassFqn → beanClassFqn. Source is any method on
+        # the test class that we labelled as :TestCase above; match by its
+        # enclosing class. Easier: emit edge from the test CLASS → bean CLASS
+        # via a lifted pattern — every TestCase on that class gets reach via
+        # 1-hop pattern `(t:TestCase)<-[:HAS_METHOD]-(c:Class)-[:MOCKS]->(bean)`.
+        # But skill ergonomics want `(t:TestCase)-[:MOCKS]->`. So lift:
+        # emit `(testMethod)-[:MOCKS]->(bean)` for every test method in the class.
+        # That blows up edges × methods. Pragmatic: emit on Class →
+        # `MATCH (c:Class)-[:MOCKS]->(b:SpringBean)` — cheap, class-scoped.
+        if mock_beans:
+            mocks = [{"src": b["testClassFqn"], "dst": b["beanClassFqn"],
+                      "field": b.get("fieldName", "")}
+                     for b in mock_beans if b.get("testClassFqn") and b.get("beanClassFqn")]
+            self._batch_edges_with_props(
+                progress, "MOCKS", mocks,
+                "Class", "fqn", "SpringBean", "classFqn",
+                ["field"],
+            )
+
+        if spy_beans:
+            spies = [{"src": b["testClassFqn"], "dst": b["beanClassFqn"],
+                      "field": b.get("fieldName", "")}
+                     for b in spy_beans if b.get("testClassFqn") and b.get("beanClassFqn")]
+            self._batch_edges_with_props(
+                progress, "SPIES", spies,
+                "Class", "fqn", "SpringBean", "classFqn",
+                ["field"],
+            )
+
+        # Derived :TESTS edge — single Cypher pass. Direct CALLS where target
+        # isn't itself a test. Matches how users ask "what does this test
+        # exercise" without forcing a transitive traversal at query time.
+        if tests:
+            try:
+                self.db.execute(
+                    "MATCH (t:TestCase)-[:CALLS]->(m:Method) "
+                    "WHERE NOT m:TestCase "
+                    "MERGE (t)-[:TESTS]->(m)"
+                )
+                logger.info("Derived :TESTS edges from direct CALLS")
+            except Exception as e:
+                logger.warning("Derived :TESTS pass failed: %s", e)
+
+    def _load_sql(self, progress, workspace_header: dict, graph_wing: str):
+        """
+        Phase C6 — emit :SqlQuery / :Migration / :SqlStatement + QUERIES_TABLE /
+        CREATES_TABLE / ALTERS_TABLE / DROPS_TABLE edges.
+
+        Config source: `sql:` block inside `onelens.workspace.yaml` (path is in
+        `workspace_header.configFile`). Default: auto-detect Flyway, no custom
+        queries. Yaml missing? Falls back to Flyway-only auto-detect.
+
+        Safe to call unconditionally — if no SQL sources resolve, the method
+        is a no-op.
+        """
+        from pathlib import Path
+
+        try:
+            from onelens.miners import sql_miner
+            from onelens.miners import flyway_detector
+        except Exception as e:
+            logger.warning("SQL miner imports failed: %s — skipping SQL phase", e)
+            return
+
+        roots_raw = workspace_header.get("roots") or []
+        roots = [Path(r) for r in roots_raw if r]
+        if not roots:
+            return
+
+        # --- Read `sql:` block from yaml, if present ---
+        sql_cfg: dict = {}
+        cfg_file = workspace_header.get("configFile")
+        if cfg_file:
+            try:
+                import yaml
+                parsed = yaml.safe_load(Path(cfg_file).read_text(encoding="utf-8")) or {}
+                sql_cfg = parsed.get("sql") or {}
+            except Exception as e:
+                logger.debug("workspace.yaml sql read failed: %s", e)
+
+        flyway_cfg = sql_cfg.get("flyway") or {}
+        auto_detect = bool(flyway_cfg.get("autoDetect", True))
+        extra_locations = flyway_cfg.get("extraLocations") or []
+        query_globs = sql_cfg.get("queries") or []
+
+        # --- Resolve Flyway migration directories ---
+        locations: list[str] = []
+        if auto_detect:
+            locations.extend(flyway_detector.detect_flyway_locations(roots))
+        locations.extend(extra_locations)
+        # Dedup preserving order
+        seen_loc: set[str] = set()
+        locations = [l for l in locations if not (l in seen_loc or seen_loc.add(l))]
+
+        migration_dirs = [d for _, d in flyway_detector.resolve_classpath_globs(locations, roots)]
+
+        if not migration_dirs and not query_globs:
+            return  # Nothing to do — no flyway detected, no custom queries configured
+
+        logger.info(
+            "SQL phase: %d migration dirs, %d query globs",
+            len(migration_dirs), len(query_globs),
+        )
+
+        # --- Mine ---
+        files = sql_miner.mine(
+            roots=roots,
+            migration_dirs=migration_dirs,
+            query_globs=query_globs,
+        )
+        if not files:
+            return
+
+        # --- Emit nodes ---
+        migration_files = [f for f in files if f.kind == "migration"]
+        query_files = [f for f in files if f.kind == "query"]
+
+        if migration_files:
+            nodes = [
+                {
+                    "id": f"migration:{f.path}",
+                    "filename": f.filename,
+                    "filePath": f.path,
+                    "body": f.body,
+                    "version": f.version or "",
+                    "description": f.description or "",
+                    "dbKind": f.dbKind or "",
+                    "statementCount": len(f.statements),
+                    "wing": graph_wing,
+                }
+                for f in migration_files
+            ]
+            self._batch_nodes(
+                progress, "SQL Migrations", nodes, "Migration", "id",
+                ["filename", "filePath", "body", "version", "description",
+                 "dbKind", "statementCount", "wing"],
+            )
+
+        if query_files:
+            nodes = [
+                {
+                    "id": f"query:{f.path}",
+                    "filename": f.filename,
+                    "filePath": f.path,
+                    "body": f.body,
+                    "statementCount": len(f.statements),
+                    "wing": graph_wing,
+                }
+                for f in query_files
+            ]
+            self._batch_nodes(
+                progress, "SQL Queries", nodes, "SqlQuery", "id",
+                ["filename", "filePath", "body", "statementCount", "wing"],
+            )
+
+        # --- Statement nodes + parent-to-statement edges + table edges ---
+        statement_nodes = []
+        parent_edges = []      # (fileId)-[:HAS_STATEMENT {index}]->(stmtId)
+        queries_table = []     # (stmtId)-[:QUERIES_TABLE]->(JpaEntity fqn)
+        ddl_edges = {          # per-op edges from stmt → JpaEntity
+            "CREATES_TABLE": [],
+            "ALTERS_TABLE": [],
+            "DROPS_TABLE": [],
+        }
+        references_column = []  # (stmtId)-[:REFERENCES_COLUMN]->(JpaColumn fqn)
+
+        # Build tableName → Entity fqn lookup + (table,column) → Column fqn lookup
+        # from in-graph state. db.execute() returns None (writes); db.query()
+        # returns list[dict].
+        table_to_fqn: dict[str, str] = {}
+        col_to_fqn: dict[tuple[str, str], str] = {}
+        try:
+            rows = self.db.query(
+                "MATCH (e:JpaEntity) RETURN toLower(e.tableName) AS tn, e.fqn AS fqn"
+            )
+            for row in rows or []:
+                tn = row.get("tn") if isinstance(row, dict) else None
+                fqn = row.get("fqn") if isinstance(row, dict) else None
+                if tn and fqn:
+                    table_to_fqn[str(tn).lower()] = str(fqn)
+        except Exception as e:
+            logger.warning("JpaEntity lookup for SQL edges failed: %s", e)
+
+        # Inheritance-aware column map: `Request` inherits `priorityId` from
+        # TicketBase via `@Inheritance(SINGLE_TABLE)` or MappedSuperclass, so
+        # SQL reads the flat row — we need the walk up the :Class EXTENDS chain.
+        # Depth cap 6 covers all cases seen in practice (Request→TicketBase→MultiTenantOrder→
+        # FlotoBase→FlotoSingleBase→FlotoEntity).
+        try:
+            rows = self.db.query(
+                "MATCH (e:JpaEntity)-[:EXTENDS*0..6]->(p:Class)-[:HAS_COLUMN]->(c:JpaColumn) "
+                "RETURN toLower(e.tableName) AS tn, toLower(c.columnName) AS cn, c.fqn AS fqn"
+            )
+            for row in rows or []:
+                tn = row.get("tn") if isinstance(row, dict) else None
+                cn = row.get("cn") if isinstance(row, dict) else None
+                fqn = row.get("fqn") if isinstance(row, dict) else None
+                if tn and cn and fqn:
+                    col_to_fqn[(str(tn).lower(), str(cn).lower())] = str(fqn)
+        except Exception as e:
+            logger.warning("JpaColumn lookup for SQL edges failed: %s", e)
+
+        logger.info(
+            "SQL phase: %d tables, %d columns cached for edge matching",
+            len(table_to_fqn), len(col_to_fqn),
+        )
+
+        def _file_id(f):
+            return f"migration:{f.path}" if f.kind == "migration" else f"query:{f.path}"
+
+        for f in files:
+            fid = _file_id(f)
+            for s in f.statements:
+                sid = f"{fid}#{s.index}"
+                statement_nodes.append({
+                    "id": sid,
+                    "sql": s.sql,
+                    "opKind": s.opKind,
+                    "statementIndex": s.index,
+                    "wing": graph_wing,
+                })
+                parent_edges.append({"src": fid, "dst": sid, "index": s.index})
+
+                # Route edges by opKind. SELECT/INSERT/UPDATE/DELETE → QUERIES_TABLE;
+                # CREATE_TABLE / ALTER_TABLE / DROP_TABLE → specific DDL edge.
+                for tbl in s.tableNames:
+                    fqn = table_to_fqn.get(tbl)
+                    if not fqn:
+                        continue
+                    edge = {"src": sid, "dst": fqn}
+                    if s.opKind in ("CREATE_TABLE",):
+                        ddl_edges["CREATES_TABLE"].append(edge)
+                    elif s.opKind in ("ALTER_TABLE",):
+                        ddl_edges["ALTERS_TABLE"].append(edge)
+                    elif s.opKind in ("DROP_TABLE", "DROP"):
+                        ddl_edges["DROPS_TABLE"].append(edge)
+                    else:
+                        queries_table.append(edge)
+
+                # Column references — only meaningful for SELECT/UPDATE/DELETE/
+                # INSERT. DDL (CREATE/ALTER) column tracking is a separate feature.
+                if s.opKind in ("SELECT", "UPDATE", "INSERT", "DELETE") and getattr(s, "columnRefs", None):
+                    seen_col: set[str] = set()
+                    for (tbl, col) in s.columnRefs:
+                        cfqn = col_to_fqn.get((tbl, col))
+                        if not cfqn or cfqn in seen_col:
+                            continue
+                        seen_col.add(cfqn)
+                        references_column.append({"src": sid, "dst": cfqn})
+
+        if statement_nodes:
+            self._batch_nodes(
+                progress, "SQL Statements", statement_nodes,
+                "SqlStatement", "id",
+                ["sql", "opKind", "statementIndex", "wing"],
+            )
+
+        if parent_edges:
+            # HAS_STATEMENT has two possible parent labels (Migration OR SqlQuery);
+            # emit twice, once per label, and let the unmatched half drop silently.
+            self._batch_edges_with_props(
+                progress, "HAS_STATEMENT (Migration)", parent_edges,
+                "Migration", "id", "SqlStatement", "id", ["index"],
+                rel_type="HAS_STATEMENT",
+            )
+            self._batch_edges_with_props(
+                progress, "HAS_STATEMENT (SqlQuery)", parent_edges,
+                "SqlQuery", "id", "SqlStatement", "id", ["index"],
+                rel_type="HAS_STATEMENT",
+            )
+
+        if queries_table:
+            self._batch_edges(
+                progress, "QUERIES_TABLE", queries_table,
+                "SqlStatement", "id", "JpaEntity", "fqn",
+            )
+        for rel, edges in ddl_edges.items():
+            if not edges:
+                continue
+            self._batch_edges(
+                progress, rel, edges,
+                "SqlStatement", "id", "JpaEntity", "fqn",
+            )
+        if references_column:
+            self._batch_edges(
+                progress, "REFERENCES_COLUMN", references_column,
+                "SqlStatement", "id", "JpaColumn", "fqn",
+            )
+
     def _batch_edges_simple(self, progress, desc: str, edges: list,
                              src_match: str, dst_match: str, tail: str, wing: str,
                              src_var: str = "c"):
@@ -727,6 +1359,56 @@ class GraphLoader:
                 logger.warning("Edge batch %s failed: %s", desc, e)
             progress.update(task, advance=len(batch))
 
+    def _batch_add_label(self, progress, desc: str, items: list,
+                         base_label: str, base_pk: str, pk_field: str,
+                         add_label: str, props: list[str]):
+        """
+        Dual-label upsert. Collapses "JpaColumn IS a Field", "JpaEntity IS a
+        Class", "EnumConstant IS a Field", etc. into one node per underlying
+        concept.
+
+        Resolves the node by `(:base_label {base_pk: item.pk_field})` (MERGE —
+        creates if absent so the loader is order-independent), then `SET` tags
+        the extra label and writes the label-specific props. Existing
+        `:base_label` props (name, type, modifiers, ...) are preserved.
+
+        Existing edges that matched on the add_label + pk_field keep working
+        because FalkorDB's label matching is "has any of these labels" — the
+        node still carries the extra label we just SET. Edges that matched on
+        a property name the add_label layer owned (e.g. `fieldFqn` on
+        JpaColumn) should move to the base_label's primary key (`fqn` on
+        Field); rewire the edge batch separately.
+        """
+        if not items:
+            return
+        set_clause = ", ".join(f"n.{p} = item.{p}" for p in props)
+        query = (
+            f"UNWIND $batch AS item "
+            f"MERGE (n:{base_label} {{{base_pk}: item.{pk_field}}}) "
+            f"SET n:{add_label}"
+        )
+        if set_clause:
+            query += f", {set_clause}"
+
+        task = progress.add_task(f"{desc}...", total=len(items))
+        for i in range(0, len(items), NODE_BATCH):
+            batch = items[i:i + NODE_BATCH]
+            clean = []
+            for item in batch:
+                row = {pk_field: item.get(pk_field, "")}
+                for p in props:
+                    v = item.get(p)
+                    if v is None:
+                        row[p] = "" if isinstance(item.get(p, ""), str) else 0
+                    else:
+                        row[p] = v
+                clean.append(row)
+            try:
+                self.db.execute(query, {"batch": clean})
+            except Exception as e:
+                logger.warning(f"Dual-label {add_label} batch failed: {e}")
+            progress.update(task, advance=len(batch))
+
     def _batch_nodes(self, progress, desc: str, items: list, label: str, pk: str, props: list[str]):
         """Create nodes using UNWIND in batches."""
         if not items:
@@ -734,7 +1416,11 @@ class GraphLoader:
 
         all_props = [pk] + props
         set_clause = ", ".join(f"n.{p} = item.{p}" for p in props)
-        query = f"UNWIND $batch AS item CREATE (n:{label} {{{pk}: item.{pk}}}) SET {set_clause}"
+        # MERGE (not CREATE) so duplicate primary keys within a single export
+        # or across re-imports upsert instead of failing the whole batch.
+        # Duplicates surface legitimately in multi-module / multi-repo workspaces
+        # (plugin-style forks of `Constants`, shared common classes, etc.).
+        query = f"UNWIND $batch AS item MERGE (n:{label} {{{pk}: item.{pk}}}) SET {set_clause}"
 
         task = progress.add_task(f"{desc}...", total=len(items))
         for i in range(0, len(items), NODE_BATCH):
@@ -758,7 +1444,7 @@ class GraphLoader:
                 for item in clean:
                     try:
                         self.db.execute(
-                            f"CREATE (n:{label} {{{pk}: $pk_val}}) SET " +
+                            f"MERGE (n:{label} {{{pk}: $pk_val}}) SET " +
                             ", ".join(f"n.{p} = ${p}" for p in props),
                             {"pk_val": item[pk], **{p: item[p] for p in props}}
                         )

@@ -13,13 +13,23 @@ import com.onelens.plugin.export.MethodData
 import com.onelens.plugin.export.ModuleData
 import com.onelens.plugin.export.OverrideEdge
 import com.onelens.plugin.export.SpringData
+import com.onelens.plugin.export.AppData
+import com.onelens.plugin.export.JpaData
+import com.onelens.plugin.export.PackageData
+import com.onelens.plugin.export.TestBeanBinding
+import com.onelens.plugin.export.TestCaseData
 import com.onelens.plugin.export.collectors.AnnotationCollector
+import com.onelens.plugin.export.collectors.AppCollector
+import com.onelens.plugin.export.collectors.AutoConfigCollector
+import com.onelens.plugin.export.collectors.TestCollector
 import com.onelens.plugin.export.collectors.CallGraphCollector
 import com.onelens.plugin.export.collectors.ClassCollector
 import com.onelens.plugin.export.collectors.DiagnosticsCollector
 import com.onelens.plugin.export.collectors.InheritanceCollector
+import com.onelens.plugin.export.collectors.JpaCollector
 import com.onelens.plugin.export.collectors.MemberCollector
 import com.onelens.plugin.export.collectors.ModuleCollector
+import com.onelens.plugin.export.collectors.PackageCollector
 import com.onelens.plugin.export.collectors.SpringCollector
 import com.onelens.plugin.framework.Collector
 import com.onelens.plugin.framework.CollectContext
@@ -79,7 +89,13 @@ data class SpringBootCollectionResult(
     val annotations: List<AnnotationUsage>,
     val spring: SpringData?,
     val diagnostics: List<DiagnosticEntry>,
-    val enumConstants: List<EnumConstantData> = emptyList()
+    val enumConstants: List<EnumConstantData> = emptyList(),
+    val jpa: JpaData? = null,
+    val apps: List<AppData> = emptyList(),
+    val packages: List<PackageData> = emptyList(),
+    val tests: List<TestCaseData> = emptyList(),
+    val mockBeans: List<TestBeanBinding> = emptyList(),
+    val spyBeans: List<TestBeanBinding> = emptyList(),
 )
 
 /**
@@ -101,40 +117,84 @@ class SpringBootCollector : Collector {
         val project = ctx.project
         val indicator = ctx.indicator
         val base = ctx.progressFraction
+        val workspace = ctx.workspace
 
         indicator?.text = "Java: collecting classes…"
         indicator?.fraction = base
-        val classes = ClassCollector.collect(project)
+        val classes = ClassCollector.collect(project, workspace)
         LOG.info("Collected ${classes.size} classes")
 
         indicator?.text = "Java: methods & fields (${classes.size} classes)…"
         indicator?.fraction = base + 0.02
-        val members = MemberCollector.collect(project, classes)
+        val members = MemberCollector.collect(project, classes, workspace)
         LOG.info("Collected ${members.methods.size} methods, ${members.fields.size} fields")
 
         indicator?.text = "Java: resolving call graph…"
         indicator?.fraction = base + 0.05
-        val callGraph = CallGraphCollector.collect(project, classes)
+        val callGraph = CallGraphCollector.collect(project, classes, workspace)
         LOG.info("Collected ${callGraph.size} call edges")
 
         indicator?.text = "Java: inheritance & overrides…"
         indicator?.fraction = base + 0.25
-        val inheritance = InheritanceCollector.collect(project, classes)
+        val inheritance = InheritanceCollector.collect(project, classes, workspace)
         LOG.info("Collected ${inheritance.edges.size} inheritance edges, ${inheritance.overrides.size} overrides")
 
         indicator?.text = "Java: modules…"
         indicator?.fraction = base + 0.35
-        val modules = ModuleCollector.collect(project)
+        val modules = ModuleCollector.collect(project, workspace)
         LOG.info("Collected ${modules.size} modules")
 
         indicator?.text = "Java: annotation usages…"
         indicator?.fraction = base + 0.38
-        val annotations = AnnotationCollector.collect(project, classes)
+        val annotations = AnnotationCollector.collect(project, classes, workspace)
         LOG.info("Collected ${annotations.size} annotation usages")
 
         indicator?.text = "Java: Spring beans & endpoints…"
         indicator?.fraction = base + 0.42
-        val spring = SpringCollector.collect(project)
+        val annotationSpring = SpringCollector.collect(project, workspace)
+
+        // Augment with IntelliJ Spring-plugin model when available. The plugin
+        // resolves @Bean factories, XML beans, JAM beans, @Primary, scope — things
+        // annotation scraping misses. Guard is runtime so the JAR still loads on
+        // IC / WebStorm where com.intellij.spring is absent; the SpringModelCollector
+        // class (which statically references SpringManager) is only touched on the
+        // true branch, so the JVM never tries to verify it otherwise.
+        val springModelBeans = if (isSpringPluginAvailable()) {
+            try { SpringModelCollector.collect(project, workspace) }
+            catch (t: Throwable) {
+                LOG.warn("SpringModelCollector failed — falling back to annotation beans", t)
+                emptyList()
+            }
+        } else emptyList()
+        val mergedSpring = mergeSpring(annotationSpring, springModelBeans)
+
+        indicator?.text = "Spring: auto-configuration chains…"
+        indicator?.fraction = base + 0.43
+        val autoConfigs = try { AutoConfigCollector.collect(project, workspace) }
+            catch (t: Throwable) { LOG.warn("AutoConfigCollector failed", t); emptyList() }
+        val spring = if (mergedSpring != null || autoConfigs.isNotEmpty()) {
+            (mergedSpring ?: SpringData()).copy(autoConfigs = autoConfigs)
+        } else null
+
+        indicator?.text = "JPA: entities & repositories…"
+        indicator?.fraction = base + 0.44
+        val jpa = try { JpaCollector.collect(project, workspace) }
+            catch (t: Throwable) { LOG.warn("JpaCollector failed", t); null }
+
+        indicator?.text = "Apps & packages…"
+        indicator?.fraction = base + 0.445
+        val apps = try { AppCollector.collect(project, workspace) }
+            catch (t: Throwable) { LOG.warn("AppCollector failed", t); emptyList() }
+        val packages = try { PackageCollector.collect(classes, apps) }
+            catch (t: Throwable) { LOG.warn("PackageCollector failed", t); emptyList() }
+
+        indicator?.text = "Tests…"
+        indicator?.fraction = base + 0.448
+        val testResult = try { TestCollector.collect(project, workspace) }
+            catch (t: Throwable) {
+                LOG.warn("TestCollector failed", t)
+                TestCollector.Result(emptyList(), emptyList(), emptyList())
+            }
 
         indicator?.text = "Java: diagnostics…"
         indicator?.fraction = base + 0.45
@@ -151,7 +211,13 @@ class SpringBootCollector : Collector {
             annotations = annotations,
             spring = spring,
             diagnostics = diagnostics,
-            enumConstants = members.enumConstants
+            enumConstants = members.enumConstants,
+            jpa = jpa,
+            apps = apps,
+            packages = packages,
+            tests = testResult.tests,
+            mockBeans = testResult.mockBeans,
+            spyBeans = testResult.spyBeans,
         )
         lastResult = result
 
@@ -170,10 +236,21 @@ class SpringBootCollector : Collector {
             put("annotationUsageCount", annotations.size)
             put("springBeanCount", spring?.beans?.size ?: 0)
             put("endpointCount", spring?.endpoints?.size ?: 0)
+            put("autoConfigCount", spring?.autoConfigs?.size ?: 0)
+            put("jpaEntityCount", jpa?.entities?.size ?: 0)
+            put("jpaRepositoryCount", jpa?.repositories?.size ?: 0)
+            put("appCount", apps.size)
+            put("packageCount", packages.size)
+            put("testCount", testResult.tests.size)
+            put("mockBeanCount", testResult.mockBeans.size)
+            put("spyBeanCount", testResult.spyBeans.size)
             put("enumConstantCount", members.enumConstants.size)
             put("diagnosticCount", diagnostics.size)
             if (spring != null) {
                 put("spring", json.encodeToJsonElement(SpringData.serializer(), spring))
+            }
+            if (jpa != null) {
+                put("jpa", json.encodeToJsonElement(JpaData.serializer(), jpa))
             }
         }
 
@@ -183,6 +260,49 @@ class SpringBootCollector : Collector {
             modules.size + (spring?.beans?.size ?: 0) + (spring?.endpoints?.size ?: 0)
 
         return CollectorOutput(data = subdoc, nodeCount = nodeCount, edgeCount = edgeCount)
+    }
+
+    private fun isSpringPluginAvailable(): Boolean = try {
+        val pid = com.intellij.openapi.extensions.PluginId.getId("com.intellij.spring")
+        com.intellij.ide.plugins.PluginManagerCore.getPlugin(pid)?.isEnabled == true
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * Merge annotation-scraped beans with Spring-plugin-resolved beans. Dedupe key
+     * is classFqn + name + factoryMethodFqn so XML-only or @Bean-only definitions
+     * don't collapse into the stereotype bean for the same class. Annotation beans
+     * keep their dependencies/endpoints fields (which the model path leaves empty);
+     * model beans contribute the @Primary / scope / source / factoryMethod fields
+     * that annotation scraping can't resolve.
+     */
+    private fun mergeSpring(
+        annotation: SpringData?,
+        modelBeans: List<com.onelens.plugin.export.SpringBean>
+    ): SpringData? {
+        if (annotation == null && modelBeans.isEmpty()) return null
+        val existing = annotation?.beans ?: emptyList()
+        val byKey = existing.associateBy { "${it.classFqn}|${it.name}|" } // empty factoryMethodFqn for annotation beans
+        val merged = existing.toMutableList()
+        for (mb in modelBeans) {
+            val key = "${mb.classFqn}|${mb.name}|${mb.factoryMethodFqn ?: ""}"
+            val prior = byKey[key]
+            if (prior != null) {
+                // Prefer annotation bean's dependencies; upgrade with model-resolved flags.
+                val idx = merged.indexOf(prior)
+                merged[idx] = prior.copy(
+                    primary = prior.primary || mb.primary,
+                    scope = if (prior.scope == "singleton" && mb.scope != "singleton") mb.scope else prior.scope,
+                    source = if (mb.source != "annotation") mb.source else prior.source,
+                    factoryMethodFqn = prior.factoryMethodFqn ?: mb.factoryMethodFqn,
+                    activeProfiles = mb.activeProfiles.ifEmpty { prior.activeProfiles },
+                )
+            } else {
+                merged += mb
+            }
+        }
+        return (annotation ?: SpringData()).copy(beans = merged)
     }
 
     companion object {

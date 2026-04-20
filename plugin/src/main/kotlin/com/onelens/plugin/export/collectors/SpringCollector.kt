@@ -8,6 +8,7 @@ import com.intellij.psi.*
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.AnnotatedElementsSearch
 import com.onelens.plugin.export.*
+import com.onelens.plugin.framework.workspace.Workspace
 
 /**
  * Collects Spring-specific data: beans, wiring, endpoints.
@@ -52,7 +53,7 @@ object SpringCollector {
         "RequestMapping" to "ALL",
     )
 
-    fun collect(project: Project): SpringData? {
+    fun collect(project: Project, workspace: Workspace): SpringData? {
         val beans = mutableListOf<SpringBean>()
         val endpoints = mutableListOf<SpringEndpoint>()
         val injections = mutableListOf<SpringInjection>()
@@ -63,7 +64,7 @@ object SpringCollector {
 
             ReadAction.run<Throwable> {
                 val facade = JavaPsiFacade.getInstance(project)
-                val scope = GlobalSearchScope.projectScope(project)
+                val scope = workspace.scope(project)
                 val annotationClass = facade.findClass(annotationFqn, GlobalSearchScope.allScope(project))
                     ?: return@run
 
@@ -110,7 +111,8 @@ object SpringCollector {
                     targetClassFqn = classFqn,
                     targetFieldOrParam = field.name,
                     injectedClassFqn = field.type.canonicalText,
-                    injectionType = "FIELD"
+                    injectionType = "FIELD",
+                    qualifier = extractQualifier(field.annotations),
                 ))
             }
         }
@@ -124,10 +126,23 @@ object SpringCollector {
                     targetClassFqn = classFqn,
                     targetFieldOrParam = param.name ?: "",
                     injectedClassFqn = param.type.canonicalText,
-                    injectionType = "CONSTRUCTOR"
+                    injectionType = "CONSTRUCTOR",
+                    qualifier = extractQualifier(param.annotations),
                 ))
             }
         }
+    }
+
+    private fun extractQualifier(annotations: Array<PsiAnnotation>): String? {
+        for (anno in annotations) {
+            if (anno.qualifiedName == "org.springframework.beans.factory.annotation.Qualifier") {
+                val value = anno.findAttributeValue("value") ?: anno.findAttributeValue(null)
+                val resolved = (value as? PsiLiteralExpression)?.value?.toString()
+                    ?: value?.text?.removeSurrounding("\"")
+                if (!resolved.isNullOrBlank()) return resolved
+            }
+        }
+        return null
     }
 
     private fun isInjectedByDefault(field: PsiField, psiClass: PsiClass): Boolean {

@@ -50,6 +50,22 @@ custom patches.*
 - [x] Vue 3 adapter (full import): Components, Composables, Stores,
       Routes, ApiCalls, USES_STORE (direct + 1-hop indirect),
       USES_COMPOSABLE, DISPATCHES, CALLS_API, HITS cross-stack bridge.
+- [x] Full-loader `MERGE` — duplicate FQNs no longer abort bulk
+      imports (2026-04-18). See CHANGELOG `[Unreleased]`.
+- [ ] **Workspaces (Phase C).** Declarative
+      `onelens.workspace.yaml` with N roots, stable graph id,
+      policies for duplicate FQNs / multi-git delta / per-app
+      PageRank. Unblocks multi-module + sibling-repo JVM
+      codebases. Design landed (ADR-021, `docs/workspaces.md`);
+      collector-side scope + loader policy knobs are the next
+      code changes. Non-JVM adapters ride the same abstraction.
+- [ ] **`App` + `Package` as adapter-agnostic graph primitives**
+      (ADR-022). `SpringBootAdapter` emits `App` per
+      `@SpringBootApplication`; `Vue3Adapter` emits `App` per
+      detected Vue root; future stacks follow the same rule.
+      Enables per-app PageRank and cross-stack queries like
+      "which Vue apps hit endpoints defined by which Spring
+      apps".
 - [ ] IntelliJ marketplace listing.
 - [ ] Hardened `uv` / `pip` fallback for air-gapped environments.
 - [ ] Incremental PageRank on delta imports.
@@ -73,6 +89,38 @@ source.*
 - [ ] Cross-repo graph stitching (monorepo + satellite services).
 - [ ] Hosted retrieval option for orgs that don't want to run
       FalkorDB + embedding models themselves.
+- [ ] **Dual import engine** (ADR-023) — IntelliJ Spring plugin
+      API for in-IDE accuracy (bean graph, `@Profile`,
+      `spring.factories`, `AutoConfiguration.imports`, Spring MVC
+      endpoint model, Spring Data query derivation), headless
+      metadata engine for CI (parses
+      `spring-configuration-metadata.json`,
+      `AutoConfiguration.imports`, `spring.factories`,
+      `spring.binders`, plus ASM bytecode). Same export schema,
+      same loader — users pick per environment.
+- [ ] **GitHub Action** wrapping the metadata engine: on every
+      PR, import the delta graph and post an impact summary as a
+      review comment. Primary OSS adoption hook.
+- [ ] **Cross-service HTTP call resolver** — `RestTemplate`,
+      `WebClient`, `@FeignClient`, `@HttpExchange` → target
+      endpoint. `CALLS_SERVICE` / `CALLS_ENDPOINT` edges. Closes
+      the microservice architecture view.
+- [ ] **Async boundary graph** — `@Async`, `@EventListener`,
+      `@Scheduled`, `@KafkaListener`, `@RabbitListener`,
+      `@JmsListener`. `Topic` / `Event` nodes with
+      `PUBLISHES_TO` / `LISTENS_TO` edges.
+- [ ] **Data-layer impact** — JPA `@Entity`, repository methods,
+      `@Query` SQL (via the IntelliJ JPA plugin in Ultimate or
+      manual parse). `Entity` / `Table` / `Column` nodes,
+      `READS` / `WRITES` edges.
+- [ ] **Config property lineage** — `@Value("${foo.bar}")`,
+      `@ConfigurationProperties`, `application.yml`. `ConfigKey`
+      nodes + `READS_CONFIG` edges. "If I rename this property,
+      what breaks?"
+- [ ] **Custom collector SPI** — `META-INF/services/com.onelens.CustomCollector`
+      so adopters register domain-specific PSI walkers
+      (`@FeatureFlag`, `@AuditLog`, `@RateLimited`) without
+      forking the plugin.
 
 ## Principles for deciding what lands when
 

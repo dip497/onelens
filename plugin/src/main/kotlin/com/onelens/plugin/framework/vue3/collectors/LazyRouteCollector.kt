@@ -16,7 +16,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.DispatchesEdge
 import com.onelens.plugin.export.RouteData
@@ -64,7 +63,7 @@ object LazyRouteCollector {
             ftm.getFileTypeByExtension("ts").takeIf { it != UnknownFileType.INSTANCE },
             ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE }
         )
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = ctx.workspace.scope(project)
         val routeFiles = DumbService.getInstance(project).runReadActionInSmartMode(
             Computable {
                 jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }

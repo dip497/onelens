@@ -16,9 +16,12 @@ import java.nio.file.Paths
  * thread from the UI refresh action.
  */
 data class OneLensStatus(
-    val falkordbReachable: Boolean,
+    val backend: String,               // "falkordblite" | "falkordb"
+    val falkordbReachable: Boolean,    // lite: rdb exists; docker: TCP probe
     val falkordbHost: String = "localhost",
     val falkordbPort: Int = 17532,
+    val liteRdbPath: String? = null,   // lite only — path to graph's .rdb
+    val liteRdbSizeBytes: Long = 0L,
     val uvPath: String?,
     val venvExists: Boolean,
     val cliPath: String?,
@@ -30,6 +33,7 @@ data class OneLensStatus(
     val exportCount: Int,
     val lastExportTimestamp: Long?,
     val graphName: String?,
+    val semanticEnabled: Boolean = false,
 )
 
 @Service(Service.Level.PROJECT)
@@ -43,7 +47,8 @@ class OneLensStatusService(private val project: Project) {
     private val contextDir: Path = onelensHome.resolve("context")
 
     fun snapshot(): OneLensStatus {
-        val falkor = isPortOpen("localhost", 17532, 800)
+        val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+        val backend = settings.graphBackend
         val uv = locateUv()
         val venv = venvDir.toFile().exists()
         val cli = venvDir.resolve("bin").resolve("onelens").toFile().takeIf { it.exists() }?.absolutePath
@@ -52,20 +57,38 @@ class OneLensStatusService(private val project: Project) {
         // from here without an extra CLI round-trip, so leave it unknown.
         val modelsCached: Boolean? = null
 
+        // Derive graph name from the workspace (explicit `onelens.workspace.yaml`
+        // or implicit single-root fallback). Falls back to project.name only if
+        // workspace resolution fails at session start.
+        val graphId = try {
+            com.onelens.plugin.framework.workspace.WorkspaceLoader.load(project).graphId
+        } catch (_: Exception) { project.name }
+
         val exports = listExports()
         val exportsSize = exports.sumOf { it.length() }
         val venvSize = if (venv) dirSize(venvDir) else 0L
-        // Size just this project's graph drawer (one subdir per graph);
-        // falls back to the whole context dir if the per-graph dir is absent.
-        val projectContextDir = contextDir.resolve(project.name)
+        // Size just this graph's drawer (one subdir per graph); falls back to
+        // the whole context dir if the per-graph dir is absent.
+        val projectContextDir = contextDir.resolve(graphId)
         val chromaSize = when {
             projectContextDir.toFile().exists() -> dirSize(projectContextDir)
             contextDir.toFile().exists() -> dirSize(contextDir)
             else -> 0L
         }
 
+        // Backend health: lite probes the on-disk rdb; docker probes the port.
+        val liteRdb = onelensHome.resolve("graphs").resolve(graphId).resolve("$graphId.rdb").toFile()
+        val liteRdbExists = liteRdb.exists() && liteRdb.length() > 0
+        val reachable = when (backend) {
+            "falkordblite" -> liteRdbExists
+            else -> isPortOpen("localhost", 17532, 800)
+        }
+
         return OneLensStatus(
-            falkordbReachable = falkor,
+            backend = backend,
+            falkordbReachable = reachable,
+            liteRdbPath = liteRdb.absolutePath.takeIf { backend == "falkordblite" },
+            liteRdbSizeBytes = if (liteRdbExists) liteRdb.length() else 0L,
             uvPath = uv,
             venvExists = venv,
             cliPath = cli,
@@ -76,7 +99,8 @@ class OneLensStatusService(private val project: Project) {
             chromaSizeBytes = chromaSize,
             exportCount = exports.size,
             lastExportTimestamp = exports.maxOfOrNull { it.lastModified() },
-            graphName = project.name,
+            graphName = graphId,
+            semanticEnabled = settings.buildSemanticIndex,
         )
     }
 

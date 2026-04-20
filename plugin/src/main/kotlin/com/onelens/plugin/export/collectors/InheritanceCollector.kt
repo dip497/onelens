@@ -5,10 +5,10 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.export.ClassData
 import com.onelens.plugin.export.InheritanceEdge
 import com.onelens.plugin.export.OverrideEdge
+import com.onelens.plugin.framework.workspace.Workspace
 
 data class InheritanceResult(
     val edges: List<InheritanceEdge>,
@@ -23,9 +23,9 @@ object InheritanceCollector {
 
     private val LOG = logger<InheritanceCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>): InheritanceResult {
+    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): InheritanceResult {
         val facade = JavaPsiFacade.getInstance(project)
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = workspace.scope(project)
 
         val inheritanceEdges = mutableListOf<InheritanceEdge>()
         val overrideEdges = mutableListOf<OverrideEdge>()

@@ -6,8 +6,8 @@ import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.export.*
+import com.onelens.plugin.framework.workspace.Workspace
 import kotlinx.serialization.json.Json
 
 data class MemberResult(
@@ -27,9 +27,9 @@ object MemberCollector {
     /** Shared JSON codec for serializing EnumConstant.args / Annotation.attributes. */
     private val JSON: Json = Json { encodeDefaults = true }
 
-    fun collect(project: Project, classes: List<ClassData>): MemberResult {
+    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): MemberResult {
         val facade = JavaPsiFacade.getInstance(project)
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = workspace.scope(project)
 
         val methods = mutableListOf<MethodData>()
         val fields = mutableListOf<FieldData>()

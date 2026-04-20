@@ -23,7 +23,6 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ImportsEdge
 import com.onelens.plugin.export.JsFunctionData
@@ -75,7 +74,7 @@ object JsModuleCollector {
             ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE },
             ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
         )
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = ctx.workspace.scope(project)
         val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
             Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         )

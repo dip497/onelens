@@ -5,9 +5,9 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.export.AnnotationUsage
 import com.onelens.plugin.export.ClassData
+import com.onelens.plugin.framework.workspace.Workspace
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -29,9 +29,9 @@ object AnnotationCollector {
 
     private val JSON: Json = Json { encodeDefaults = true }
 
-    fun collect(project: Project, classes: List<ClassData>): List<AnnotationUsage> {
+    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): List<AnnotationUsage> {
         val facade = JavaPsiFacade.getInstance(project)
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = workspace.scope(project)
         val result = mutableListOf<AnnotationUsage>()
 
         for (classData in classes) {

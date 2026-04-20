@@ -3,6 +3,7 @@ package com.onelens.plugin.framework
 import com.intellij.openapi.extensions.ExtensionPointName
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.project.Project
+import com.onelens.plugin.framework.workspace.Workspace
 import kotlinx.serialization.json.JsonElement
 
 /**
@@ -56,7 +57,16 @@ data class CollectContext(
     val project: Project,
     val indicator: ProgressIndicator?,
     /** Fraction of overall export allocated to this collector; used to report progress. */
-    val progressFraction: Double = 0.0
+    val progressFraction: Double = 0.0,
+    /**
+     * Workspace defining the set of roots this collection pass covers. Mandatory —
+     * collectors MUST scope against `workspace.scope(project)` and derive paths via
+     * `workspace.relativePath(file)`. The single resolution point is
+     * [WorkspaceLoader.load], called at each entry boundary (ExportService,
+     * DeltaExportService, etc.). Implicit single-root workspaces keep the
+     * zero-config path working without leaking null-handling into every collector.
+     */
+    val workspace: Workspace,
 )
 
 /**

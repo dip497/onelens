@@ -17,7 +17,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.StoreData
 import com.onelens.plugin.framework.vue3.Vue3Context
@@ -63,7 +62,7 @@ object PiniaStoreCollector {
             LOG.warn("No JS/TS file types registered")
             return
         }
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = ctx.workspace.scope(project)
         // FileTypeIndex.getFiles() needs a smart read action; WebStorm 2026.1+
         // throws "Read access is allowed from inside read-action only" otherwise.
         val files = DumbService.getInstance(project).runReadActionInSmartMode(

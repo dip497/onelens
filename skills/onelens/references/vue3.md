@@ -1,8 +1,13 @@
 # OneLens — Vue 3 Reference
 
-Applies when the active wing has `Component`, `Composable`, `Store`, `Route`, or `ApiCall` nodes. Vue 3 coverage is built from IntelliJ / WebStorm's JavaScript + Vue plugin PSI, so type-resolution of `<script setup>` macros, cross-file composable imports, and Pinia `defineStore` arguments is accurate.
+> **⚠️ Migration notice** — CLI examples below use the legacy names
+> `onelens query` / `onelens call-tool onelens_status`. The canonical form is
+> `onelens call-tool onelens_query --cypher "..."` /
+> `onelens call-tool onelens_status`. Content below is otherwise current.
 
-This reference is self-contained for Vue-only questions. For cross-stack traversals (Vue → Spring), read the cross-stack section in the main `SKILL.md`.
+Applies when the active graph has `Component`, `Composable`, `Store`, `Route`, or `ApiCall` nodes. Vue 3 coverage is built from IntelliJ / WebStorm's JavaScript + Vue plugin PSI, so type-resolution of `<script setup>` macros, cross-file composable imports, and Pinia `defineStore` arguments is accurate.
+
+This reference is self-contained for Vue-only questions. For cross-stack traversals (Vue → Spring), see `queries-code.md` ("Full-stack trace").
 
 ## Schema
 
@@ -31,11 +36,19 @@ This reference is self-contained for Vue-only questions. For cross-stack travers
 ## CLI
 
 ```bash
-~/.onelens/venv/bin/onelens query "<CYPHER>" --graph <wing-name>
-~/.onelens/venv/bin/onelens stats --graph <wing-name>
+onelens call-tool onelens_query --cypher "<CYPHER>" --graph <wing-name>
+onelens call-tool onelens_status --graph <wing-name>
 ```
 
 Vue-side `retrieve` / `impact` / `trace` are Phase B2 scope — today use Cypher for Vue and `retrieve` only against JVM wings.
+
+### Verify the wing is indexed
+
+```bash
+onelens call-tool onelens_status --graph <wing-name>
+```
+
+Expect non-zero `Component` / `Store` / `Route` / `ApiCall` / `Composable`. If all zero or the wing is missing, re-run the IntelliJ "Sync Graph" action against that project. **Don't reach for `redis-cli`** — it's falkordb-only, port-coupled (17532), and bypasses backend abstraction. CLI route works across falkordb / falkordblite / neo4j.
 
 ## Query Patterns
 
@@ -138,7 +151,7 @@ These are candidates for the `ModuleNameBinder` to learn: the binding variable i
 - Use `name` on Components/Stores/Composables and `path` on Routes/ApiCalls for most queries; `fqn` only when the user quotes one.
 - `filePath` values are project-relative (`src/modules/ticket/…`). `CONTAINS` queries work well.
 - `wing` filtering is automatic when your Cypher targets one project, but becomes essential when the graph holds multiple repos — add `WHERE c.wing = '<project>'` to avoid cross-project bleed.
-- To answer "will this Vue change break the backend", pivot to the cross-stack section in `SKILL.md` — `ApiCall -[:HITS]-> Endpoint <-[:HANDLES]- Method` is the canonical path.
+- To answer "will this Vue change break the backend", pivot to the cross-stack section in `queries-code.md` — `ApiCall -[:HITS]-> Endpoint <-[:HANDLES]- Method` is the canonical path.
 - If counts look wrong (0 stores, 0 routes), the cheap checks are: `stats` labels (is the wing actually indexed?), `package.json` (is `"vue": "^3…"` present so the adapter ran?), and `Vue3Adapter`'s log line "Active framework adapters: …".
 
 ## Answer principles

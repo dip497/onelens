@@ -140,17 +140,24 @@ class AutoSyncService(private val project: Project) : Disposable {
                 val start = System.currentTimeMillis()
                 try {
                     indicator.text = "Auto-syncing ${filesToSync.size} modified, ${filesDeleted.size} deleted..."
-                    val config = ExportConfig()
+                    val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+                    val config = ExportConfig(
+                        buildSemanticIndex = settings.buildSemanticIndex,
+                        graphBackend = settings.graphBackend,
+                    )
                     val result = DeltaExportService.exportDeltaForFiles(project, config, filesToSync, filesDeleted)
 
                     when (result) {
                         is DeltaExportService.DeltaResult.Success -> {
                             val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                            service.syncToGraph(result.path, project.name, config, isFull = false)
+                            val graphId = try {
+                                com.onelens.plugin.framework.workspace.WorkspaceLoader.load(project).graphId
+                            } catch (_: Exception) { project.name }
+                            service.syncToGraph(result.path, graphId, config, isFull = false)
                             val dur = System.currentTimeMillis() - start
                             LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
                             OneLensEvents.syncComplete(
-                                graphName = project.name,
+                                graphName = graphId,
                                 classes = result.stats.upsertedClassCount,
                                 methods = result.stats.upsertedMethodCount,
                                 callEdges = result.stats.upsertedCallEdgeCount,
