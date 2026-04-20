@@ -45,9 +45,12 @@ import javax.swing.SwingConstants
 class OneLensToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = OneLensMainPanel(project)
-        val content = toolWindow.contentManager.factory.createContent(panel, "Status", false)
-        toolWindow.contentManager.addContent(content)
+        val cm = toolWindow.contentManager
+        val status = cm.factory.createContent(OneLensMainPanel(project), "Status", false)
+        val snapshots = cm.factory.createContent(OneLensSnapshotsPanel(project), "Snapshots", false)
+        cm.addContent(status)
+        cm.addContent(snapshots)
+        cm.setSelectedContent(status)
     }
 }
 
@@ -55,10 +58,13 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
     private val statusLabel = JBLabel("OneLens: initializing…")
     private val falkordbLabel = JBLabel(" ")
+    private val branchLabel = JBLabel(" ")
+    private val seedLabel = JBLabel(" ")
     private val checklistPanel = JPanel()
     private val statsLabel = JBLabel(" ")
     private val resourcesLabel = JBLabel(" ")
     private val lastSyncLabel = JBLabel(" ")
+    @Volatile private var lastSyncTs: Long? = null
     private val console: ConsoleView = TextConsoleBuilderFactory.getInstance()
         .createBuilder(project)
         .console
@@ -88,17 +94,41 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
         subscribe()
         refreshAsync()
+
+        // Tick the "Last sync: … ago" label every 30 s so it doesn't stay
+        // stale at "18h ago" for a day. Only re-formats the cached timestamp —
+        // no status poll, no git shell-out.
+        javax.swing.Timer(30_000) {
+            val ts = lastSyncTs ?: return@Timer
+            lastSyncLabel.text = if (lastSyncInfo.isNotEmpty())
+                "$lastSyncInfo   (file ${fmtAgo(ts)})"
+            else
+                "Last sync: ${fmtAgo(ts)}"
+        }.apply { isRepeats = true; start() }
     }
 
-    private fun buildHeader(): JComponent = JPanel(BorderLayout()).apply {
-        border = JBUI.Borders.emptyBottom(6)
-        add(statusLabel.apply {
-            horizontalAlignment = SwingConstants.LEFT
-            font = font.deriveFont(font.size2D + 1f).deriveFont(java.awt.Font.BOLD)
-        }, BorderLayout.NORTH)
-        add(falkordbLabel.apply {
-            horizontalAlignment = SwingConstants.LEFT
-        }, BorderLayout.CENTER)
+    private fun buildHeader(): JComponent {
+        val stack = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            border = JBUI.Borders.emptyBottom(6)
+        }
+        statusLabel.horizontalAlignment = SwingConstants.LEFT
+        statusLabel.font = statusLabel.font.deriveFont(statusLabel.font.size2D + 1f).deriveFont(java.awt.Font.BOLD)
+        statusLabel.alignmentX = java.awt.Component.LEFT_ALIGNMENT
+        falkordbLabel.horizontalAlignment = SwingConstants.LEFT
+        falkordbLabel.alignmentX = java.awt.Component.LEFT_ALIGNMENT
+        branchLabel.horizontalAlignment = SwingConstants.LEFT
+        branchLabel.alignmentX = java.awt.Component.LEFT_ALIGNMENT
+        branchLabel.foreground = branchLabel.foreground.darker()
+        seedLabel.horizontalAlignment = SwingConstants.LEFT
+        seedLabel.alignmentX = java.awt.Component.LEFT_ALIGNMENT
+        seedLabel.foreground = java.awt.Color(0xC7, 0x8F, 0x00)
+        seedLabel.isVisible = false
+        stack.add(statusLabel)
+        stack.add(falkordbLabel)
+        stack.add(branchLabel)
+        stack.add(seedLabel)
+        return stack
     }
 
     private fun buildToolbar(): JComponent {
@@ -107,6 +137,7 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
             add(SetupAction())
             add(ToggleAutoSyncToolbarAction())
             add(InstallSkillToolbarAction())
+            ActionManager.getInstance().getAction("onelens.PublishSnapshot")?.let { add(it) }
             addSeparator()
             add(RefreshAction())
             add(OpenFalkorUIAction())
@@ -133,6 +164,8 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         panel.add(stats)
 
         val res = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
+        resourcesLabel.font = resourcesLabel.font.deriveFont(resourcesLabel.font.size2D - 1f)
+        resourcesLabel.foreground = resourcesLabel.foreground.darker()
         res.add(resourcesLabel)
         panel.add(res)
 
@@ -220,7 +253,23 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: refreshing status", true) {
             override fun run(indicator: ProgressIndicator) {
                 val snap = OneLensStatusService.getInstance(project).snapshot()
-                ApplicationManager.getApplication().invokeLater({ render(snap) }, ModalityState.any())
+                val branch = com.onelens.plugin.snapshots.GitInfo.currentBranch(project)
+                val sha = com.onelens.plugin.snapshots.GitInfo.headSha(project)
+                val seedTag = readSeedTag(snap.graphName)
+                ApplicationManager.getApplication().invokeLater({
+                    render(snap)
+                    branchLabel.text = when {
+                        branch != null && sha != null -> "Branch: $branch  ·  HEAD: ${sha.take(7)}"
+                        branch != null -> "Branch: $branch"
+                        else -> " "
+                    }
+                    if (seedTag != null) {
+                        seedLabel.text = "⚑ Seeded from @$seedTag — next Sync will delta from this point"
+                        seedLabel.isVisible = true
+                    } else {
+                        seedLabel.isVisible = false
+                    }
+                }, ModalityState.any())
             }
         })
     }
@@ -236,6 +285,7 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         renderChecklist(s)
         statsLabel.text = "Graph: ${s.graphName ?: "—"}   Exports: ${s.exportCount}   ChromaDB: ${fmtBytes(s.chromaSizeBytes)}"
         resourcesLabel.text = "Venv: ${fmtBytes(s.venvSizeBytes)}   Exports on disk: ${fmtBytes(s.exportsSizeBytes)}"
+        lastSyncTs = s.lastExportTimestamp
         val ts = s.lastExportTimestamp?.let { fmtAgo(it) } ?: "never"
         lastSyncLabel.text = if (lastSyncInfo.isNotEmpty()) "$lastSyncInfo   (file $ts)" else "Last sync: $ts"
         revalidate(); repaint()
@@ -246,19 +296,25 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
             OneLensState.READY -> "OneLens: Ready" to Color(0x3A, 0x9B, 0x3A)
             OneLensState.SETTING_UP -> "OneLens: Setting up…" to Color(0xC7, 0x8F, 0x00)
             OneLensState.SYNCING -> "OneLens: Syncing…" to Color(0x1E, 0x8E, 0xD5)
-            OneLensState.ERROR -> "OneLens: Error — FalkorDB unreachable" to Color(0xC0, 0x38, 0x38)
+            OneLensState.ERROR -> (if (s?.backend == "falkordblite")
+                "OneLens: Graph not yet indexed" else "OneLens: Error — FalkorDB unreachable"
+                ) to Color(0xC0, 0x38, 0x38)
             OneLensState.UNKNOWN -> "OneLens: Unknown" to Color(0x99, 0x99, 0x99)
         }
         statusLabel.text = text
         statusLabel.foreground = color
         s?.let {
             val reach = if (it.falkordbReachable) "✓" else "✗"
-            falkordbLabel.text = "FalkorDB: ${it.falkordbHost}:${it.falkordbPort} $reach    " +
-                "Semantic: ${formatSemantic(it)}"
+            val backendLine = when (it.backend) {
+                "falkordblite" -> "FalkorDB Lite: embedded $reach"
+                else -> "FalkorDB: ${it.falkordbHost}:${it.falkordbPort} $reach"
+            }
+            falkordbLabel.text = "$backendLine    Semantic: ${formatSemantic(it)}"
         }
     }
 
     private fun formatSemantic(s: OneLensStatus): String = when {
+        !s.semanticEnabled -> "off (structural graph only)"
         s.modalAvailable == null -> "— (no venv)"
         s.modalAvailable == false -> "off (modal SDK not installed)"
         else -> "remote (Modal / OpenAI-compat)"
@@ -266,23 +322,37 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
     private fun renderChecklist(s: OneLensStatus) {
         checklistPanel.removeAll()
+        val backendCheck = when (s.backend) {
+            "falkordblite" -> checkItem(
+                s.falkordbReachable, "FalkorDB Lite",
+                if (s.falkordbReachable) "embedded rdb at ${s.liteRdbPath} (${fmtBytes(s.liteRdbSizeBytes)})"
+                else "no graph indexed yet",
+                "run Sync Graph to build the embedded rdb",
+            )
+            else -> checkItem(
+                s.falkordbReachable, "FalkorDB",
+                "running at ${s.falkordbHost}:${s.falkordbPort}",
+                "start: docker run -d -p 17532:6379 -p 3001:3000 falkordb/falkordb:latest",
+            )
+        }
+        val semanticItems = if (s.semanticEnabled) listOf(
+            checkItem(s.modalAvailable != false, "modal SDK",
+                if (s.modalAvailable == true) "installed (remote backend ready)"
+                else "missing — semantic search disabled",
+                "re-run setup"),
+            checkItem(true, "Embeddings backend",
+                "configured via ONELENS_EMBED_BACKEND (modal | openai); weights live on the remote.",
+                null),
+        ) else emptyList()
         val items = listOf(
-            checkItem(s.falkordbReachable, "FalkorDB", "running at ${s.falkordbHost}:${s.falkordbPort}",
-                "start: docker run -d -p 17532:6379 -p 3001:3000 falkordb/falkordb:latest"),
+            backendCheck,
             checkItem(s.uvPath != null, "uv", "found at ${s.uvPath ?: "—"}",
                 "install: curl -LsSf https://astral.sh/uv/install.sh | sh"),
             checkItem(s.venvExists, "Python venv", "~/.onelens/venv",
                 "run 'Setup / Reinstall' below"),
             checkItem(s.cliPath != null, "onelens CLI", s.cliPath ?: "not installed",
                 "run 'Setup / Reinstall' below"),
-            checkItem(s.modalAvailable != false, "modal SDK",
-                if (s.modalAvailable == true) "installed (remote backend ready)"
-                else "missing — semantic search disabled",
-                "re-run setup"),
-            checkItem(true, "Backend",
-                "configured via ONELENS_EMBED_BACKEND (modal | openai); weights live on the remote.",
-                null),
-        )
+        ) + semanticItems
         val c = GridBagConstraints().apply {
             gridx = 0; anchor = GridBagConstraints.NORTHWEST
             fill = GridBagConstraints.HORIZONTAL; weightx = 1.0
@@ -446,6 +516,19 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
     private inner class ClearLogAction : AnAction("Clear Log", "Clear the event log", AllIcons.Actions.GC) {
         override fun actionPerformed(e: AnActionEvent) = console.clear()
+    }
+
+    private fun readSeedTag(graphId: String?): String? {
+        if (graphId.isNullOrBlank()) return null
+        val marker = java.io.File(
+            System.getProperty("user.home"),
+            ".onelens/graphs/$graphId/.onelens-baseline",
+        )
+        if (!marker.isFile) return null
+        return try {
+            Regex("\"tag\"\\s*:\\s*\"([^\"]+)\"")
+                .find(marker.readText())?.groupValues?.get(1)
+        } catch (_: Throwable) { null }
     }
 
     private fun publish(event: OneLensEvent) {
