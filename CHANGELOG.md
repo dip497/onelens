@@ -7,6 +7,17 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed — Phase R Stage 2 · Status tab UX polish (2026-04-21)
+
+- **Prerequisites block collapses when healthy.** If backend + uv + venv
+  + CLI are all ✓, the full checklist hides behind a single green
+  `✓ Prerequisites OK (click to expand)` line. Click to toggle. Failures
+  auto-expand the full list. Reclaims ~30 % of panel height.
+- **Event log hidden until useful.** Console panel starts collapsed.
+  First published event (Info/Warn/Error/SyncComplete/…) shows it. The
+  toolbar's `Clear Log` action renamed → `Clear / Hide Log` — clears
+  text + hides panel in one shot.
+
 ### Added — Phase R Stage 1d · Snapshot-as-seed for onboarding (2026-04-21)
 
 "Start working from this snapshot" — new dev installs a shared release
