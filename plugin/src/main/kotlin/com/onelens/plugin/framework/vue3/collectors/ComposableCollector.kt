@@ -20,6 +20,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComposableData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Detects Vue composables via the `useX` naming convention. A composable is:
@@ -54,9 +55,7 @@ object ComposableCollector {
             ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = ctx.workspace.scope(project)
-        val files = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
-        )
+        val files = smartRead(project) { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         val psiManager = PsiManager.getInstance(project)
 
         for (vf in files) {

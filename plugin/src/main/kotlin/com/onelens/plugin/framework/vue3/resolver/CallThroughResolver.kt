@@ -21,6 +21,7 @@ import com.onelens.plugin.export.UsesComposableEdge
 import com.onelens.plugin.export.UsesStoreEdge
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Post-pass that walks every Component (and Composable) and emits:
@@ -68,9 +69,7 @@ object CallThroughResolver {
         val emittedStoreEdges = HashSet<Triple<String, String, Boolean>>()
         val emittedComposableEdges = HashSet<Pair<String, String>>()
 
-        val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
-        )
+        val allFiles = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         for (vf in allFiles) {
             ProgressManager.checkCanceled()
             val relative = ctx.relativize(Paths.get(vf.path))

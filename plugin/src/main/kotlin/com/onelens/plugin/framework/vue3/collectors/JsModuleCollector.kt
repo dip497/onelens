@@ -30,6 +30,7 @@ import com.onelens.plugin.export.JsModuleData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import com.onelens.plugin.framework.vue3.VuePsiScope
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Closes the "business-logic layer is invisible" gap: plain JS helper
@@ -75,9 +76,7 @@ object JsModuleCollector {
             ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = ctx.workspace.scope(project)
-        val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
-        )
+        val allFiles = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         val psiManager = PsiManager.getInstance(project)
 
         for (vf in allFiles) {

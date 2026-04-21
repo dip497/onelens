@@ -18,6 +18,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComponentData
 import com.onelens.plugin.export.PropData
 import com.onelens.plugin.framework.vue3.Vue3Context
+import com.onelens.plugin.framework.vue3.smartRead
 import java.nio.file.Paths
 
 /**
@@ -55,8 +56,7 @@ object SfcScriptSetupCollector {
         // `Read access is allowed from inside read-action only` if we call it
         // from a background thread directly (older IDEs are more lenient).
         // runReadActionInSmartMode handles both constraints in one call.
-        val vueFiles = DumbService.getInstance(project)
-            .runReadActionInSmartMode(Computable { FileTypeIndex.getFiles(vueType, scope).toList() })
+        val vueFiles = smartRead(project) { FileTypeIndex.getFiles(vueType, scope).toList() }
         LOG.info("SfcScriptSetupCollector: ${vueFiles.size} .vue files to scan")
         val psiManager = PsiManager.getInstance(project)
 
