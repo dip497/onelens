@@ -332,7 +332,7 @@ object PythonEnvManager {
         }
 
         // Fallback: try which
-        return try {
+        val whichPath = try {
             val process = ProcessBuilder("which", "uv")
                 .redirectErrorStream(true)
                 .start()
@@ -340,6 +340,49 @@ object PythonEnvManager {
             process.waitFor()
             if (process.exitValue() == 0 && path.isNotEmpty()) path else null
         } catch (_: Exception) {
+            null
+        }
+        if (whichPath != null) return whichPath
+
+        // Still missing — try to auto-install via the upstream installer so
+        // users don't get stuck on the "uv not found" hint. Needs network on
+        // first sync; no-op if installer fails (user can then install manually).
+        return autoInstallUv()
+    }
+
+    /**
+     * Best-effort: shell-out to `curl -LsSf https://astral.sh/uv/install.sh | sh`
+     * and re-probe. The script lands uv at `~/.local/bin/uv`. We surface
+     * progress via OneLensEvents so the sync panel doesn't look hung.
+     */
+    private fun autoInstallUv(): String? {
+        OneLensEvents.progress("Installing uv (first-run, needs internet)", 0.05)
+        LOG.info("uv not found; attempting auto-install via astral.sh/uv/install.sh")
+        val home = System.getProperty("user.home")
+        val target = "$home/.local/bin/uv"
+        try {
+            val cmd = listOf(
+                "bash", "-c",
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            )
+            val proc = ProcessBuilder(cmd)
+                .redirectErrorStream(true)
+                .start()
+            val out = proc.inputStream.bufferedReader().readText()
+            val ok = proc.waitFor() == 0
+            if (!ok) {
+                LOG.warn("uv auto-install failed: ${out.take(500)}")
+                return null
+            }
+        } catch (e: Throwable) {
+            LOG.warn("uv auto-install threw: ${e.message}")
+            return null
+        }
+        return if (File(target).canExecute()) {
+            LOG.info("Auto-installed uv at $target")
+            target
+        } else {
+            LOG.warn("uv install script ran but binary not at $target")
             null
         }
     }
