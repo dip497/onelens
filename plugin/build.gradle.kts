@@ -26,6 +26,22 @@ dependencies {
     // JSON serialization for export output
     implementation(libs.kotlinx.serialization.json)
 
+    // Official MCP Kotlin SDK (modelcontextprotocol + JetBrains). Used by
+    // OneLensMcpClient to POST tool calls over Streamable HTTP to the
+    // plugin-owned Python MCP child. Version aligned with Ktor 3.3.3 per
+    // the SDK's libs.versions.toml. `ktor-client-cio` is the pure-Kotlin
+    // engine; ships clean inside IntelliJ's classloader.
+    // Official MCP Kotlin SDK — pinned to 0.9.0 because 0.10+ ships
+    // metadata compiled with Kotlin 2.3, which the IntelliJ Platform
+    // 2025.1-bundled Kotlin compiler (2.1.20) cannot read. 0.9.0 was
+    // published against Kotlin 2.1 / Ktor 2.3 and loads cleanly in the
+    // plugin classloader. Bump to 0.11+ when the IntelliJ platform
+    // bumps its Kotlin toolchain.
+    // Ktor CIO is the pure-Kotlin HTTP engine used by the transport;
+    // alternatives (OkHttp / Apache) pull platform-conflicting deps.
+    implementation("io.modelcontextprotocol:kotlin-sdk-client:0.9.0")
+    implementation("io.ktor:ktor-client-cio:2.3.12")
+
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.opentest4j)

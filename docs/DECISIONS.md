@@ -979,3 +979,169 @@ ADR-025 (unified tool window — right-click menu on snapshot rows is
 where `Start working from this snapshot` lives),
 `docs/design/phase-r-stage-1d-snapshot-as-seed.md` (full spec).
 
+
+## ADR-027 · 2026-04-21 · Local semantic — Jina v2 base code + BGE reranker, no Modal dependency
+
+**Decision.** When the user picks "Local" on the Semantic settings screen,
+embed + rerank both run on-device via ONNX Runtime:
+- Embed: `jinaai/jina-embeddings-v2-base-code` (161 M, 768-dim, Apache 2.0).
+- Rerank: `BAAI/bge-reranker-base` (278 M, Apache 2.0).
+- Provider: TRT fp16 → CUDA fp32 → CPU, picked automatically from what's
+  importable in the managed venv.
+OpenAI-compat (BYOK URL + API key + model + dim) is the only *other* user-
+visible backend. Modal stays available via env var for dev, not exposed in UI.
+
+**Context.** Users ship OneLens into air-gapped enterprise machines and
+consumer laptops. The Modal-only path required outbound network + a paid
+Modal account + ~2 s per-query latency floor. First full sync on a 100k-
+method repo was ~20 min wall-time, dominated by network round-trips even
+when the GPU had spare cycles.
+
+**Alternatives considered.**
+
+- *Qwen3-Embedding-0.6B local ONNX.* Already shipped via `embedder.py`.
+  1 024-dim, bigger model (~1.2 GB download), decoder-style ONNX with 28
+  KV-cache inputs per forward, hit NaN issues on TF32 earlier. Left in place
+  as the Modal-container internal embedder — but too heavy for a
+  laptop-first local path.
+- *CodeSage large (1.3 B).* Better CoIR scores, but 4-5 GB VRAM won't fit
+  the target consumer GPU (RTX A2000 Laptop 4 GB).
+- *Voyage-code-3.* Highest MTEB-Code score we saw (84.0) but closed API —
+  fails the air-gapped requirement.
+- *Nomic Embed Code (7 B).* Too big for 4 GB VRAM.
+
+**Measured on RTX A2000 Laptop** (101 M params @ 768-dim, seq ≤256):
+- CPU: 46 ms/item → 77 min / 100k methods.
+- CUDA fp32: 4.5 ms/item → 7.6 min.
+- TRT fp16: 1.2 ms/item → 2.0 min (3.6× over CUDA, 38× over CPU).
+Top-1 hits identical across providers on spot checks
+(`authenticateUser` 0.78, `notifySlaBreach` 0.72, `findAssetByIp` 0.71).
+
+**Why TRT fp16 is opt-in (dedicated install button).**
+Keeps the base local-install at ~1 GB. TRT adds ~1 GB more and introduces
+a harder NVIDIA-only dependency. The Jina v2 paper reports *BF16* gave
+unsatisfactory metrics, but TRT's auto-fallback keeps LayerNorm + Reduce
++ Pow in fp32 (the warning visible at load time is exactly this kick-in),
+which is the mitigation for the BF16 overflow path. We still gate it on a
+button click rather than auto-install because corpus-level recall@k isn't
+validated on code retrieval yet.
+
+**Why API key in PasswordSafe, not XML.** IntelliJ's `XmlSerializer`
+round-trips the settings state into plaintext under
+`~/.config/JetBrains/.../options/onelens-settings.xml`. Secrets don't
+belong there. `OpenAiSecrets.kt` uses the system credential store
+(Keychain / libsecret / Windows Credential Locker) via `PasswordSafe`.
+
+**Why dim-check at query time, not at write time.** Write-time check would
+require re-opening the collection in the middle of every sync. Query time
+is cheap (one `collection.peek(limit=1)`) and catches the real footgun —
+user switches from Jina 768-dim to OpenAI 1 536-dim without `--clear`,
+queries return silently-wrong cosine scores. Raising an error with
+"re-sync with --clear" is the desired UX.
+
+**Revisit when:**
+
+- *TRT fp16 quality drift is observed on a real corpus.* Add a
+  `recall@k` harness to `python/benchmarks/` that compares fp32 vs fp16
+  vectors and fails if Jaccard@10 drops below 0.9. Gate the install
+  button on the harness passing a pre-release checkpoint.
+- *A larger code-specialized model fits in 4 GB VRAM.* Swap the default,
+  keep Jina as the fallback for smaller GPUs.
+- *Jina ships a v3 base code.* Auto-update path: bump
+  `DEFAULT_MODEL` in `local_backend.py`, add a migration note requiring
+  `--clear` (new weights = different embedding space, so the stored
+  ChromaDB vectors are invalid).
+- *We add a "Modal" option back to the UI.* User demand for a managed
+  zero-setup path that doesn't touch customer GPUs. Requires billing
+  UX work and a Modal account; not in scope until cloud offering ships.
+
+Cross-references: ADR-004 (graph backend pluggable — same factory pattern),
+`python/src/onelens/context/embed_backends/__init__.py` (factory),
+`plugin/.../settings/SemanticSettingsConfigurable.kt` (UI).
+
+## ADR-028 · 2026-04-21 · Plugin owns Python MCP child (not embedded JVM server)
+
+**Decision.** The IntelliJ plugin spawns the Python MCP server
+(`python -m onelens.mcp_server --http --port <N>`) as a child process
+with lifecycle scoped to the IDE session. Plugin talks to it over
+Streamable HTTP via the official `io.modelcontextprotocol:kotlin-sdk-client`
+SDK + Ktor CIO. The child also serves external MCP clients (Claude Code,
+Codex, Cursor) that register via
+`claude mcp add --scope user --transport http onelens http://127.0.0.1:<port>/mcp/`
+— one warm Python serves everyone.
+
+**Context.** Phase S landed local embed + rerank via ONNX, but every
+`onelens` CLI call is a fresh subprocess that pays ~5-15 s to load the
+model + deserialize TRT engines. Delta sync on every file save amplified
+this pain: 12 s of model-load per 1 s of actual work. Needed a warm path.
+
+**Alternatives considered.**
+
+- *hechtcarmel/jetbrains-index-mcp-plugin approach — embedded Ktor server
+  in the IDE JVM.* Elegant for their tools because they're Kotlin + PSI.
+  Not applicable to us: our tools are Python (FalkorDB, ChromaDB, ONNX
+  runtime, sqlglot, networkx). Rewriting them to JVM = 3-4 months of
+  work for a less-capable system (no good JVM equivalent for ChromaDB or
+  sqlglot). ADR-027 rejected a Kotlin rewrite of the embedder for the
+  same reason.
+- *Plugin requires the user to manually run `onelens daemon start`.*
+  Rejected — one-click UX matters. JetBrains plugin auto-lifecycle is
+  the expected pattern, matches hechtcarmel's and every other MCP-in-IDE
+  integration.
+- *Hand-rolled JSON-RPC client over java.net.http.HttpClient.*
+  Actually tested and works (130 LoC, zero external deps). Rejected in
+  favor of the official SDK for typed request/response + future-proof
+  session management. Fallback stays possible if the SDK breaks: the
+  OneLensMcpClient surface is tiny (two methods) and easy to reimplement.
+- *MCP SDK 0.11.x.* Blocked by the Kotlin 2.1.20 compiler bundled with
+  IntelliJ Platform 2025.1 — 0.10+ ships with Kotlin 2.3 metadata that
+  the compiler refuses to read. Pinned to 0.9.0 until the platform
+  bumps its Kotlin toolchain.
+
+**Why stateless HTTP (`FASTMCP_STATELESS_HTTP=1`).** Simplifies the
+Kotlin client — no MCP-Session-ID tracking, no `initialize` handshake
+correlation, every tool call is a standalone POST. Server-side cost is
+near-zero (the same Python process handles every request, so "state" is
+still there, just not tracked per client). Accepted that some future
+MCP features requiring per-client state (long-running tool subscriptions)
+would need us to flip stateful later.
+
+**Why port 29170 base.** Matches hechtcarmel's default; avoids the
+well-known-ports range. Retry up to +30 on `BindException` so two IDE
+instances on one machine get unique ports. Chosen port is written to
+`~/.onelens/mcp.port` so external MCP clients discover the live port
+without the plugin having to coordinate with `claude mcp add`.
+
+**Why plugin-owned instead of systemd / launchd.** Lifecycle should
+follow developer intent: IDE open = server running, IDE closed = server
+gone. Stale Python processes surviving IDE close would hold 1-2 GB of
+GPU+RAM indefinitely. `Disposable.dispose()` + `Process.destroy()` ties
+the two cleanly. Users who want a persistent server outside the IDE can
+still run `onelens daemon start` manually.
+
+**Non-goals (Phase T scope).**
+
+- Streaming progress events via SSE mid-call — plugin shows "→ MCP call
+  onelens_import" and then a single summary event on completion. The CLI
+  fallback still streams stdout lines. Live progress over MCP SSE lands
+  in Phase T.1 if we need it.
+- Plugin-owned retrieve + status calls. Phase T only wires import; a
+  follow-up phase migrates `OneLensStatusService` and any future
+  retrieve UI.
+
+**Revisit when:**
+
+- *IntelliJ Platform bumps Kotlin to 2.3.* Swap `kotlin-sdk-client:0.9.0`
+  → `0.11.x`; API migrates `io.modelcontextprotocol.kotlin.sdk.types.*`
+  back to top-level. Small PR.
+- *FastMCP ships native progress-over-SSE for stateless mode.* Currently
+  progress notifications are tied to stateful sessions. When they arrive,
+  rewire `ExportService` to stream events straight into `OneLensEvents`
+  for live UI.
+- *Plugin ships headless mode (CI snapshot producer).* Daemon lifecycle
+  needs to decouple from project open — either auto-start on JVM boot
+  or wrap in a systemd unit. Out of scope today.
+
+Cross-references: ADR-027 (local semantic stack — this is the transport
+upgrade on top), hechtcarmel/jetbrains-index-mcp-plugin (prior art for
+IDE-hosted MCP), `plugin/.../mcp/OneLensMcpService.kt` + `OneLensMcpClient.kt`.

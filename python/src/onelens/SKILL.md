@@ -343,13 +343,14 @@ next sync. Prerequisite: the snapshot is installed (via
 `onelens_snapshots_pull --repo local`).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_snapshot_promote --graph <value> --tag <value>
+uv run --with fastmcp python cli_generated.py call-tool onelens_snapshot_promote --graph <value> --tag <value> --commit-sha <value>
 ```
 
 | Flag | Type | Required | Description |
 |------|------|----------|-------------|
 | `--graph` | string | yes |  |
 | `--tag` | string | yes |  |
+| `--commit-sha` | string | no | JSON string |
 
 ## Utility Commands
 

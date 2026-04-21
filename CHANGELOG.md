@@ -7,6 +7,83 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Phase T · Plugin ⇄ MCP HTTP (warm process) (2026-04-21)
+
+- **Embedded MCP HTTP server lifecycle.** New
+  `plugin/.../mcp/OneLensMcpService.kt` app-level service spawns the
+  Python MCP server as a child process (`python -m onelens.mcp_server
+  --http`) on first project open when `buildSemanticIndex` is on.
+  Writes the chosen port to `~/.onelens/mcp.port` for external MCP
+  clients to discover. Graceful SIGTERM on IDE shutdown via
+  `Disposable`. Port strategy: base 29170, retry up to +30 on
+  `BindException`. Pattern cribbed from `hechtcarmel/jetbrains-index-mcp-plugin`
+  adapted for Python-child instead of in-JVM Ktor.
+- **JSON-RPC client over Java 11 HttpClient** in
+  `plugin/.../mcp/OneLensMcpClient.kt` (~130 LoC). Stateless mode
+  (`FASTMCP_STATELESS_HTTP=1`) skips MCP-Session-ID tracking. Parses
+  FastMCP's Server-Sent Events response (walks `data:` lines) and
+  unwraps `result.structuredContent` → plain JSON for callers.
+- **`ExportService.syncToGraph` fast path.** When the MCP server is
+  reachable, the sync POSTs `onelens_import` via HTTP instead of
+  spawning a fresh Python subprocess — first delta goes through, then
+  every subsequent delta reuses the warm embedder + reranker. Cold
+  fallback to the CLI subprocess on any MCP failure, preserving
+  today's reliability floor.
+- **Python entry point** — `mcp_server.py`'s `__main__` gained
+  `--http --host --port` flags so the plugin can spawn the HTTP
+  transport directly (`fastmcp run` is not a hard requirement).
+- **Multi-shape daemon warmup.** `ONELENS_WARM_ON_START=1` now primes
+  batch shapes `[1, 32]` for the embedder and `[30]` for the rerank
+  cross-encoder, so TRT engines are cache-hot for production shapes
+  before the first user query lands. Previously warmed only batch=1,
+  which left delta syncs paying a ~60 s engine build for the
+  typical batch=32 Kotlin-side chunk size.
+- **Docs**: ADR-028 covers the plugin-owned Python child model vs
+  hechtcarmel's in-JVM Ktor approach. Claude Code / Codex / Cursor
+  users register the server with
+  `claude mcp add --scope user --transport http onelens http://127.0.0.1:<port>/mcp/`
+  (discover the port via `cat ~/.onelens/mcp.port`).
+
+### Added — Phase S · Local semantic embedder + reranker (2026-04-21)
+
+- **Fully-local embed + rerank via onnxruntime.** New backends under
+  `python/src/onelens/context/embed_backends/`:
+  - `local_backend.py` — Jina-embeddings-v2-base-code (161M, 768-dim,
+    Apache 2.0) over ONNX. Auto-picks `TensorrtExecutionProvider` (fp16)
+    when `tensorrt-cu12` is importable, else `CUDAExecutionProvider`
+    (fp32), else CPU. Preloads `libnvinfer*.so` via `ctypes.CDLL` so
+    the TRT EP works without `LD_LIBRARY_PATH` surgery.
+  - `local_reranker.py` — `BAAI/bge-reranker-base` cross-encoder, same
+    provider-pick logic. Keeps Modal-path retrieval parity.
+- **Measured on RTX A2000 Laptop 4 GB**: CPU 46 ms/item → ~77 min / 100k;
+  CUDA fp32 4.5 ms/item → ~7.6 min; TRT fp16 1.2 ms/item → ~2 min. All
+  top-1 semantic hits identical to the Qwen3 baseline on spot checks.
+- **New Semantic settings screen** at `Preferences → Tools → OneLens
+  Semantic`. Two user-visible backends:
+  - **Local** (default) — shows live provider label
+    (`cpu`/`cuda-fp32`/`trt-fp16`) and a one-click "Install TensorRT
+    fp16 acceleration (+1 GB, ~3× faster)" button.
+  - **OpenAI-compat** — Base URL + API key + model + dimension. API
+    key lives in IntelliJ PasswordSafe (`OpenAiSecrets.kt`), never in
+    plaintext XML.
+- **Plugin install branching.** `PythonEnvManager.installSemanticStack()`
+  dispatches on `embedderBackend`:
+  - `local`  → chromadb + onnxruntime-gpu + cuDNN + cuBLAS + tokenizers
+    + HF hub (~1 GB).
+  - `openai` → chromadb + httpx only (~80 MB).
+  - New `installTensorrt()` + `detectLocalProvider()` helpers.
+- **Env wiring** in `ExportService.syncToGraph`: passes
+  `ONELENS_EMBED_BACKEND` / `ONELENS_RERANK_BACKEND` + (for openai)
+  `ONELENS_EMBED_BASE_URL/MODEL/DIM/API_KEY` to every CLI subprocess.
+  Local path always sets rerank=local so retrieval uses BGE cross-encoder.
+- **Dim-mismatch guard** in `chroma.py`: at query time, peeks one stored
+  vector and compares dim vs active embedder; raises a clear re-sync
+  instruction if they diverge (prevents silently-wrong cosine scores
+  when the user swaps Jina ↔ OpenAI without `--clear`).
+- **`pyproject.toml` extras**: new `context-local` (1 GB, default for
+  plugin) + `context-local-trt` (adds `tensorrt-cu12`). `context`
+  retained for Modal/OpenAI-only users.
+
 ### Changed — Phase R Stage 2 · Status tab UX polish (2026-04-21)
 
 - **Prerequisites block collapses when healthy.** If backend + uv + venv

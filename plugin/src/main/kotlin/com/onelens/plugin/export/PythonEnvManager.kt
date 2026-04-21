@@ -29,6 +29,12 @@ object PythonEnvManager {
 
     private val ONELENS_HOME: Path = Paths.get(System.getProperty("user.home"), ".onelens")
     private val VENV_DIR: Path = ONELENS_HOME.resolve("venv")
+
+    /** Path to the venv python binary — callers use it to spawn onelens CLI
+     * or the MCP server child. Always points at the managed venv even when
+     * the binary doesn't yet exist (e.g. pre-first-sync). */
+    fun getVenvPython(): java.io.File =
+        VENV_DIR.resolve("bin").resolve("python").toFile()
     private val ONELENS_BIN: Path = VENV_DIR.resolve("bin").resolve("onelens")
     // Extracted Python source lives here; keyed by plugin version so a plugin
     // upgrade rewrites the tree and triggers a reinstall.
@@ -466,35 +472,159 @@ object PythonEnvManager {
     }
 
     /**
-     * Lazy install of the semantic stack (chromadb + onnxruntime + numpy +
-     * tokenizers, ~80 MB, ~5 min on a fresh venv). Called from
-     * ToggleSemanticIndexAction when the user opts in. Idempotent — a
-     * second call is a no-op once chromadb is resolvable inside the venv.
+     * Lazy install of the semantic stack. Dispatches on OneLensSettings.embedderBackend:
+     *   - "modal" / "openai" → just chromadb (~80 MB; remote inference does the heavy lift).
+     *   - "local"            → chromadb + onnxruntime-gpu + cuDNN + cuBLAS + tokenizers +
+     *                          huggingface_hub (~1 GB). Optional tensorrt-cu12 (+1 GB)
+     *                          when localEmbedderUseTRT is on.
+     *
+     * Called from ToggleSemanticIndexAction. Idempotent — re-running is a
+     * no-op once `chromadb` imports in the venv, so switching backends later
+     * requires a manual re-install (we don't delete prior wheels).
      */
     fun installSemanticStack(): Boolean {
         if (isSemanticInstalled()) {
             OneLensEvents.info("Semantic stack already installed — skipping")
             return true
         }
-        OneLensEvents.progress(
-            "Installing semantic stack (~80 MB: chromadb, onnxruntime, numpy) — first run only",
-            0.1,
-        )
+        val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+        val backend = settings.embedderBackend.lowercase()
+        val pkgs: List<String>
+        val label: String
+        when (backend) {
+            "local" -> {
+                // Local path ships BOTH embed (Jina v2) AND rerank (BGE base) —
+                // onnxruntime reuses the same GPU session for both. TRT is
+                // installed separately via installTensorrt() (the button on
+                // the Semantic settings screen), so it's absent here even
+                // when the user already toggled it on — flipping to "local"
+                // the first time requires the base install regardless.
+                pkgs = listOf(
+                    "chromadb>=1.0.0",
+                    "onnxruntime-gpu>=1.20",
+                    "nvidia-cudnn-cu12>=9,<10",
+                    "nvidia-cublas-cu12",
+                    "nvidia-cuda-runtime-cu12",
+                    "nvidia-cuda-nvrtc-cu12",
+                    "huggingface_hub>=0.24",
+                    "tokenizers>=0.20",
+                )
+                label = "Installing local embedder + reranker (~1 GB: onnxruntime-gpu + CUDA 12, first run only)"
+            }
+            "openai" -> {
+                // Cloud BYOK path — only needs chromadb (vector store) and
+                // httpx (bulk-concurrent embedding HTTP). No GPU/CUDA wheels.
+                pkgs = listOf("chromadb>=1.0.0", "httpx>=0.27")
+                label = "Installing semantic stack (~80 MB: chromadb + httpx — remote inference)"
+            }
+            else -> {
+                pkgs = listOf("chromadb>=1.0.0")
+                label = "Installing semantic stack (~80 MB: chromadb — backend=$backend)"
+            }
+        }
+        OneLensEvents.progress(label, 0.1)
         val uvBin = findUv() ?: run {
             OneLensEvents.error("uv not found — cannot install semantic stack")
             return false
         }
         val venvPython = VENV_DIR.resolve("bin").resolve("python").toString()
         val ok = runCommand(
-            listOf(uvBin, "pip", "install", "chromadb>=1.0.0", "--python", venvPython),
+            listOf(uvBin, "pip", "install") + pkgs + listOf("--python", venvPython),
             ONELENS_HOME.toFile(),
         )
         if (ok) {
-            OneLensEvents.info("Semantic stack installed. Re-sync to rebuild the embedding index.")
+            OneLensEvents.info("Semantic stack installed (backend=$backend). Re-sync to rebuild the embedding index.")
         } else {
             OneLensEvents.error("Semantic install failed — see idea.log for uv output")
         }
         return ok
+    }
+
+    /**
+     * Lazy install of TensorRT FP16 acceleration on top of the base local
+     * stack. Adds ~1 GB (`tensorrt-cu12`). Called from the "Install
+     * TensorRT…" button on the Semantic settings screen. Idempotent.
+     *
+     * Returns true on success; the caller flips [OneLensSettings.localEmbedderUseTRT]
+     * so subsequent syncs (and the screen label) know TRT is live.
+     */
+    fun installTensorrt(): Boolean {
+        if (isTensorrtInstalled()) {
+            OneLensEvents.info("TensorRT already installed — skipping")
+            return true
+        }
+        OneLensEvents.progress(
+            "Installing TensorRT fp16 acceleration (~1 GB, first run only)",
+            0.1,
+        )
+        val uvBin = findUv() ?: run {
+            OneLensEvents.error("uv not found — cannot install TensorRT")
+            return false
+        }
+        val venvPython = VENV_DIR.resolve("bin").resolve("python").toString()
+        val ok = runCommand(
+            listOf(uvBin, "pip", "install", "tensorrt-cu12>=10", "--python", venvPython),
+            ONELENS_HOME.toFile(),
+        )
+        if (ok) {
+            OneLensEvents.info("TensorRT installed. Next sync will use fp16 (~3× faster).")
+        } else {
+            OneLensEvents.error("TensorRT install failed — see idea.log for uv output")
+        }
+        return ok
+    }
+
+    /**
+     * Introspect the managed venv and report which ORT provider the local
+     * embedder will pick. Used by the Semantic settings screen to show the
+     * user what they're actually running. Returns one of:
+     *   "trt-fp16"  — tensorrt importable + onnxruntime-gpu loaded
+     *   "cuda-fp32" — onnxruntime-gpu loaded, no TRT
+     *   "cpu"       — fallback
+     *   "not-installed" — venv missing onnxruntime entirely
+     */
+    fun detectLocalProvider(): String {
+        val py = VENV_DIR.resolve("bin").resolve("python").toFile()
+        if (!py.canExecute()) return "not-installed"
+        return try {
+            // Single subprocess — avoids starting python 3 times.
+            val probe = """
+                |import importlib, sys
+                |try:
+                |    import onnxruntime as ort
+                |except Exception:
+                |    sys.stdout.write('not-installed'); sys.exit(0)
+                |try:
+                |    importlib.import_module('tensorrt'); sys.stdout.write('trt-fp16'); sys.exit(0)
+                |except Exception: pass
+                |if 'CUDAExecutionProvider' in ort.get_available_providers():
+                |    sys.stdout.write('cuda-fp32')
+                |else:
+                |    sys.stdout.write('cpu')
+            """.trimMargin()
+            val p = ProcessBuilder(py.absolutePath, "-c", probe)
+                .redirectErrorStream(true)
+                .start()
+            val out = p.inputStream.bufferedReader().readText().trim()
+            p.waitFor()
+            if (out.isNotBlank()) out else "not-installed"
+        } catch (_: Throwable) {
+            "not-installed"
+        }
+    }
+
+    /** Probe whether tensorrt is importable in the managed venv. */
+    fun isTensorrtInstalled(): Boolean {
+        val py = VENV_DIR.resolve("bin").resolve("python").toFile()
+        if (!py.canExecute()) return false
+        return try {
+            val p = ProcessBuilder(py.absolutePath, "-c", "import tensorrt")
+                .redirectErrorStream(true)
+                .start()
+            p.waitFor() == 0
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     /** Probe whether chromadb is importable in the managed venv. */

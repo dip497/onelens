@@ -22,8 +22,26 @@ nodes plus the edges between them. Each project lives in a **graph** (the
 `--graph` name); many graphs coexist on one backend (FalkorDB Lite by
 default — embedded, no Docker — or FalkorDB server on port 17532).
 
-All operations are exposed as 15 MCP tools under the `onelens_*` prefix,
-callable via `onelens call-tool <tool>` or directly from an MCP-aware agent.
+All operations are exposed as **19 MCP tools** under the `onelens_*`
+prefix.
+
+## Transport modes
+
+Two ways Claude Code reaches the tools. Both support the same tool
+names and arguments — only the invocation syntax differs.
+
+1. **MCP server (remote or local)** — preferred when `~/.claude/settings.json`
+   has an `mcpServers.onelens` entry (stdio or http). Tools appear in
+   the agent's tool list directly; call them by name with keyword args,
+   e.g. `onelens_status(graph="myapp")`. No shell needed.
+2. **CLI fallback** — if MCP isn't configured, shell-out via the bundled
+   CLI: `onelens call-tool <tool> --key val --key val`. Same tools,
+   translated to flags. Shapes below document the canonical keys; both
+   modes use the same ones.
+
+If you see an agent running examples as `onelens call-tool …`, they're
+the CLI form; MCP clients just call the tool directly with the same
+key/value pairs.
 
 ---
 

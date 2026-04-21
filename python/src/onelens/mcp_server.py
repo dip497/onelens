@@ -64,18 +64,31 @@ async def lifespan(server: FastMCP):
 
         t0 = time.time()
         logger.info("Warming embedder + reranker…")
+        # Warm several batch shapes, not just batch=1. The local ORT path
+        # builds TRT engines per input shape and caches them at
+        # `~/.onelens/trt-cache/` — first encounter costs 30-90 s per shape.
+        # Production retrieval hits shape=1 (user query) and shape≈30 (top-K
+        # rerank). Priming both now puts the first real user query on a warm
+        # engine. For Modal / OpenAI the extra calls are harmless cheap HTTP.
+        WARMUP_EMBED_SHAPES = [1, 32]
+        WARMUP_RERANK_K = 30
         try:
             from onelens.context.embed_backends import get_embedder
 
-            _STATE["embedder"] = get_embedder()
-            _STATE["embedder"].encode(["warmup"])
+            embedder = get_embedder()
+            _STATE["embedder"] = embedder
+            for n in WARMUP_EMBED_SHAPES:
+                embedder.encode(["public User findById(Long id)"] * n)
         except Exception as e:
             logger.warning("Embedder warmup failed: %s", e)
         try:
             from onelens.context.embed_backends import get_reranker
 
             reranker = get_reranker()
-            reranker.score("warmup", ["warmup"])
+            reranker.score(
+                "how does authentication work",
+                ["public User authenticateUser(String u, String p)"] * WARMUP_RERANK_K,
+            )
             _STATE["reranker"] = reranker
         except Exception as e:
             logger.warning("Reranker warmup failed: %s", e)
@@ -625,7 +638,7 @@ def onelens_snapshots_pull(
 
 
 @mcp.tool
-def onelens_snapshot_promote(graph: str, tag: str) -> dict:
+def onelens_snapshot_promote(graph: str, tag: str, commit_sha: str | None = None) -> dict:
     """Seed the live graph from an installed `<graph>@<tag>` snapshot.
 
     Copies the snapshot rdb + context dir into the live-graph slot,
@@ -640,11 +653,27 @@ def onelens_snapshot_promote(graph: str, tag: str) -> dict:
     """
     from onelens.snapshots import seed as _seed
 
-    return _seed.promote(graph=graph, tag=tag)
+    return _seed.promote(graph=graph, tag=tag, commit_sha=commit_sha)
 
 
 # ── Entry point for `fastmcp run` and `python -m onelens.mcp_server` ─────────
 
 
 if __name__ == "__main__":
-    mcp.run(show_banner=False)
+    # Dual-mode entry. Default (no args): stdio — matches what `fastmcp run`
+    # and `python -m onelens.mcp_server` have always done. `--http` flips to
+    # the Streamable HTTP transport that the plugin and remote MCP clients
+    # use as a warm, persistent server.
+    import argparse
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--http", action="store_true", help="run HTTP transport instead of stdio")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=29170)
+    ns, _ = p.parse_known_args()
+    if ns.http:
+        # `ONELENS_WARM_ON_START` is already honored by the lifespan above —
+        # plugin sets it so the server primes embed + rerank engines before
+        # the first tool call lands.
+        mcp.run(transport="http", host=ns.host, port=ns.port, show_banner=False)
+    else:
+        mcp.run(show_banner=False)
