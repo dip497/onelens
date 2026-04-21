@@ -84,10 +84,12 @@ object PythonEnvManager {
             return null
         }
 
-        // 2. Install onelens package (~80 MB — chromadb + modal + httpx).
-        //    Model weights live remote (Modal or OpenAI-compat provider);
-        //    no local GPU / ONNX deps needed. First-run: under 1 min.
-        OneLensEvents.progress("Installing onelens + context deps (~80 MB: chromadb, modal SDK, httpx)", 0.3)
+        // 2. Install onelens package — structural layer only (~30 MB).
+        //    Semantic stack (chromadb + onnxruntime + numpy, ~80 MB, ~5 min)
+        //    installs lazily via installSemanticStack() when the user toggles
+        //    Semantic Index ON. Keeps first-sync install under ~30 s for the
+        //    common structural-only case.
+        OneLensEvents.progress("Installing onelens (structural) ~30 MB", 0.3)
         if (!installOneLens(onelensSourcePath)) {
             OneLensEvents.error("Failed to install onelens — see idea.log for uv output")
             OneLensEvents.status(OneLensState.ERROR)
@@ -141,14 +143,14 @@ object PythonEnvManager {
         val pip = VENV_DIR.resolve("bin").resolve("pip").toString()
         val uvBin = findUv()
 
-        // Install with [context] extra so ChromaDB + Modal SDK + httpx are
-        // available. Heavy inference runs remotely (Modal or OpenAI-compat) —
-        // no local torch / ORT / GPU. Adds ~80 MB to venv.
+        // Install the structural-only stack. Semantic deps (chromadb +
+        // onnxruntime + numpy, ~80 MB, ~5 min on a fresh venv) move to
+        // installSemanticStack() — user pays that cost only when they
+        // explicitly toggle Semantic Index ON.
         // Resolution order:
         //   1. Explicit dev sourcePath from settings (editable install).
         //   2. Bundled Python source extracted from plugin JAR (default).
         //   3. PyPI fallback (future — not published yet; will fail today).
-        val extras = "[context]"
         val resolvedSource = if (sourcePath.isNotEmpty() && File(sourcePath).exists()) {
             sourcePath
         } else {
@@ -157,15 +159,12 @@ object PythonEnvManager {
         val packageSpec = if (resolvedSource.isNotEmpty()) {
             resolvedSource
         } else {
-            "onelens$extras"  // PyPI with context extra (fallback; not live yet)
+            "onelens"  // PyPI without context extra — structural only
         }
 
         val venvPython = VENV_DIR.resolve("bin").resolve("python").toString()
-        // For local/editable installs (dev or bundled), pip accepts `path[extra]`
-        // but not reliably across pip versions when combined with `-e`. Install
-        // the context extra explicitly as a second step.
-        val isDev = resolvedSource.isNotEmpty()
-        val devExtras = if (isDev) "chromadb>=1.0.0" else null
+        // No second-step install here — semantic deps moved out.
+        val devExtras: String? = null
 
         // Try uv pip install first (10x faster)
         if (uvBin != null) {
@@ -463,6 +462,52 @@ object PythonEnvManager {
             OneLensEvents.info("Linked 'onelens' into ~/.local/bin (available in any shell on PATH)")
         } catch (e: Exception) {
             LOG.info("Could not create ~/.local/bin/onelens symlink: ${e.message}")
+        }
+    }
+
+    /**
+     * Lazy install of the semantic stack (chromadb + onnxruntime + numpy +
+     * tokenizers, ~80 MB, ~5 min on a fresh venv). Called from
+     * ToggleSemanticIndexAction when the user opts in. Idempotent — a
+     * second call is a no-op once chromadb is resolvable inside the venv.
+     */
+    fun installSemanticStack(): Boolean {
+        if (isSemanticInstalled()) {
+            OneLensEvents.info("Semantic stack already installed — skipping")
+            return true
+        }
+        OneLensEvents.progress(
+            "Installing semantic stack (~80 MB: chromadb, onnxruntime, numpy) — first run only",
+            0.1,
+        )
+        val uvBin = findUv() ?: run {
+            OneLensEvents.error("uv not found — cannot install semantic stack")
+            return false
+        }
+        val venvPython = VENV_DIR.resolve("bin").resolve("python").toString()
+        val ok = runCommand(
+            listOf(uvBin, "pip", "install", "chromadb>=1.0.0", "--python", venvPython),
+            ONELENS_HOME.toFile(),
+        )
+        if (ok) {
+            OneLensEvents.info("Semantic stack installed. Re-sync to rebuild the embedding index.")
+        } else {
+            OneLensEvents.error("Semantic install failed — see idea.log for uv output")
+        }
+        return ok
+    }
+
+    /** Probe whether chromadb is importable in the managed venv. */
+    fun isSemanticInstalled(): Boolean {
+        val py = VENV_DIR.resolve("bin").resolve("python").toFile()
+        if (!py.canExecute()) return false
+        return try {
+            val p = ProcessBuilder(py.absolutePath, "-c", "import chromadb")
+                .redirectErrorStream(true)
+                .start()
+            p.waitFor() == 0
+        } catch (_: Throwable) {
+            false
         }
     }
 }
