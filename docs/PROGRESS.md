@@ -2,7 +2,40 @@
 
 Source of truth for what's landed, what's in flight, and what's deferred. Append-only per phase; mark status inline. Links point to the canonical artefact so this file stays skimmable.
 
-Last updated: 2026-04-20.
+Last updated: 2026-04-21.
+
+## Phase T — Plugin ⇄ MCP HTTP (2026-04-21)
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| T1 | Python MCP server HTTP entry (`--http --host --port`) | ✅ | `python/src/onelens/mcp_server.py` |
+| T2 | Multi-shape daemon warmup (embed [1,32] + rerank [30]) | ✅ | `mcp_server.py` lifespan |
+| T3 | `OneLensMcpService` — app-level Python-child lifecycle + port retry + SIGTERM | ✅ | `plugin/.../mcp/OneLensMcpService.kt` |
+| T4 | `OneLensMcpClient` — official MCP Kotlin SDK 0.9.0 + Ktor CIO | ✅ | `plugin/.../mcp/OneLensMcpClient.kt` |
+| T5 | Auto-start MCP server on project open (when Semantic ON) | ✅ | `plugin/.../autosync/AutoSyncStartupActivity.kt` |
+| T6 | `ExportService` fast-path via MCP when reachable; CLI fallback | ✅ | `plugin/.../export/ExportService.kt` |
+| T7 | Port file (`~/.onelens/mcp.port`) for external MCP client discovery | ✅ | `OneLensMcpService.writePortFile()` |
+| T8 | Stateless mode (`FASTMCP_STATELESS_HTTP=1`) for simpler clients | ✅ | `OneLensMcpService.buildEnv()` |
+
+---
+
+## Phase S — Local semantic (2026-04-21)
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| S1 | Local ONNX embedder (Jina v2 base code, TRT/CUDA/CPU auto-pick) | ✅ | `python/src/onelens/context/embed_backends/local_backend.py` |
+| S2 | Local cross-encoder reranker (BGE base) | ✅ | `python/src/onelens/context/embed_backends/local_reranker.py` |
+| S3 | Semantic settings screen (Preferences → Tools → OneLens Semantic) | ✅ | `plugin/.../settings/SemanticSettingsConfigurable.kt` |
+| S4 | API key in PasswordSafe (no plaintext XML) | ✅ | `plugin/.../settings/OpenAiSecrets.kt` |
+| S5 | One-click TensorRT install button (+1 GB, ~3× faster) | ✅ | `PythonEnvManager.installTensorrt()` |
+| S6 | Live provider label (cpu / cuda-fp32 / trt-fp16) | ✅ | `PythonEnvManager.detectLocalProvider()` |
+| S7 | Backend-dispatching `installSemanticStack` (local vs openai) | ✅ | `PythonEnvManager.kt` |
+| S8 | Env wiring (ExportService → CLI: embed + rerank + OpenAI creds) | ✅ | `plugin/.../export/ExportService.kt` |
+| S9 | Dim-mismatch guard at query time | ✅ | `python/src/onelens/context/backends/chroma.py` |
+| S10 | pyproject.toml extras: context-local + context-local-trt | ✅ | `python/pyproject.toml` |
+| S11 | POC measured on RTX A2000: 77 min CPU / 7.6 min CUDA / 2 min TRT per 100k | ✅ | `/tmp/jina_local_poc.py`, `/tmp/trt_bench.py` |
+
+---
 
 ---
 

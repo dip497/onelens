@@ -34,6 +34,30 @@ context = [
     "httpx>=0.27",                # OpenAI-compat bulk-concurrent embedding calls
     "numpy>=1.24",
 ]
+# Fully-local embedder (no egress, no Modal). Jina-embeddings-v2-base-code
+# via onnxruntime-gpu + pip-installed CUDA 12 runtime wheels. Works on any
+# NVIDIA GPU with CUDA-12-capable driver; falls back to CPU.
+# Install: ~1 GB (onnxruntime-gpu 60MB + cudnn 400MB + cublas 400MB + tokenizers
+# 10MB + hub 20MB). Model download ~320 MB on first encode.
+# Plugin installs this lazily when user picks ONELENS_EMBED_BACKEND=local.
+context-local = [
+    "chromadb>=1.0.0",
+    "onnxruntime-gpu>=1.20",
+    "nvidia-cudnn-cu12>=9,<10",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cuda-nvrtc-cu12",
+    "huggingface_hub>=0.24",
+    "tokenizers>=0.20",
+    "numpy>=1.24",
+]
+# TensorRT FP16 on top of context-local (3-4× full-sync speedup).
+# Opt-in via ONELENS_LOCAL_EMBED_TRT=1; FP16 inference not yet recall@k-
+# validated on code corpora. Adds ~1 GB.
+context-local-trt = [
+    "onelens[context-local]",
+    "tensorrt-cu12>=10",
+]
 # `lite` extra kept for backward compat — falkordblite is already in the base
 # dep list, so this resolves to a no-op. Remove in v0.3.
 lite = ["falkordblite>=0.9.0"]

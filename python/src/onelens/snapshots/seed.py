@@ -23,7 +23,12 @@ from onelens.snapshots.consumer import _rename_graph_in_rdb
 MARKER_FILENAME = ".onelens-baseline"
 
 
-def promote(graph: str, tag: str, onelens_home: Path | None = None) -> dict:
+def promote(
+    graph: str,
+    tag: str,
+    commit_sha: str | None = None,
+    onelens_home: Path | None = None,
+) -> dict:
     """Seed live graph from an installed <graph>@<tag> snapshot.
 
     Returns {live_rdb, live_context, commitSha, warnings}. Raises if the
@@ -63,8 +68,14 @@ def promote(graph: str, tag: str, onelens_home: Path | None = None) -> dict:
     else:
         manifest = json.loads(manifest_from_snapshot.read_text())
     # Older bundles may carry commitSha=null (publisher ran outside a git
-    # context). Resolve lazily from the tag name via `git rev-parse`.
-    if not manifest.get("commitSha"):
+    # context). Resolution order:
+    #   1. explicit --commit-sha override on the CLI (VM / CI)
+    #   2. manifest's commitSha if present
+    #   3. git rev-parse <tag> in cwd (only works when cwd is a git repo)
+    if commit_sha:
+        manifest["commitSha"] = commit_sha
+        warnings.append(f"commitSha overridden via argument: {commit_sha[:7]}…")
+    elif not manifest.get("commitSha"):
         manifest["commitSha"] = _resolve_tag_commit(tag, warnings)
     commit_sha = manifest.get("commitSha")
     schema_version = manifest.get("schemaVersion", 0)

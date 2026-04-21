@@ -37,6 +37,8 @@
     <extensions defaultExtensionNs="com.intellij">
         <applicationService
             serviceImplementation="com.onelens.plugin.settings.OneLensSettings"/>
+        <applicationService
+            serviceImplementation="com.onelens.plugin.mcp.OneLensMcpService"/>
         <projectService
             serviceImplementation="com.onelens.plugin.export.ExportState"/>
         <projectService
@@ -45,6 +47,11 @@
             serviceImplementation="com.onelens.plugin.ui.OneLensStatusService"/>
         <postStartupActivity
             implementation="com.onelens.plugin.autosync.AutoSyncStartupActivity"/>
+        <applicationConfigurable
+            parentId="tools"
+            id="com.onelens.plugin.settings.SemanticSettingsConfigurable"
+            displayName="OneLens Semantic"
+            instance="com.onelens.plugin.settings.SemanticSettingsConfigurable"/>
         <notificationGroup id="OneLens" displayType="BALLOON"/>
         <toolWindow id="OneLens"
                     anchor="right"

@@ -349,12 +349,68 @@ class ExportService {
                 command += "--clear"
             }
 
+            // Fast path — if the MCP HTTP server is running (started by
+            // AutoSyncStartupActivity when semantic is on), invoke the tool
+            // directly over HTTP. Skips Python cold-start + TRT engine
+            // reload + onnxruntime re-init. Cold-path fallback to the CLI
+            // subprocess if the server is down or the call errors.
+            val mcp = com.onelens.plugin.mcp.OneLensMcpService.getInstance()
+            if (mcp.isReachable()) {
+                publish(OneLensEvent.Info("→ MCP call onelens_import (${mcp.endpoint})"))
+                val args = mutableMapOf<String, Any?>(
+                    "export_path" to exportFile.toString(),
+                    "graph" to graphName,
+                    "backend" to config.graphBackend,
+                    "context" to config.buildSemanticIndex,
+                    "clear" to isFull,
+                )
+                val result = com.onelens.plugin.mcp.OneLensMcpClient.callToolStructured("onelens_import", args)
+                if (result != null) {
+                    return "Import successful (MCP): $result"
+                }
+                LOG.warn("MCP call failed, falling back to CLI subprocess")
+                publish(OneLensEvent.Info("MCP call failed — falling back to cold CLI"))
+            }
+
             LOG.info("Running: ${command.joinToString(" ")}")
             publish(OneLensEvent.Info("$ ${command.joinToString(" ")}"))
 
-            val process = ProcessBuilder(command)
-                .redirectErrorStream(true)
-                .start()
+            val pb = ProcessBuilder(command).redirectErrorStream(true)
+            // Route embedder / reranker selection through env vars so every
+            // `onelens import_graph` and `onelens retrieve` call picks up
+            // whichever backend the user chose on the Semantic settings
+            // screen. See python/src/onelens/context/embed_backends/__init__.py.
+            val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+            val env = pb.environment()
+            when (settings.embedderBackend.lowercase()) {
+                "local" -> {
+                    // Local embed + local rerank (both via onnxruntime). TRT
+                    // auto-enables when `tensorrt-cu12` is importable — no
+                    // env flag; the pip install IS the opt-in.
+                    env["ONELENS_EMBED_BACKEND"] = "local"
+                    env["ONELENS_RERANK_BACKEND"] = "local"
+                }
+                "openai" -> {
+                    // Cloud BYOK. API key lives in PasswordSafe; pull it at
+                    // exec time so it never lands on disk. Reranker = noop
+                    // (OpenAI has no rerank standard — the user can swap to
+                    // "modal" via env if they want cross-encoder reorder).
+                    env["ONELENS_EMBED_BACKEND"] = "openai"
+                    env["ONELENS_RERANK_BACKEND"] = "none"
+                    env["ONELENS_EMBED_BASE_URL"] = settings.openaiBaseUrl
+                    env["ONELENS_EMBED_MODEL"] = settings.openaiEmbedModel
+                    env["ONELENS_EMBED_DIM"] = settings.openaiEmbedDim.toString()
+                    com.onelens.plugin.settings.OpenAiSecrets.get()?.let {
+                        env["ONELENS_EMBED_API_KEY"] = it
+                    }
+                }
+                else -> {
+                    // Dev/legacy path (e.g. "modal") — pass through as-is so
+                    // power users can still override via ONELENS_EMBED_BACKEND.
+                    env["ONELENS_EMBED_BACKEND"] = settings.embedderBackend
+                }
+            }
+            val process = pb.start()
 
             // Stream stdout line-by-line so the tool window console updates
             // live during the 30s–20min import (PageRank + embedding pass).

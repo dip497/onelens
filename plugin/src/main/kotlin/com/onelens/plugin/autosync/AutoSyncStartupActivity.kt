@@ -26,12 +26,17 @@ class AutoSyncStartupActivity : ProjectActivity {
             service.enable()
         }
 
-        // No MCP daemon auto-start here. Most users run Claude Code /
-        // OpenCode which invoke `onelens` via their own bash tool — the
-        // daemon's sole purpose is to keep Qwen3+mxbai warm across MCP
-        // HTTP calls, irrelevant for shell-spawned CLI usage. The daemon
-        // starts on-demand when the user runs "Install MCP for AI Tools"
-        // (for Cursor/Codex/Windsurf) or manually via `onelens daemon start`.
+        // Auto-start the MCP HTTP server so the plugin's sync + retrieve
+        // calls hit a warm process (embedder + reranker stay loaded). Gated
+        // on `buildSemanticIndex` — graph-only users don't need the warm
+        // path and shouldn't pay the ~5-15 s model load. The server also
+        // serves external MCP clients (Claude Code, Codex, Cursor) if the
+        // user registered it via
+        //   `claude mcp add --scope user --transport http onelens http://127.0.0.1:<port>/mcp/`
+        // Port is written to `~/.onelens/mcp.port` for discovery.
+        if (state.buildSemanticIndex) {
+            com.onelens.plugin.mcp.OneLensMcpService.getInstance().start()
+        }
 
         if (!state.firstRunComplete) {
             state.firstRunComplete = true

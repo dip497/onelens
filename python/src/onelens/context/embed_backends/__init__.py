@@ -1,8 +1,11 @@
 """Factory for embedding + rerank backends.
 
 Read config from env vars (plugin settings populate these):
-    ONELENS_EMBED_BACKEND=modal|openai
+    ONELENS_EMBED_BACKEND=modal|openai|local
     ONELENS_RERANK_BACKEND=modal|none
+
+    # Local (onnxruntime) specific — no extra config needed; auto-picks
+    # TRT fp16 / CUDA fp32 / CPU. See local_backend.py for opt-in TRT flag.
 
     # OpenAI-compat specific:
     ONELENS_EMBED_BASE_URL=https://api.openai.com/v1
@@ -35,7 +38,10 @@ def get_embedder() -> EmbedBackend:
     if name in ("openai", "openai_compat", "openai-compat"):
         from .openai_compat import OpenAICompatEmbedder
         return OpenAICompatEmbedder()
-    raise ValueError(f"Unknown ONELENS_EMBED_BACKEND={name!r} (expected: modal | openai)")
+    if name in ("local", "onnx", "jina-local"):
+        from .local_backend import LocalEmbedder
+        return LocalEmbedder()
+    raise ValueError(f"Unknown ONELENS_EMBED_BACKEND={name!r} (expected: modal | openai | local)")
 
 
 def get_reranker() -> RerankBackend:
@@ -43,10 +49,13 @@ def get_reranker() -> RerankBackend:
     if name == "modal":
         from .modal_backend import ModalReranker
         return ModalReranker()
+    if name in ("local", "onnx"):
+        from .local_reranker import LocalReranker
+        return LocalReranker()
     if name in ("none", "noop", "disabled"):
         logger.info("Reranker disabled; falling back to embedding-score order.")
         return NoopReranker()
     raise ValueError(
-        f"Unknown ONELENS_RERANK_BACKEND={name!r} (expected: modal | none). "
+        f"Unknown ONELENS_RERANK_BACKEND={name!r} (expected: modal | local | none). "
         "OpenAI has no rerank standard; set ONELENS_RERANK_BACKEND=none to skip."
     )

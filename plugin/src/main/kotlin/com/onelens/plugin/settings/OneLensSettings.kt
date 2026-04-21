@@ -35,6 +35,24 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         // trace / Cypher / search). Flip ON to spend ~20 min on Qwen3 embeddings
         // and unlock natural-language retrieval (`onelens retrieve`).
         var buildSemanticIndex: Boolean = false,
+        // Embedder backend, user-selectable from Settings → Tools → OneLens Semantic.
+        //   "local"  — default. Jina-v2-base-code via onnxruntime-gpu +
+        //              CUDA 12 runtime (pip wheels). Air-gapped, ~1 GB install.
+        //   "openai" — any /v1/embeddings-compatible API (OpenAI, Voyage, Together,
+        //              Mistral, TEI). BYOK — the key lives in PasswordSafe, not XML.
+        // Modal is intentionally NOT exposed in the UI — it was the legacy dev
+        // default; set ONELENS_EMBED_BACKEND=modal manually if you need it.
+        var embedderBackend: String = "local",
+        // Set to true once the user clicks "Install TensorRT acceleration" on
+        // the Semantic settings screen. local_backend.py reads this indirectly:
+        // TRT is auto-enabled whenever `tensorrt-cu12` is importable, which only
+        // happens after the user clicks the install button.
+        var localEmbedderUseTRT: Boolean = false,
+        // OpenAI-compat BYOK — URL + model + dim. The API key itself lives in
+        // PasswordSafe (see OpenAiSecrets.kt), never in the XML settings file.
+        var openaiBaseUrl: String = "https://api.openai.com/v1",
+        var openaiEmbedModel: String = "text-embedding-3-small",
+        var openaiEmbedDim: Int = 1536,
         // Graph backend: "falkordblite" (embedded, no Docker) or "falkordb" (Docker on :17532).
         // Default flipped to lite in v0.2 for zero-setup UX. Windows users must pick "falkordb".
         var graphBackend: String = "falkordblite",

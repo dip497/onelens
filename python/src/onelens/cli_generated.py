@@ -481,6 +481,7 @@ async def onelens_snapshot_promote(
     *,
     graph: Annotated[str, cyclopts.Parameter(help="")],
     tag: Annotated[str, cyclopts.Parameter(help="")],
+    commit_sha: Annotated[str | None, cyclopts.Parameter(help="JSON Schema: {\n                            \"anyOf\": [\n                              {\n                                \"type\": \"string\"\n                              },\n                              {\n                                \"type\": \"null\"\n                              }\n                            ],\n                            \"default\": null\n                          }")] = None,
 ) -> None:
     '''Seed the live graph from an installed `<graph>@<tag>` snapshot.
 
@@ -493,7 +494,10 @@ delta sync uses the snapshot\'s commit SHA as the diff base
 Marker is one-shot — DeltaTracker consumes and deletes it on the
 next sync. Prerequisite: the snapshot is installed (via
 `onelens_snapshots_pull --repo local`).'''
-    await _call_tool('onelens_snapshot_promote', {'graph': graph, 'tag': tag})
+    # Parse JSON parameters
+    commit_sha_parsed = json.loads(commit_sha) if isinstance(commit_sha, str) else commit_sha
+
+    await _call_tool('onelens_snapshot_promote', {'graph': graph, 'tag': tag, 'commit_sha': commit_sha_parsed})
 
 
 if __name__ == "__main__":

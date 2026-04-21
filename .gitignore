@@ -71,3 +71,6 @@ AGENTS.local.md
 .claude/scheduled_tasks.lock
 scripts/*.tgz
 scripts/*@*
+
+# Internal / client-specific docs — never commit (contains VM IPs, client names, deployment notes).
+internal-docs/
