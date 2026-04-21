@@ -21,6 +21,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.StoreData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Collects Pinia store definitions. Recognizes both supported shapes:
@@ -65,9 +66,7 @@ object PiniaStoreCollector {
         val scope = ctx.workspace.scope(project)
         // FileTypeIndex.getFiles() needs a smart read action; WebStorm 2026.1+
         // throws "Read access is allowed from inside read-action only" otherwise.
-        val files = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
-        )
+        val files = smartRead(project) { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         val psiManager = PsiManager.getInstance(project)
         var scanned = 0
 

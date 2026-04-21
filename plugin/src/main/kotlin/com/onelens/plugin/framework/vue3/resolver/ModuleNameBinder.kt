@@ -16,6 +16,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ApiCallData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Resolves the most common parametric-URL shape seen in the target repo:
@@ -55,9 +56,7 @@ object ModuleNameBinder {
         // action. Per-file FileTypeIndex calls inside the parametrics loop
         // would re-pay the read-action penalty and trip WebStorm 2026.1's
         // strict "read access must be inside read action" guard.
-        val allFiles = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
-        )
+        val allFiles = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
 
         // File → { varName → literal } cache, rebuilt lazily per file.
         val fileConstants = HashMap<String, Map<String, String>>()

@@ -21,6 +21,7 @@ import com.onelens.plugin.export.DispatchesEdge
 import com.onelens.plugin.export.RouteData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Parses `*-routes.js` / `*-routes.ts` files and emits [RouteData] + `DISPATCHES`
@@ -64,13 +65,11 @@ object LazyRouteCollector {
             ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = ctx.workspace.scope(project)
-        val routeFiles = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable {
+        val routeFiles = smartRead(project) {
                 jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }
                     .filter { it.name.endsWith("-routes.js") || it.name.endsWith("-routes.ts") }
                     .distinct()
             }
-        )
 
         val psiManager = PsiManager.getInstance(project)
         for (vf in routeFiles) {

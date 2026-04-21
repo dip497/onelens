@@ -20,6 +20,7 @@ import com.onelens.plugin.export.ApiCallData
 import com.onelens.plugin.export.CallsApiEdge
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Emits [ApiCallData] for HTTP calls through common client wrappers:
@@ -51,9 +52,7 @@ object ApiCallCollector {
             ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
         )
         val scope = ctx.workspace.scope(project)
-        val files = DumbService.getInstance(project).runReadActionInSmartMode(
-            Computable { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
-        )
+        val files = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         val psiManager = PsiManager.getInstance(project)
 
         var scanned = 0
