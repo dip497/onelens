@@ -470,7 +470,15 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         }
 
         override fun update(e: AnActionEvent) {
-            e.presentation.isEnabled = !syncRunning.get()
+            val dumb = com.intellij.openapi.project.DumbService.isDumb(project)
+            e.presentation.isEnabled = !syncRunning.get() && !dumb
+            e.presentation.description = when {
+                dumb -> "Waiting for IntelliJ to finish indexing — " +
+                    "PSI APIs throw IndexNotReadyException during dumb mode, " +
+                    "which produces an empty graph."
+                syncRunning.get() -> "Sync already running"
+                else -> "Smart sync — delta when possible, falls back to full"
+            }
         }
 
         override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
