@@ -59,7 +59,6 @@ class ExportService {
         val startTime = System.currentTimeMillis()
         LOG.info("Starting full export for project: ${project.name}")
         publish(OneLensEvent.StatusChange(OneLensState.SYNCING))
-        publish(OneLensEvent.Info("Full export starting for ${project.name}"))
 
         if (project.basePath == null) return ExportResult.Error("Project has no base path")
 
@@ -82,6 +81,7 @@ class ExportService {
             return ExportResult.Error("Could not resolve workspace: ${e.message}")
         }
         LOG.info("Workspace '${workspace.name}' with ${workspace.roots.size} root(s); graphId='${workspace.graphId}'")
+        publish(OneLensEvent.Info("Full export starting for graph '${workspace.graphId}' (${workspace.roots.size} root(s))"))
 
         // Discover active adapters. EP lookup falls back to a hard-coded list when the
         // extension point hasn't been registered yet (e.g. in tests or if the config-file
