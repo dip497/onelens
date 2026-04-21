@@ -10,6 +10,7 @@ dependencies = [
     "fastmcp>=3.2.0",
     "cyclopts>=3.0.0",
     "networkx>=3.0",          # PageRank centrality prebake at import time
+    "scipy>=1.11",            # networkx 3.x PageRank requires scipy for sparse-matrix backend
     "pyyaml>=6.0",            # Benchmark cases.yaml + agent configs
     "sqlglot>=25.0",          # Phase C6 — parse Flyway migrations + custom SQL queries (AST-level table/column extraction)
     "orjson>=3.9",            # 3-5× faster JSON loads on big exports (500MB+ the reference project takes ~10s with stdlib, ~2s with orjson)

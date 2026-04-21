@@ -15,9 +15,12 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         var includeSpring: Boolean = true,
         var includeDiagnostics: Boolean = false,
         var excludeTestSources: Boolean = false,
-        // Auto-sync ON by default — users expect "install plugin → always fresh graph"
-        // without digging through Tools menu. Toggle off via Tools → OneLens.
-        var autoSyncEnabled: Boolean = true,
+        // Auto-sync OFF by default. On fresh installs, auto-sync can fire
+        // during IntelliJ's dumb-mode indexing pass (IndexNotReadyException)
+        // and overlap with the user's first manual Sync, producing empty or
+        // duplicate graphs with unexpected names. Opt-in: toggle on via Tools
+        // → OneLens → Enable Auto-Sync after the first manual sync succeeds.
+        var autoSyncEnabled: Boolean = false,
         var autoSyncDebounceMs: Int = 5000,
         // First-run flag — the startup activity checks this and shows a
         // one-time onboarding balloon on the first project open with the
