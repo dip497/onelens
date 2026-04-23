@@ -697,12 +697,16 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         override fun update(e: AnActionEvent) {
             // Disable until we know the graph name — destructive ops on a
             // fallback "current" name would no-op or wipe the wrong target.
+            // Also block during a live sync so we don't pull files out from
+            // under the CLI (which manifests as a bogus FileNotFoundError).
             val haveGraph = !lastSnapshot?.graphName.isNullOrBlank()
-            e.presentation.isEnabled = haveGraph
-            e.presentation.description = if (haveGraph)
-                "Delete graph, exports, or semantic index for a fresh start"
-            else
-                "Waiting for status refresh — graph name not yet known"
+            val syncing = com.onelens.plugin.export.SyncCoordinator.getInstance().isRunning()
+            e.presentation.isEnabled = haveGraph && !syncing
+            e.presentation.description = when {
+                !haveGraph -> "Waiting for status refresh — graph name not yet known"
+                syncing -> "Sync in progress — cancel it before cleaning up"
+                else -> "Delete graph, exports, or semantic index for a fresh start"
+            }
         }
 
         override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
@@ -721,29 +725,34 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
                 AllIcons.General.WarningDialog,
             )
             val svc = GraphCleanupService.getInstance()
-            when (choice) {
-                0 -> {
-                    val r = svc.clearExports(graph)
-                    publish(OneLensEvent.Info("Cleared ${r.description} — freed ${fmtBytes(r.bytesFreed)}"))
-                    refreshAsync()
-                }
-                1 -> {
-                    val r = svc.resetSemantic(graph)
-                    publish(OneLensEvent.Info("Reset ${r.description} — freed ${fmtBytes(r.bytesFreed)}. Re-sync to rebuild embeddings."))
-                    updateSemanticLine()
-                }
-                2 -> {
-                    if (com.intellij.openapi.ui.Messages.showYesNoDialog(
-                            project,
-                            "Delete graph '$graph' (rdb ${fmtBytes(lastSnapshot?.liteRdbSizeBytes ?: 0L)})? Re-sync required.",
-                            "Delete graph",
-                            AllIcons.General.WarningDialog,
-                        ) == com.intellij.openapi.ui.Messages.YES) {
-                        val r = svc.deleteGraph(graph)
-                        publish(OneLensEvent.Warn("Deleted ${r.description} — freed ${fmtBytes(r.bytesFreed)}. Click Sync to rebuild."))
+            try {
+                when (choice) {
+                    0 -> {
+                        val r = svc.clearExports(graph)
+                        publish(OneLensEvent.Info("Cleared ${r.description} — freed ${fmtBytes(r.bytesFreed)}"))
                         refreshAsync()
                     }
+                    1 -> {
+                        val r = svc.resetSemantic(graph)
+                        publish(OneLensEvent.Info("Reset ${r.description} — freed ${fmtBytes(r.bytesFreed)}. Re-sync to rebuild embeddings."))
+                        updateSemanticLine()
+                    }
+                    2 -> {
+                        if (com.intellij.openapi.ui.Messages.showYesNoDialog(
+                                project,
+                                "Delete graph '$graph' (rdb ${fmtBytes(lastSnapshot?.liteRdbSizeBytes ?: 0L)})? Re-sync required.",
+                                "Delete graph",
+                                AllIcons.General.WarningDialog,
+                            ) == com.intellij.openapi.ui.Messages.YES) {
+                            val r = svc.deleteGraph(graph)
+                            publish(OneLensEvent.Warn("Deleted ${r.description} — freed ${fmtBytes(r.bytesFreed)}. Click Sync to rebuild."))
+                            refreshAsync()
+                        }
+                    }
                 }
+            } catch (ex: GraphCleanupService.SyncInProgressException) {
+                com.intellij.openapi.ui.Messages.showWarningDialog(project, ex.message, "Clean Up blocked")
+                publish(OneLensEvent.Warn("Clean Up blocked — sync in progress"))
             }
         }
     }

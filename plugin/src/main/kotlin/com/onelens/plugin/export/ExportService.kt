@@ -419,18 +419,41 @@ class ExportService {
                 }
             }
             val process = pb.start()
+            val coordinator = SyncCoordinator.getInstance()
+            coordinator.setActiveProcess(process)
 
-            // Stream stdout line-by-line so the tool window console updates
-            // live during the 30s–20min import (PageRank + embedding pass).
+            // Stream stdout on a daemon thread so the main thread can poll
+            // the ProgressIndicator for cancellation — `readLine()` blocks
+            // until EOF and there's no interruptible variant on the JVM.
             val output = StringBuilder()
-            process.inputStream.bufferedReader().use { reader ->
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    output.appendLine(line)
-                    publish(OneLensEvent.Info(line))
+            val reader = Thread({
+                try {
+                    process.inputStream.bufferedReader().use { r ->
+                        while (true) {
+                            val line = r.readLine() ?: break
+                            synchronized(output) { output.appendLine(line) }
+                            publish(OneLensEvent.Info(line))
+                        }
+                    }
+                } catch (_: Exception) { /* stream closed on kill */ }
+            }, "onelens-cli-stdout").apply { isDaemon = true; start() }
+
+            val indicator = com.intellij.openapi.progress.ProgressManager.getInstance().progressIndicator
+            while (process.isAlive) {
+                if (indicator?.isCanceled == true) {
+                    publish(OneLensEvent.Warn("Cancelled — killing onelens CLI (pid ${process.pid()})"))
+                    process.descendants().forEach { it.destroyForcibly() }
+                    process.destroyForcibly()
+                    process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                    reader.join(1000)
+                    coordinator.setActiveProcess(null)
+                    throw com.intellij.openapi.progress.ProcessCanceledException()
                 }
+                process.waitFor(200, java.util.concurrent.TimeUnit.MILLISECONDS)
             }
-            val exitCode = process.waitFor()
+            val exitCode = process.exitValue()
+            reader.join(1000)
+            coordinator.setActiveProcess(null)
 
             return if (exitCode == 0) {
                 "Import successful: $output"
@@ -439,11 +462,15 @@ class ExportService {
                 publish(OneLensEvent.Error("CLI import failed (exit $exitCode)"))
                 "Import failed (exit $exitCode): $output"
             }
+        } catch (e: com.intellij.openapi.progress.ProcessCanceledException) {
+            throw e  // Let IntelliJ route to the Backgroundable's cancel path
         } catch (e: java.io.IOException) {
             LOG.warn("Failed to run onelens CLI: ${e.message}")
+            SyncCoordinator.getInstance().setActiveProcess(null)
             return null
         } catch (e: Exception) {
             LOG.warn("Auto-import failed: ${e.message}")
+            SyncCoordinator.getInstance().setActiveProcess(null)
             return null
         }
     }

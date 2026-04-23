@@ -135,6 +135,13 @@ class AutoSyncService(private val project: Project) : Disposable {
         OneLensEvents.status(OneLensState.SYNCING)
         OneLensEvents.info("Auto-sync triggered: ${filesToSync.size} modified, ${filesDeleted.size} deleted")
 
+        val coordinator = com.onelens.plugin.export.SyncCoordinator.getInstance()
+        if (!coordinator.tryAcquire()) {
+            LOG.info("Auto-sync skipped — another sync is already running")
+            OneLensEvents.info("Auto-sync skipped — a sync is already running")
+            syncing.set(false)
+            return
+        }
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
             override fun run(indicator: ProgressIndicator) {
                 val start = System.currentTimeMillis()
@@ -184,6 +191,13 @@ class AutoSyncService(private val project: Project) : Disposable {
                     OneLensEvents.status(OneLensState.READY)
                     syncing.set(false)
                 }
+            }
+            override fun onFinished() {
+                coordinator.release()
+            }
+            override fun onCancel() {
+                coordinator.killActive()
+                OneLensEvents.warn("Auto-sync cancelled by user")
             }
         })
     }
