@@ -76,13 +76,15 @@ def publish(
     bundle_name = f"onelens-snapshot-{graph}-{tag}.tgz"
     bundle_path = out_dir / bundle_name
 
+    embed_model, embed_dim = _detect_embedder(ctx_src if has_ctx else None)
     manifest = {
         "manifestVersion": MANIFEST_VERSION,
         "schemaVersion": SCHEMA_VERSION,
         "graph": graph,
         "tag": tag,
         "commitSha": commit_sha or _detect_commit_sha(),
-        "embedder": "Qwen3-Embedding-0.6B",
+        "embedder": embed_model,
+        "embedderDim": embed_dim,
         "falkordbLite": _detect_falkordb_version(),
         "includesEmbeddings": has_ctx,
         "buildTimestamp": int(time.time()),
@@ -198,6 +200,47 @@ def _detect_falkordb_version() -> str:
         return getattr(falkordblite, "__version__", "unknown")
     except Exception:
         return "unknown"
+
+
+def _detect_embedder(ctx_src: Path | None) -> tuple[str, int | None]:
+    """Pull the actual embedder name + dim from config + collection metadata.
+
+    Dim is authoritative (read from the ChromaDB sqlite's `collections` row).
+    Name prefers the env override the plugin sets (`ONELENS_EMBED_MODEL`),
+    falls back to the backend hint, and finally to a dim-keyed best-guess
+    so older snapshots can still be read without a name.
+    """
+    dim: int | None = None
+    if ctx_src and ctx_src.is_dir():
+        sqlite_path = ctx_src / "chroma.sqlite3"
+        if sqlite_path.is_file():
+            try:
+                import sqlite3
+                with sqlite3.connect(str(sqlite_path)) as conn:
+                    row = conn.execute(
+                        "SELECT dimension FROM collections ORDER BY id LIMIT 1"
+                    ).fetchone()
+                    if row and row[0]:
+                        dim = int(row[0])
+            except Exception:
+                pass
+
+    env_model = os.environ.get("ONELENS_EMBED_MODEL")
+    if env_model:
+        return env_model, dim
+
+    backend = (os.environ.get("ONELENS_EMBED_BACKEND") or "").lower()
+    if backend == "local":
+        return "jinaai/jina-embeddings-v2-base-code", dim
+    if backend == "openai":
+        return "openai-compatible", dim
+
+    # Last-resort dim-keyed guess — keeps older / no-env runs readable.
+    if dim == 768:
+        return "jinaai/jina-embeddings-v2-base-code", dim
+    if dim == 1024:
+        return "Qwen/Qwen3-Embedding-0.6B", dim
+    return "unknown", dim
 
 
 def _update_snapshots_index(
