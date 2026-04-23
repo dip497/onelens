@@ -116,7 +116,15 @@ class SemanticSettingsConfigurable : Configurable {
     private fun refreshLocalBlock() {
         val provider = PythonEnvManager.detectLocalProvider()
         providerLabel.text = "Provider: $provider"
-        if (settings.state.localEmbedderUseTRT) {
+        // Ground-truth TRT state is the venv, not the settings flag. The
+        // flag can lag behind reality if the user installed tensorrt-cu12
+        // manually (via `uv pip install` or a prior version of the plugin
+        // before this button shipped). Detect and self-heal.
+        val installedInVenv = PythonEnvManager.isTensorrtInstalled()
+        if (installedInVenv && !settings.state.localEmbedderUseTRT) {
+            settings.state.localEmbedderUseTRT = true
+        }
+        if (installedInVenv || settings.state.localEmbedderUseTRT) {
             installTrtBtn.text = "✓ TensorRT fp16 installed"
             installTrtBtn.isEnabled = false
         } else {

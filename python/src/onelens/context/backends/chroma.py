@@ -134,28 +134,6 @@ class ChromaBackend:
             )
         else:
             collection = self._client.get_collection(collection_name)
-            # Dim sanity check: if the collection was written with a different
-            # embedder (e.g. Qwen3 1024-dim), querying it with Jina (768-dim)
-            # gives silently wrong results — ChromaDB hashes the query to the
-            # stored space and the cosine becomes meaningless. Catch it early
-            # with a clear message so the user re-syncs with --clear.
-            embedder = self._get_embedder()
-            try:
-                sample = collection.peek(limit=1)
-                stored = sample.get("embeddings") or []
-                if stored and len(stored[0]) and len(stored[0]) != embedder.dim:
-                    raise ValueError(
-                        f"Embedder dimension mismatch: collection '{collection_name}' "
-                        f"was written with dim={len(stored[0])} but the active "
-                        f"embedder ({embedder.model_name}) is dim={embedder.dim}. "
-                        f"Re-sync with --clear to rebuild the index, or switch "
-                        f"ONELENS_EMBED_BACKEND back to whatever wrote it."
-                    )
-            except ValueError:
-                raise
-            except Exception:
-                # Peek can fail on an empty collection — not an error.
-                pass
         return ChromaCollection(collection, embedder=self._get_embedder())
 
     @property

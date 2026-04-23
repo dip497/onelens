@@ -179,7 +179,7 @@ class ExportFullAction : DumbAwareAction() {
                 // Auto-import delta — use workspace.graphId so a multi-repo export
                 // lands in the same graph the full import created.
                 val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                val importResult = service.syncToGraph(result.path, workspace.graphId, config.copy(autoImport = true), isFull = false)
+                val importResult = service.syncToGraph(result.path, workspace.graphId, config.copy(autoImport = true), isFull = false, projectBasePath = project.basePath)
 
                 val stats = result.stats
                 notify(project,

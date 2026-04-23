@@ -46,6 +46,11 @@ class OneLensMcpService : Disposable {
         private const val BASE_PORT = 29170
         private const val PORT_RANGE = 30
         private const val SHUTDOWN_GRACE_SECONDS = 5L
+        // Cold-start budget for Python import + model download + lifespan
+        // warmup (ORT init, TRT engine load from cache, multi-shape prime).
+        // On a warm venv + warm TRT cache, first probe usually answers in
+        // 6-10 s. Allow 60 s for the unlucky first-time case.
+        private const val STARTUP_PROBE_TIMEOUT_MS = 60_000L
 
         fun getInstance(): OneLensMcpService =
             ApplicationManager.getApplication().service()
@@ -63,11 +68,22 @@ class OneLensMcpService : Disposable {
     val isRunning: Boolean
         get() = processRef.get()?.isAlive == true
 
+    /** OS PID of the Python child, or -1 when not running. Used by the
+     * Status tab's VRAM poller to filter `nvidia-smi` output. */
+    fun pid(): Long = processRef.get()?.takeIf { it.isAlive }?.pid() ?: -1L
+
     /**
      * Spawn the MCP server as a child Python process on the first available
      * port in [BASE_PORT, BASE_PORT + PORT_RANGE). Idempotent — a no-op if
      * the server is already running. Returns the chosen port, or -1 on
      * failure.
+     *
+     * Start is synchronous — we wait up to [STARTUP_PROBE_TIMEOUT_MS] for
+     * `/mcp/` to answer before returning success. If the probe times out,
+     * we tear the child down and retry on the next port. Covers both the
+     * "port race" (another process grabbed our free slot between pickPort
+     * and bind) and "silent startup failure" (Python crashed in lifespan
+     * — missing venv deps, model load OOM, bad env).
      *
      * Env passed through:
      *   - ONELENS_EMBED_BACKEND   / ONELENS_RERANK_BACKEND   from settings
@@ -90,35 +106,70 @@ class OneLensMcpService : Disposable {
         }
 
         val env = buildEnv()
-        val chosenPort = pickPort() ?: run {
-            LOG.warn("All ports $BASE_PORT..${BASE_PORT + PORT_RANGE} are in use")
-            return -1
-        }
-        val cmd = listOf(
-            venvPython.absolutePath,
-            "-m", "onelens.mcp_server",
-            "--http",
-            "--host", "127.0.0.1",
-            "--port", chosenPort.toString(),
-        )
+        // Try up to 5 ports. Health-probe each spawn; if it fails, move on.
+        // The pickPort loop below returns a free candidate, but another
+        // process can grab it between ServerSocket.close() and the Python
+        // child's actual bind() call. Retrying handles that race cleanly.
+        for (attempt in 0 until 5) {
+            val chosenPort = pickPort() ?: run {
+                LOG.warn("No free port in $BASE_PORT..${BASE_PORT + PORT_RANGE}")
+                return -1
+            }
+            val cmd = listOf(
+                venvPython.absolutePath,
+                "-m", "onelens.mcp_server",
+                "--http",
+                "--host", "127.0.0.1",
+                "--port", chosenPort.toString(),
+            )
+            try {
+                val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                pb.environment().putAll(env)
+                val proc = pb.start()
+                processRef.set(proc)
+                port = chosenPort
+                // Drain stdout async so the pipe buffer doesn't fill and
+                // block the child. Uvicorn logs land here (useful on debug).
+                Thread({ proc.inputStream.bufferedReader().forEachLine { LOG.info("[mcp] $it") } },
+                    "OneLens-MCP-stdout").apply { isDaemon = true }.start()
 
-        return try {
-            val pb = ProcessBuilder(cmd).redirectErrorStream(true)
-            pb.environment().putAll(env)
-            val proc = pb.start()
-            processRef.set(proc)
-            port = chosenPort
-            writePortFile(chosenPort)
-            // Drain stdout async so the pipe buffer doesn't fill and block
-            // the child. Uvicorn logs land here (useful on debug).
-            Thread({ proc.inputStream.bufferedReader().forEachLine { LOG.info("[mcp] $it") } },
-                "OneLens-MCP-stdout").apply { isDaemon = true }.start()
-            LOG.info("MCP server started on port $chosenPort (pid=${proc.pid()})")
-            chosenPort
-        } catch (e: Exception) {
-            LOG.warn("Failed to spawn MCP server: ${e.message}")
-            -1
+                if (waitUntilReachable(chosenPort)) {
+                    writePortFile(chosenPort)
+                    LOG.info("MCP server ready on port $chosenPort (pid=${proc.pid()})")
+                    return chosenPort
+                }
+                LOG.warn("MCP server on port $chosenPort did not answer /mcp/ within ${STARTUP_PROBE_TIMEOUT_MS}ms — tearing down, retrying")
+                proc.destroyForcibly()
+                processRef.set(null)
+                port = -1
+            } catch (e: Exception) {
+                LOG.warn("Failed to spawn MCP server on port $chosenPort: ${e.message}")
+                processRef.set(null)
+                port = -1
+            }
         }
+        return -1
+    }
+
+    /** Poll GET /mcp/ until 2xx/4xx (server listening) or timeout. */
+    private fun waitUntilReachable(p: Int): Boolean {
+        val deadline = System.currentTimeMillis() + STARTUP_PROBE_TIMEOUT_MS
+        val url = "http://127.0.0.1:$p/mcp"
+        while (System.currentTimeMillis() < deadline) {
+            val proc = processRef.get()
+            if (proc == null || !proc.isAlive) return false  // died → give up
+            try {
+                val conn = URI(url).toURL().openConnection() as HttpURLConnection
+                conn.connectTimeout = 500
+                conn.readTimeout = 500
+                conn.requestMethod = "GET"
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..499) return true  // 4xx still means server is up
+            } catch (_: Exception) { /* not up yet */ }
+            Thread.sleep(250)
+        }
+        return false
     }
 
     /**

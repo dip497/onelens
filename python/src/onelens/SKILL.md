@@ -69,14 +69,63 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_search --term <v
 
 ### onelens_retrieve
 
-Hybrid FTS + semantic retrieval with source code snippets.
+**Primary tool for natural-language search over the code graph.**
+Hybrid FTS + semantic embedding + optional cross-encoder rerank.
 
-Gated by `onelens_status.capabilities.has_semantic` — if false, fall back
-to `onelens_search`. Returns top-K ranked hits with actual source code,
-not just FQNs, so an LLM can read the methods directly.
+Returns a **compact** ranked list — enough to navigate, not full bodies.
+The agent then uses the built-in `Read` tool on `file_path` at the
+returned line range to see the actual code. Keeps responses small
+(each hit ≈ 30-50 tokens) so many candidates fit in a single call.
+
+## Use this when
+
+- You don't know exact file locations yet.
+- The question is conceptual: *"how does X work"*, *"where is Y handled"*,
+  *"which class does Z"*, *"what logs SLA breaches"*.
+- You want cross-cutting code that spans multiple layers (REST → service
+  → repository).
+
+## Use something else when
+
+- Exact name / FQN / pattern search → `onelens_search` (cheaper FTS).
+- Call-graph, impact, polymorphism, inheritance → `onelens_query` (Cypher).
+- Reading one specific method by FQN → `onelens_query`, then `Read` on the
+  returned file_path.
+
+## Query tips
+
+- 5-15 tokens. One action verb + one domain term minimum.
+- Describe *what the code does*, not keywords alone.
+- **Good:** `"REST endpoint that creates a ticket"`,
+  `"JPA query that joins users and roles"`,
+  `"how remote deployment gets cancelled"`.
+- **Bad:** `"ticket"` (too short), `"Foo class"` (use `onelens_search`),
+  a full paragraph (signal gets diluted).
+
+## Gated on has_semantic
+
+Check `onelens_status.capabilities.has_semantic` first. If false, the
+collection isn't embedded yet — fall back to `onelens_search` until a
+sync with `context=true` has run.
+
+## Result shape (compact)
+
+Each hit returns:
+- `fqn`: fully-qualified name
+- `file_path`, `line_start`, `line_end`: navigable location
+- `snippet`: first ~5 lines of the method body (enough to disambiguate)
+- `score`: RRF score from FTS + semantic fusion
+- `rerank_score`: cross-encoder score (0-1) when `rerank=true`
+- `rank_fts`, `rank_semantic`: original per-signal ranks
+- `type`: `method` | `class` | `endpoint`
+
+**Full method bodies are NOT returned.** Use the built-in `Read` tool
+with `file_path` + line range when you need the code. This keeps the
+per-call token footprint small (~250 tokens for 8 hits vs ~3000 with
+bodies).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_retrieve --query <value> --graph <value> --n-results <value> --fanout <value> --include-snippets --include-neighbors --rerank --rerank-pool <value> --project-root <value> --backend <value> --db-path <value>
+uv run --with fastmcp python cli_generated.py call-tool onelens_retrieve --query <value> --graph <value> --n-results <value> --fanout <value> --rerank --rerank-pool <value> --project-root <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -85,8 +134,6 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_retrieve --query
 | `--graph` | string | no |  |
 | `--n-results` | integer | no |  |
 | `--fanout` | integer | no |  |
-| `--include-snippets` | boolean | no |  |
-| `--include-neighbors` | boolean | no |  |
 | `--rerank` | boolean | no |  |
 | `--rerank-pool` | integer | no |  |
 | `--project-root` | string | no |  |
@@ -112,6 +159,29 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_import --export-
 | `--db-path` | string | no |  |
 | `--clear` | boolean | no |  |
 | `--context` | boolean | no |  |
+
+### onelens_reindex_semantic
+
+Rebuild ChromaDB embeddings for an already-imported graph.
+
+Skips the graph import step entirely. Use when:
+  - `Clean Up → Reset semantic` wiped ChromaDB and you don't want to
+    pay the full graph re-import cost (~5 min on big repos).
+  - You swapped the embedder (Jina ↔ OpenAI) and need to re-embed in
+    the new vector space; the graph itself is unchanged.
+
+Finds the newest `<graph>-full-*.json` in `~/.onelens/exports/` and
+replays `CodeMiner.mine()` against it. Requires `[context]` extras.
+
+```bash
+uv run --with fastmcp python cli_generated.py call-tool onelens_reindex_semantic --graph <value> --backend <value> --db-path <value>
+```
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--graph` | string | no |  |
+| `--backend` | string | no |  |
+| `--db-path` | string | no |  |
 
 ### onelens_delta_import
 

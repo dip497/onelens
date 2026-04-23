@@ -42,7 +42,7 @@ class LocalReranker(RerankerBase):
         from tokenizers import Tokenizer
 
         self._model_name = model_name
-        providers, tag = _build_providers(trt_enabled=True)
+        providers, tag = _build_providers(trt_enabled=True, cache_slug="bge-reranker-base")
         t0 = time.time()
         snapshot = _download_model(model_name)
         onnx_path = os.path.join(snapshot, "onnx", "model.onnx")

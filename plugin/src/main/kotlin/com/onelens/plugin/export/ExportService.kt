@@ -280,7 +280,7 @@ class ExportService {
 
         // Auto-import into graph DB if onelens CLI is available
         if (config.autoImport) {
-            val importResult = syncToGraph(outputFile, workspace.graphId, config)
+            val importResult = syncToGraph(outputFile, workspace.graphId, config, projectBasePath = project.basePath)
             if (importResult != null) {
                 LOG.info("Auto-import: $importResult")
                 publish(OneLensEvent.Info("CLI import: $importResult"))
@@ -301,6 +301,7 @@ class ExportService {
         graphName: String,
         config: ExportConfig,
         isFull: Boolean = true,
+        projectBasePath: String? = null,
     ): String? {
         // Auto-setup: ensure onelens CLI is installed
         val cliPath = PythonEnvManager.getOneLensCli(config.onelensSourcePath)
@@ -382,6 +383,13 @@ class ExportService {
             // screen. See python/src/onelens/context/embed_backends/__init__.py.
             val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
             val env = pb.environment()
+            // Tell `onelens_retrieve` where to resolve project-relative
+            // file paths. Without this env, snippet reads silently return
+            // empty strings (the graph stores paths like
+            //   main_service/domain_service/.../Foo.java
+            // but the CLI subprocess has no cwd context). See
+            // python/src/onelens/context/retrieval.py::_read_snippet.
+            projectBasePath?.let { env["ONELENS_PROJECT_ROOT"] = it }
             when (settings.embedderBackend.lowercase()) {
                 "local" -> {
                     // Local embed + local rerank (both via onnxruntime). TRT

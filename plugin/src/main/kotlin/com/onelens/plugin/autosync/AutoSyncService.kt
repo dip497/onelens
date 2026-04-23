@@ -153,7 +153,7 @@ class AutoSyncService(private val project: Project) : Disposable {
                             val graphId = try {
                                 com.onelens.plugin.framework.workspace.WorkspaceLoader.load(project).graphId
                             } catch (_: Exception) { project.name }
-                            service.syncToGraph(result.path, graphId, config, isFull = false)
+                            service.syncToGraph(result.path, graphId, config, isFull = false, projectBasePath = project.basePath)
                             val dur = System.currentTimeMillis() - start
                             LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
                             OneLensEvents.syncComplete(
