@@ -7,6 +7,61 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Phase U · Status tab UX + reindex tool (2026-04-23)
+
+- **Toggle Semantic Index toolbar button** in the OneLens tool window.
+  Starts/stops the MCP HTTP service inline — no Settings round-trip.
+  `OneLensToolWindow.kt:ToggleSemanticToolbarAction`.
+- **Rebuild Semantic Only button.** Re-embeds the current graph from
+  the newest `<graph>-full-*.json` without a fresh graph import.
+  Backed by new `onelens_reindex_semantic` MCP tool
+  (`mcp_server.py`) which replays `CodeMiner.mine()` against the
+  latest export. ~2–3 min GPU / ~30 min CPU.
+- **Clean Up danger zone** dropdown — Clear exports / Reset semantic
+  / Delete graph. Auto-restarts MCP after "Reset semantic" if
+  Semantic Index was on. New `ui/GraphCleanupService.kt`.
+- **VRAM display** next to the semantic label. `SystemMonitor.kt`
+  shells `nvidia-smi --query-compute-apps=pid,used_memory` and
+  filters to the MCP child process PID so only OneLens's VRAM shows,
+  not the whole card.
+- **Compact `onelens_retrieve` response shape.** Drops `context_text`,
+  `callers`, `callees`; caps `snippet` to 600 chars (~5 lines).
+  Agents use Read tool at `file_path`+line range for full code, per
+  token-efficiency feedback. Augment-style docstring documents the
+  compact shape + when-to-use examples.
+
+### Fixed — Phase U (2026-04-23)
+
+- **Empty `snippet` in retrieval hits.** `ONELENS_PROJECT_ROOT` was
+  not passed to the MCP child — `_read_snippet` couldn't resolve
+  project-relative `file_path`s. Plugin now sets `project.basePath`
+  in both the CLI subprocess and the MCP HTTP path
+  (`ExportService.kt`, `ToggleSemanticIndexAction.kt`).
+- **TRT OOM on 4 GB consumer cards.** Embedder + reranker each
+  requested 2 GB workspace → second model failed to allocate on
+  RTX A2000 Laptop / 3050 mobile. Capped default to 512 MB via new
+  `ONELENS_LOCAL_TRT_WORKSPACE_MB` env (`local_backend.py`).
+- **TRT engine-cache collision between embedder and reranker.**
+  Both wrote to `trt-cache/jina-v2-code/` — second model loaded the
+  wrong engine topology at runtime. `_build_providers` now takes
+  `cache_slug`; `LocalReranker` passes `"bge-reranker-base"`
+  (`local_backend.py`, `local_reranker.py`).
+- **`SnapshotManager` `InstantiationException` at runtime.** The
+  `@Service(Project, CoroutineScope)` constructor compiled fine but
+  failed reflective lookup after Ktor pulled a different
+  `kotlinx-coroutines-core` into the plugin classpath. Dropped the
+  unused scope param (`SnapshotManager.kt`).
+- **Numpy truthiness crash in ChromaBackend dim sanity check.**
+  `if stored and len(stored[0])...` raised on ndarrays. Removed the
+  whole check — ChromaDB's native dim-mismatch error is sufficient
+  signal, and the `peek()` added startup cost on every graph open
+  (`backends/chroma.py`).
+- **TRT settings drift after install-via-button.** User would install
+  TensorRT but `localEmbedderUseTRT` stayed false (if venv was
+  created before the button shipped). Settings panel now self-heals
+  by flipping the flag when `isTensorrtInstalled()` returns true
+  (`SemanticSettingsConfigurable.kt`).
+
 ### Added — Phase T · Plugin ⇄ MCP HTTP (warm process) (2026-04-21)
 
 - **Embedded MCP HTTP server lifecycle.** New

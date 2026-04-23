@@ -58,6 +58,7 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
     private val statusLabel = JBLabel("OneLens: initializing…")
     private val falkordbLabel = JBLabel(" ")
+    private val semanticLabel = JBLabel(" ")
     private val branchLabel = JBLabel(" ")
     private val seedLabel = JBLabel(" ")
     private val checklistPanel = JPanel()
@@ -108,6 +109,33 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
             else
                 "Last sync: ${fmtAgo(ts)}"
         }.apply { isRepeats = true; start() }
+
+        // Semantic line refresh: every 5 s read MCP state + shell `nvidia-smi`
+        // (if available) to show live VRAM. Coalesces when MCP is down so the
+        // poller does no work on structural-only projects.
+        javax.swing.Timer(5_000) {
+            updateSemanticLine()
+        }.apply { isRepeats = true; start() }
+        updateSemanticLine()
+    }
+
+    private fun updateSemanticLine() {
+        val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+        if (!settings.buildSemanticIndex) {
+            semanticLabel.text = "Semantic: off (click Enable Semantic in the toolbar)"
+            semanticLabel.foreground = semanticLabel.foreground.darker()
+            return
+        }
+        val mcp = com.onelens.plugin.mcp.OneLensMcpService.getInstance()
+        if (!mcp.isRunning) {
+            semanticLabel.text = "Semantic: on · MCP server not running (will start on next sync)"
+            return
+        }
+        val provider = SystemMonitor.localProvider()
+        val pid = mcp.pid()
+        val vramBytes = SystemMonitor.gpuMemoryBytesForPid(pid)
+        val vramPart = if (vramBytes > 0) " · VRAM ${fmtBytes(vramBytes)}" else ""
+        semanticLabel.text = "Semantic: on · $provider · MCP pid=$pid$vramPart"
     }
 
     private fun buildHeader(): JComponent {
@@ -127,8 +155,11 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         seedLabel.alignmentX = java.awt.Component.LEFT_ALIGNMENT
         seedLabel.foreground = java.awt.Color(0xC7, 0x8F, 0x00)
         seedLabel.isVisible = false
+        semanticLabel.horizontalAlignment = SwingConstants.LEFT
+        semanticLabel.alignmentX = java.awt.Component.LEFT_ALIGNMENT
         stack.add(statusLabel)
         stack.add(falkordbLabel)
+        stack.add(semanticLabel)
         stack.add(branchLabel)
         stack.add(seedLabel)
         return stack
@@ -138,12 +169,15 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         val group = DefaultActionGroup().apply {
             add(SyncAction())
             add(SetupAction())
+            add(ToggleSemanticToolbarAction())
+            add(RebuildSemanticAction())
             add(ToggleAutoSyncToolbarAction())
             add(InstallSkillToolbarAction())
             ActionManager.getInstance().getAction("onelens.PublishSnapshot")?.let { add(it) }
             addSeparator()
             add(RefreshAction())
             add(OpenFalkorUIAction())
+            add(DangerZoneAction())
             add(ClearLogAction())
         }
         val tb = ActionManager.getInstance()
@@ -339,15 +373,12 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
                 "falkordblite" -> "FalkorDB Lite: embedded $reach"
                 else -> "FalkorDB: ${it.falkordbHost}:${it.falkordbPort} $reach"
             }
-            falkordbLabel.text = "$backendLine    Semantic: ${formatSemantic(it)}"
+            // Drop the legacy "Semantic: …" suffix from this line — the
+            // dedicated semanticLabel below carries the live status + VRAM
+            // + MCP PID. The old suffix hard-coded "modal SDK not installed"
+            // which was wrong for users on the new local / openai backends.
+            falkordbLabel.text = backendLine
         }
-    }
-
-    private fun formatSemantic(s: OneLensStatus): String = when {
-        !s.semanticEnabled -> "off (structural graph only)"
-        s.modalAvailable == null -> "— (no venv)"
-        s.modalAvailable == false -> "off (modal SDK not installed)"
-        else -> "remote (Modal / OpenAI-compat)"
     }
 
     private fun renderChecklist(s: OneLensStatus) {
@@ -540,6 +571,181 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         }
 
         override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+    }
+
+    private inner class ToggleSemanticToolbarAction : AnAction() {
+        override fun actionPerformed(e: AnActionEvent) {
+            val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+            val mcp = com.onelens.plugin.mcp.OneLensMcpService.getInstance()
+            if (settings.buildSemanticIndex) {
+                settings.buildSemanticIndex = false
+                mcp.stop()
+                publish(OneLensEvent.Info("Semantic index disabled — MCP server stopped, VRAM freed"))
+            } else {
+                settings.buildSemanticIndex = true
+                // Install backend-appropriate deps if missing (chromadb +
+                // onnxruntime-gpu / httpx). Runs off-EDT via Task.Backgroundable
+                // so the toolbar click stays responsive.
+                ProgressManager.getInstance().run(object : Task.Backgroundable(
+                    project, "OneLens: Enabling semantic index", true,
+                ) {
+                    override fun run(indicator: ProgressIndicator) {
+                        PythonEnvManager.installSemanticStack()
+                        // Start MCP now — server warms embed + rerank TRT
+                        // engines via ONELENS_WARM_ON_START, so first sync
+                        // lands on hot providers.
+                        val port = mcp.start()
+                        if (port > 0) {
+                            publish(OneLensEvent.Info("Semantic index enabled · MCP on port $port (warming up)"))
+                        } else {
+                            publish(OneLensEvent.Warn("Semantic enabled but MCP server failed to start — check idea.log"))
+                        }
+                    }
+                })
+            }
+            updateSemanticLine()
+        }
+
+        override fun update(e: AnActionEvent) {
+            val on = com.onelens.plugin.settings.OneLensSettings.getInstance().state.buildSemanticIndex
+            e.presentation.text = if (on) "Disable Semantic Index" else "Enable Semantic Index"
+            e.presentation.description = if (on)
+                "Stop embedding index, free VRAM" else "Build ChromaDB embeddings alongside the graph (~7 min first sync with GPU)"
+            e.presentation.icon = if (on) AllIcons.Diff.MagicResolve else AllIcons.Diff.MagicResolveToolbar
+        }
+
+        override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+    }
+
+    private inner class RebuildSemanticAction : AnAction(
+        "Rebuild Semantic Only",
+        "Re-embed the existing graph (skip graph import). ~2-3 min on GPU, ~30 min on CPU.",
+        AllIcons.Actions.Rerun,
+    ) {
+        override fun update(e: AnActionEvent) {
+            val graph = lastSnapshot?.graphName
+            val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+            e.presentation.isEnabled = !graph.isNullOrBlank() && settings.buildSemanticIndex
+            e.presentation.description = when {
+                graph.isNullOrBlank() -> "Waiting for status refresh — graph name not yet known"
+                !settings.buildSemanticIndex -> "Enable Semantic Index first"
+                else -> "Re-embed '$graph' from the latest export. Skips graph import."
+            }
+        }
+
+        override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+
+        override fun actionPerformed(e: AnActionEvent) {
+            val graph = lastSnapshot?.graphName?.takeIf { it.isNotBlank() } ?: return
+            val cliPath = PythonEnvManager.getOneLensCli() ?: run {
+                publish(OneLensEvent.Error("onelens CLI not found — run Sync once first to install venv"))
+                return
+            }
+            ProgressManager.getInstance().run(object : Task.Backgroundable(
+                project, "OneLens: Rebuilding semantic index for '$graph'", true,
+            ) {
+                override fun run(indicator: ProgressIndicator) {
+                    val cmd = listOf(cliPath, "call-tool", "onelens_reindex_semantic",
+                        "--graph", graph)
+                    publish(OneLensEvent.Info("$ ${cmd.joinToString(" ")}"))
+                    val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                    // Pass the same backend env the regular sync uses so the
+                    // CLI subprocess picks up local embedder + local rerank.
+                    val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+                    val env = pb.environment()
+                    // Same ONELENS_PROJECT_ROOT reason as ExportService —
+                    // CodeMiner + retrieval both resolve project-relative
+                    // file_paths against this root.
+                    project.basePath?.let { env["ONELENS_PROJECT_ROOT"] = it }
+                    when (settings.embedderBackend.lowercase()) {
+                        "local" -> {
+                            env["ONELENS_EMBED_BACKEND"] = "local"
+                            env["ONELENS_RERANK_BACKEND"] = "local"
+                        }
+                        "openai" -> {
+                            env["ONELENS_EMBED_BACKEND"] = "openai"
+                            env["ONELENS_RERANK_BACKEND"] = "none"
+                            env["ONELENS_EMBED_BASE_URL"] = settings.openaiBaseUrl
+                            env["ONELENS_EMBED_MODEL"] = settings.openaiEmbedModel
+                            env["ONELENS_EMBED_DIM"] = settings.openaiEmbedDim.toString()
+                            com.onelens.plugin.settings.OpenAiSecrets.get()?.let {
+                                env["ONELENS_EMBED_API_KEY"] = it
+                            }
+                        }
+                    }
+                    val proc = pb.start()
+                    proc.inputStream.bufferedReader().use { r ->
+                        while (true) {
+                            val line = r.readLine() ?: break
+                            publish(OneLensEvent.Info(line))
+                        }
+                    }
+                    val code = proc.waitFor()
+                    if (code == 0) publish(OneLensEvent.Info("Semantic rebuild complete"))
+                    else publish(OneLensEvent.Error("Semantic rebuild failed (exit $code)"))
+                    refreshAsync()
+                }
+            })
+        }
+    }
+
+    private inner class DangerZoneAction : AnAction(
+        "Clean Up…",
+        "Delete graph, exports, or semantic index for a fresh start",
+        AllIcons.Actions.GC,
+    ) {
+        override fun update(e: AnActionEvent) {
+            // Disable until we know the graph name — destructive ops on a
+            // fallback "current" name would no-op or wipe the wrong target.
+            val haveGraph = !lastSnapshot?.graphName.isNullOrBlank()
+            e.presentation.isEnabled = haveGraph
+            e.presentation.description = if (haveGraph)
+                "Delete graph, exports, or semantic index for a fresh start"
+            else
+                "Waiting for status refresh — graph name not yet known"
+        }
+
+        override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+
+        override fun actionPerformed(e: AnActionEvent) {
+            val graph = lastSnapshot?.graphName?.takeIf { it.isNotBlank() } ?: return
+            val choice = com.intellij.openapi.ui.Messages.showDialog(
+                project,
+                "Pick a cleanup target — all operations are irreversible:\n\n" +
+                    "• Clear exports: deletes ~/.onelens/exports/$graph-*.json\n" +
+                    "• Reset semantic: wipes ChromaDB + TRT cache (forces re-embed)\n" +
+                    "• Delete graph: wipes the rdb (graph goes to 0 nodes)",
+                "OneLens Clean Up",
+                arrayOf("Clear exports", "Reset semantic", "Delete graph", "Cancel"),
+                3,
+                AllIcons.General.WarningDialog,
+            )
+            val svc = GraphCleanupService.getInstance()
+            when (choice) {
+                0 -> {
+                    val r = svc.clearExports(graph)
+                    publish(OneLensEvent.Info("Cleared ${r.description} — freed ${fmtBytes(r.bytesFreed)}"))
+                    refreshAsync()
+                }
+                1 -> {
+                    val r = svc.resetSemantic(graph)
+                    publish(OneLensEvent.Info("Reset ${r.description} — freed ${fmtBytes(r.bytesFreed)}. Re-sync to rebuild embeddings."))
+                    updateSemanticLine()
+                }
+                2 -> {
+                    if (com.intellij.openapi.ui.Messages.showYesNoDialog(
+                            project,
+                            "Delete graph '$graph' (rdb ${fmtBytes(lastSnapshot?.liteRdbSizeBytes ?: 0L)})? Re-sync required.",
+                            "Delete graph",
+                            AllIcons.General.WarningDialog,
+                        ) == com.intellij.openapi.ui.Messages.YES) {
+                        val r = svc.deleteGraph(graph)
+                        publish(OneLensEvent.Warn("Deleted ${r.description} — freed ${fmtBytes(r.bytesFreed)}. Click Sync to rebuild."))
+                        refreshAsync()
+                    }
+                }
+            }
+        }
     }
 
     private inner class InstallSkillToolbarAction : AnAction("Install Claude Skill",

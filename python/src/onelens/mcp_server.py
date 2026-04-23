@@ -36,6 +36,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+# Max length of per-hit `snippet` in onelens_retrieve responses. ~5 lines
+# at 24 chars/line — enough to disambiguate hits without shipping full
+# method bodies. Agent uses Read tool at file_path+line range for full code.
+MAX_SNIPPET_CHARS = 600
+
 from fastmcp import FastMCP
 
 # Palace business modules are imported eagerly — they're small, no model
@@ -316,19 +321,66 @@ def onelens_retrieve(
     graph: str = "onelens",
     n_results: int = 10,
     fanout: int = 50,
-    include_snippets: bool = True,
-    include_neighbors: bool = False,
     rerank: bool = True,
     rerank_pool: int = 100,
     project_root: str = "",
     backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
     db_path: str = "~/.onelens/graphs",
 ) -> list[dict]:
-    """Hybrid FTS + semantic retrieval with source code snippets.
+    """**Primary tool for natural-language search over the code graph.**
+    Hybrid FTS + semantic embedding + optional cross-encoder rerank.
 
-    Gated by `onelens_status.capabilities.has_semantic` — if false, fall back
-    to `onelens_search`. Returns top-K ranked hits with actual source code,
-    not just FQNs, so an LLM can read the methods directly.
+    Returns a **compact** ranked list — enough to navigate, not full bodies.
+    The agent then uses the built-in `Read` tool on `file_path` at the
+    returned line range to see the actual code. Keeps responses small
+    (each hit ≈ 30-50 tokens) so many candidates fit in a single call.
+
+    ## Use this when
+
+    - You don't know exact file locations yet.
+    - The question is conceptual: *"how does X work"*, *"where is Y handled"*,
+      *"which class does Z"*, *"what logs SLA breaches"*.
+    - You want cross-cutting code that spans multiple layers (REST → service
+      → repository).
+
+    ## Use something else when
+
+    - Exact name / FQN / pattern search → `onelens_search` (cheaper FTS).
+    - Call-graph, impact, polymorphism, inheritance → `onelens_query` (Cypher).
+    - Reading one specific method by FQN → `onelens_query`, then `Read` on the
+      returned file_path.
+
+    ## Query tips
+
+    - 5-15 tokens. One action verb + one domain term minimum.
+    - Describe *what the code does*, not keywords alone.
+    - **Good:** `"REST endpoint that creates a ticket"`,
+      `"JPA query that joins users and roles"`,
+      `"how remote deployment gets cancelled"`.
+    - **Bad:** `"ticket"` (too short), `"Foo class"` (use `onelens_search`),
+      a full paragraph (signal gets diluted).
+
+    ## Gated on has_semantic
+
+    Check `onelens_status.capabilities.has_semantic` first. If false, the
+    collection isn't embedded yet — fall back to `onelens_search` until a
+    sync with `context=true` has run.
+
+    ## Result shape (compact)
+
+    Each hit returns:
+    - `fqn`: fully-qualified name
+    - `file_path`, `line_start`, `line_end`: navigable location
+    - `snippet`: first ~5 lines of the method body (enough to disambiguate)
+    - `score`: RRF score from FTS + semantic fusion
+    - `rerank_score`: cross-encoder score (0-1) when `rerank=true`
+    - `rank_fts`, `rank_semantic`: original per-signal ranks
+    - `type`: `method` | `class` | `endpoint`
+
+    **Full method bodies are NOT returned.** Use the built-in `Read` tool
+    with `file_path` + line range when you need the code. This keeps the
+    per-call token footprint small (~250 tokens for 8 hits vs ~3000 with
+    bodies).
     """
     from onelens.context.config import OneLensContextConfig
     from onelens.context.retrieval import hybrid_retrieve
@@ -345,8 +397,8 @@ def onelens_retrieve(
         context_path=config.context_path(graph),
         n_results=n_results,
         fanout=fanout,
-        include_snippets=include_snippets,
-        include_neighbors=include_neighbors,
+        include_snippets=True,    # snippet is the whole point — always on
+        include_neighbors=False,  # compact mode; use `onelens_query` for graph
         rerank=rerank,
         rerank_pool=rerank_pool,
         project_root=project_root,
@@ -356,9 +408,8 @@ def onelens_retrieve(
             "fqn": h.fqn, "type": h.type,
             "score": h.score, "rerank_score": h.rerank_score,
             "file_path": h.file_path, "line_start": h.line_start, "line_end": h.line_end,
-            "snippet": h.snippet, "context_text": h.context_text,
+            "snippet": (h.snippet or "")[:MAX_SNIPPET_CHARS],
             "rank_fts": h.rank_fts, "rank_semantic": h.rank_semantic,
-            "callers": h.callers, "callees": h.callees,
         }
         for h in hits
     ]
@@ -422,6 +473,44 @@ def onelens_import(
             result["context"] = miner.mine(path)
 
         return result
+
+
+@mcp.tool
+def onelens_reindex_semantic(
+    graph: str = "onelens",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
+    db_path: str = "~/.onelens/graphs",
+) -> dict:
+    """Rebuild ChromaDB embeddings for an already-imported graph.
+
+    Skips the graph import step entirely. Use when:
+      - `Clean Up → Reset semantic` wiped ChromaDB and you don't want to
+        pay the full graph re-import cost (~5 min on big repos).
+      - You swapped the embedder (Jina ↔ OpenAI) and need to re-embed in
+        the new vector space; the graph itself is unchanged.
+
+    Finds the newest `<graph>-full-*.json` in `~/.onelens/exports/` and
+    replays `CodeMiner.mine()` against it. Requires `[context]` extras.
+    """
+    import glob as _glob
+    exports_dir = Path("~/.onelens/exports").expanduser()
+    matches = sorted(
+        _glob.glob(str(exports_dir / f"{graph}-full-*.json")),
+        key=lambda p: Path(p).stat().st_mtime,
+        reverse=True,
+    )
+    if not matches:
+        return {
+            "status": "error",
+            "reason": f"No full export found at {exports_dir}/{graph}-full-*.json. "
+                      "Run `onelens_import` first to produce one.",
+        }
+    export_path = matches[0]
+    from onelens.miners.code_miner import CodeMiner
+    miner = CodeMiner(graph_name=graph)
+    result = miner.mine(Path(export_path))
+    result["export_used"] = export_path
+    return result
 
 
 @mcp.tool

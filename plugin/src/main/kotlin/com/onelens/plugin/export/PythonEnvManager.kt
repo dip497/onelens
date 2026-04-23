@@ -532,12 +532,28 @@ object PythonEnvManager {
             listOf(uvBin, "pip", "install") + pkgs + listOf("--python", venvPython),
             ONELENS_HOME.toFile(),
         )
-        if (ok) {
-            OneLensEvents.info("Semantic stack installed (backend=$backend). Re-sync to rebuild the embedding index.")
-        } else {
+        if (!ok) {
             OneLensEvents.error("Semantic install failed — see idea.log for uv output")
+            return false
         }
-        return ok
+        // chromadb's transitive deps pull in the CPU-only `onnxruntime`
+        // package, which shadows our `onnxruntime-gpu` at import time
+        // (both land in the same site-packages; Python picks whichever
+        // was installed last and it's usually the CPU one). Force-reinstall
+        // the GPU variant AFTER chromadb so its .so files win. Only needed
+        // for the local backend — openai path doesn't load ORT at all.
+        if (backend == "local") {
+            val gpuOk = runCommand(
+                listOf(uvBin, "pip", "install", "--reinstall", "onnxruntime-gpu>=1.20",
+                    "--python", venvPython),
+                ONELENS_HOME.toFile(),
+            )
+            if (!gpuOk) {
+                OneLensEvents.warn("onnxruntime-gpu reinstall failed — local embedder will fall back to CPU")
+            }
+        }
+        OneLensEvents.info("Semantic stack installed (backend=$backend). Re-sync to rebuild the embedding index.")
+        return true
     }
 
     /**

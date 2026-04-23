@@ -237,20 +237,67 @@ async def onelens_retrieve(
     graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
     n_results: Annotated[int, cyclopts.Parameter(help="")] = 10,
     fanout: Annotated[int, cyclopts.Parameter(help="")] = 50,
-    include_snippets: Annotated[bool, cyclopts.Parameter(help="")] = True,
-    include_neighbors: Annotated[bool, cyclopts.Parameter(help="")] = False,
     rerank: Annotated[bool, cyclopts.Parameter(help="")] = True,
     rerank_pool: Annotated[int, cyclopts.Parameter(help="")] = 100,
     project_root: Annotated[str, cyclopts.Parameter(help="")] = '',
     backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
     db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
 ) -> None:
-    '''Hybrid FTS + semantic retrieval with source code snippets.
+    '''**Primary tool for natural-language search over the code graph.**
+Hybrid FTS + semantic embedding + optional cross-encoder rerank.
 
-Gated by `onelens_status.capabilities.has_semantic` — if false, fall back
-to `onelens_search`. Returns top-K ranked hits with actual source code,
-not just FQNs, so an LLM can read the methods directly.'''
-    await _call_tool('onelens_retrieve', {'query': query, 'graph': graph, 'n_results': n_results, 'fanout': fanout, 'include_snippets': include_snippets, 'include_neighbors': include_neighbors, 'rerank': rerank, 'rerank_pool': rerank_pool, 'project_root': project_root, 'backend': backend, 'db_path': db_path})
+Returns a **compact** ranked list — enough to navigate, not full bodies.
+The agent then uses the built-in `Read` tool on `file_path` at the
+returned line range to see the actual code. Keeps responses small
+(each hit ≈ 30-50 tokens) so many candidates fit in a single call.
+
+## Use this when
+
+- You don\'t know exact file locations yet.
+- The question is conceptual: *"how does X work"*, *"where is Y handled"*,
+  *"which class does Z"*, *"what logs SLA breaches"*.
+- You want cross-cutting code that spans multiple layers (REST → service
+  → repository).
+
+## Use something else when
+
+- Exact name / FQN / pattern search → `onelens_search` (cheaper FTS).
+- Call-graph, impact, polymorphism, inheritance → `onelens_query` (Cypher).
+- Reading one specific method by FQN → `onelens_query`, then `Read` on the
+  returned file_path.
+
+## Query tips
+
+- 5-15 tokens. One action verb + one domain term minimum.
+- Describe *what the code does*, not keywords alone.
+- **Good:** `"REST endpoint that creates a ticket"`,
+  `"JPA query that joins users and roles"`,
+  `"how remote deployment gets cancelled"`.
+- **Bad:** `"ticket"` (too short), `"Foo class"` (use `onelens_search`),
+  a full paragraph (signal gets diluted).
+
+## Gated on has_semantic
+
+Check `onelens_status.capabilities.has_semantic` first. If false, the
+collection isn\'t embedded yet — fall back to `onelens_search` until a
+sync with `context=true` has run.
+
+## Result shape (compact)
+
+Each hit returns:
+- `fqn`: fully-qualified name
+- `file_path`, `line_start`, `line_end`: navigable location
+- `snippet`: first ~5 lines of the method body (enough to disambiguate)
+- `score`: RRF score from FTS + semantic fusion
+- `rerank_score`: cross-encoder score (0-1) when `rerank=true`
+- `rank_fts`, `rank_semantic`: original per-signal ranks
+- `type`: `method` | `class` | `endpoint`
+
+**Full method bodies are NOT returned.** Use the built-in `Read` tool
+with `file_path` + line range when you need the code. This keeps the
+per-call token footprint small (~250 tokens for 8 hits vs ~3000 with
+bodies).'''
+    await _call_tool('onelens_retrieve', {'query': query, 'graph': graph, 'n_results': n_results, 'fanout': fanout, 'rerank': rerank, 'rerank_pool': rerank_pool, 'project_root': project_root, 'backend': backend, 'db_path': db_path})
 
 
 @call_tool_app.command(name='onelens_import')
@@ -268,6 +315,26 @@ async def onelens_import(
 `context=True` also runs the ChromaDB semantic mining pass so
 `onelens_retrieve` works afterwards.'''
     await _call_tool('onelens_import', {'export_path': export_path, 'graph': graph, 'backend': backend, 'db_path': db_path, 'clear': clear, 'context': context})
+
+
+@call_tool_app.command(name='onelens_reindex_semantic')
+async def onelens_reindex_semantic(
+    *,
+    graph: Annotated[str, cyclopts.Parameter(help="")] = 'onelens',
+    backend: Annotated[str, cyclopts.Parameter(help="")] = 'falkordblite',
+    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
+) -> None:
+    '''Rebuild ChromaDB embeddings for an already-imported graph.
+
+Skips the graph import step entirely. Use when:
+  - `Clean Up → Reset semantic` wiped ChromaDB and you don\'t want to
+    pay the full graph re-import cost (~5 min on big repos).
+  - You swapped the embedder (Jina ↔ OpenAI) and need to re-embed in
+    the new vector space; the graph itself is unchanged.
+
+Finds the newest `<graph>-full-*.json` in `~/.onelens/exports/` and
+replays `CodeMiner.mine()` against it. Requires `[context]` extras.'''
+    await _call_tool('onelens_reindex_semantic', {'graph': graph, 'backend': backend, 'db_path': db_path})
 
 
 @call_tool_app.command(name='onelens_delta_import')

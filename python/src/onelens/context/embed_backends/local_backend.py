@@ -98,8 +98,13 @@ def _preload_tensorrt_libs() -> bool:
     return True
 
 
-def _build_providers(trt_enabled: bool) -> tuple[list, str]:
-    """Return (providers list, effective mode tag)."""
+def _build_providers(trt_enabled: bool, cache_slug: str = "jina-v2-code") -> tuple[list, str]:
+    """Return (providers list, effective mode tag).
+
+    `cache_slug` scopes the TRT engine cache by model — embedder and
+    reranker each need their own subdir, otherwise engine files from one
+    model get reused on the other (wrong graph topology → runtime errors).
+    """
     try:
         import onnxruntime as ort
         ort.preload_dlls()
@@ -112,14 +117,19 @@ def _build_providers(trt_enabled: bool) -> tuple[list, str]:
     tag = "cpu"
 
     if trt_enabled and "TensorrtExecutionProvider" in available and _preload_tensorrt_libs():
-        cache_dir = str(Path.home() / ".onelens" / "trt-cache" / "jina-v2-code")
+        cache_dir = str(Path.home() / ".onelens" / "trt-cache" / cache_slug)
         os.makedirs(cache_dir, exist_ok=True)
         providers.append(
             ("TensorrtExecutionProvider", {
                 "trt_fp16_enable": True,
                 "trt_engine_cache_enable": True,
                 "trt_engine_cache_path": cache_dir,
-                "trt_max_workspace_size": 2 * 1024 * 1024 * 1024,
+                # 512 MB workspace fits 4 GB consumer cards (A2000 laptop,
+                # RTX 3050/4050 mobile) alongside the embedder + reranker
+                # engines + activations. 2 GB was over-budget — the
+                # allocator would fail for the second model on card.
+                # Override via ONELENS_LOCAL_TRT_WORKSPACE_MB if needed.
+                "trt_max_workspace_size": _env_int("ONELENS_LOCAL_TRT_WORKSPACE_MB", 512) * 1024 * 1024,
             }),
         )
         tag = "trt-fp16"
@@ -230,3 +240,11 @@ class LocalEmbedder:
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @property
+    def device(self) -> str:
+        """String label used by telemetry — parallels QwenEmbedder.device.
+        Maps ORT provider → 'cuda' / 'cpu'. `palace.get_embedding_device()`
+        and `ChromaBackend.embedding_device` read this."""
+        return "cuda" if "CUDAExecutionProvider" in self._active_provider \
+            or "TensorrtExecutionProvider" in self._active_provider else "cpu"

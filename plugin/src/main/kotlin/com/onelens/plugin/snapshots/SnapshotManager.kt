@@ -7,17 +7,22 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.project.Project
 import com.onelens.plugin.export.PythonEnvManager
-import kotlinx.coroutines.CoroutineScope
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
 // Orchestrates OneLens release-snapshot operations. Local-only publish +
 // local scan. Delegates bundling to the Python CLI.
+// Platform's InstanceContainer inspects the JVM constructor signature and
+// refuses anything outside `()` / `(Project)` / `(CoroutineScope)` /
+// `(Project, CoroutineScope)`. The previous `(Project, CoroutineScope)`
+// compiled but reflective lookup failed at runtime after we pulled Ktor
+// (different kotlinx-coroutines-core in the plugin classpath → the
+// `CoroutineScope` class the platform binds is not the one the compiler
+// picked). Drop the scope param — nothing here used it.
 @Service(Service.Level.PROJECT)
 class SnapshotManager(
     private val project: Project,
-    @Suppress("unused") private val scope: CoroutineScope,
 ) {
 
     // Scan ~/.onelens/bundles for onelens-snapshot-<graph>-<tag>.tgz archives.
