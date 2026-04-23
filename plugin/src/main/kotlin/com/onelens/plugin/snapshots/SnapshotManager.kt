@@ -111,7 +111,9 @@ class SnapshotManager(
             "--tag", args.tag,
             "--backend", "local",
         ).apply {
-            if (args.includeEmbeddings) addParameters("--include-embeddings", "true")
+            // Cyclopts boolean flags: presence = true, don't pass "true" as a
+            // separate token or parsing fails with `Unused Tokens: ['true']`.
+            if (args.includeEmbeddings) addParameter("--include-embeddings")
             charset = Charsets.UTF_8
         }
         indicator.text = "Publishing snapshot ${args.graph}@${args.tag}"
