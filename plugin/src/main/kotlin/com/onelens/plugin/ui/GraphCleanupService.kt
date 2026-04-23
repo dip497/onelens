@@ -31,8 +31,19 @@ class GraphCleanupService {
 
     data class CleanupResult(val description: String, val bytesFreed: Long)
 
+    class SyncInProgressException : IllegalStateException(
+        "A graph sync is currently running. Cancel it from the Background Tasks widget before cleaning up — otherwise the CLI may read a file we just deleted."
+    )
+
+    private fun assertNoSyncRunning() {
+        if (com.onelens.plugin.export.SyncCoordinator.getInstance().isRunning()) {
+            throw SyncInProgressException()
+        }
+    }
+
     /** Delete every JSON export for [graph] in ~/.onelens/exports/. */
     fun clearExports(graph: String): CleanupResult {
+        assertNoSyncRunning()
         val dir = ONELENS_HOME.resolve("exports")
         if (!Files.isDirectory(dir)) return CleanupResult("No exports directory", 0L)
         val matching = Files.list(dir).use { stream ->
@@ -57,6 +68,7 @@ class GraphCleanupService {
      */
     @OptIn(kotlin.io.path.ExperimentalPathApi::class)
     fun deleteGraph(graph: String): CleanupResult {
+        assertNoSyncRunning()
         // MCP holds the rdb open through FalkorDB Lite. Stop before delete
         // so the OS can actually release the inode on Linux.
         val mcp = OneLensMcpService.getInstance()
@@ -92,6 +104,7 @@ class GraphCleanupService {
      */
     @OptIn(kotlin.io.path.ExperimentalPathApi::class)
     fun resetSemantic(graph: String): CleanupResult {
+        assertNoSyncRunning()
         val mcp = OneLensMcpService.getInstance()
         val wasRunning = mcp.isRunning
         mcp.stop()

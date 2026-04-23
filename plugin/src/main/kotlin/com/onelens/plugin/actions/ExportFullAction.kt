@@ -48,6 +48,11 @@ class ExportFullAction : DumbAwareAction() {
             return
         }
 
+        val coordinator = com.onelens.plugin.export.SyncCoordinator.getInstance()
+        if (!coordinator.tryAcquire()) {
+            notify(project, "OneLens: A sync is already running. Stop it from the Background Tasks widget first.", NotificationType.WARNING)
+            return
+        }
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Syncing Graph", true) {
             override fun run(indicator: ProgressIndicator) {
                 indicator.isIndeterminate = false
@@ -127,6 +132,13 @@ class ExportFullAction : DumbAwareAction() {
                 // Delta export
                 indicator.text = "Delta sync: ${changedFiles.totalChanges} files changed..."
                 doDeltaExport(project, workspace, config, indicator)
+            }
+            override fun onFinished() {
+                coordinator.release()
+            }
+            override fun onCancel() {
+                coordinator.killActive()
+                com.onelens.plugin.ui.OneLensEvents.publish(com.onelens.plugin.ui.OneLensEvent.Warn("Sync cancelled by user"))
             }
         })
     }

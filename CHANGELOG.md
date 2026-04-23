@@ -30,6 +30,29 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   token-efficiency feedback. Augment-style docstring documents the
   compact shape + when-to-use examples.
 
+### Added — Phase U.1 · Cancellable sync + cleanup guard (2026-04-24)
+
+- **Sync is now actually cancellable.** `ExportService.syncToGraph`
+  previously called `process.waitFor()` with no cancellation polling —
+  the IDE's Stop button did nothing; the Python child ran to
+  completion while the status bar lied about "Stopping…". The reader
+  now runs on a daemon thread, the main thread polls
+  `ProgressManager.progressIndicator.isCanceled` every 200 ms, and on
+  cancel both the child and its descendants are
+  `destroyForcibly()`'d before throwing `ProcessCanceledException`.
+- **Cross-entry-point sync guard.** New app-level
+  `SyncCoordinator` service tracks one active sync across the toolbar
+  Sync action, the Tools menu `ExportFullAction`, and
+  `AutoSyncService`. Starting a second sync while one is in flight
+  now surfaces a clear warning instead of racing.
+- **Clean Up blocks while a sync is running.** `GraphCleanupService`
+  throws `SyncInProgressException` if `SyncCoordinator.isRunning()`;
+  the DangerZone dropdown is disabled during syncs and surfaces a
+  dialog otherwise. Fixes the race where "Delete graph" could remove
+  an `exports/*.json` the live CLI was about to read —
+  manifested as a `FileNotFoundError` on an older timestamp than the
+  just-written one.
+
 ### Fixed — Phase U (2026-04-23)
 
 - **Empty `snippet` in retrieval hits.** `ONELENS_PROJECT_ROOT` was

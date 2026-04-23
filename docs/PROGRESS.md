@@ -4,6 +4,19 @@ Source of truth for what's landed, what's in flight, and what's deferred. Append
 
 Last updated: 2026-04-24.
 
+## Phase U.1 — Cancellable sync + cleanup guard (2026-04-24)
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| U1.1 | `SyncCoordinator` app service — single-sync guard + active-process handle | ✅ | `plugin/.../export/SyncCoordinator.kt` |
+| U1.2 | Cancel propagation — daemon reader thread + 200 ms indicator poll + `destroyForcibly()` on cancel + `ProcessCanceledException` | ✅ | `plugin/.../export/ExportService.kt` |
+| U1.3 | `ExportFullAction` + `AutoSyncService` acquire/release coordinator, `onCancel()` kills active child | ✅ | `plugin/.../actions/ExportFullAction.kt`, `plugin/.../autosync/AutoSyncService.kt` |
+| U1.4 | `GraphCleanupService` refuses clearExports / resetSemantic / deleteGraph while sync in flight (SyncInProgressException) | ✅ | `plugin/.../ui/GraphCleanupService.kt` |
+| U1.5 | DangerZone toolbar item disabled while syncing; user-facing dialog on race attempt | ✅ | `plugin/.../ui/OneLensToolWindow.kt` |
+| U1.6 | Fix: snapshot Publish passed `--include-embeddings true` — cyclopts rejected explicit token (`addParameter` presence-only) | ✅ | `plugin/.../snapshots/SnapshotManager.kt` |
+
+---
+
 ## Phase U — Status tab UX + reindex tool (2026-04-23)
 
 | # | Feature | Status | Where |
