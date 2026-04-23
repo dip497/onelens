@@ -2,7 +2,26 @@
 
 Source of truth for what's landed, what's in flight, and what's deferred. Append-only per phase; mark status inline. Links point to the canonical artefact so this file stays skimmable.
 
-Last updated: 2026-04-21.
+Last updated: 2026-04-24.
+
+## Phase U — Status tab UX + reindex tool (2026-04-23)
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| U1 | Toggle Semantic Index toolbar button (starts/stops MCP inline) | ✅ | `plugin/.../ui/OneLensToolWindow.kt:ToggleSemanticToolbarAction` |
+| U2 | Rebuild Semantic Only — re-embed without re-import | ✅ | `OneLensToolWindow.kt:RebuildSemanticAction` + `mcp_server.py::onelens_reindex_semantic` |
+| U3 | Clean Up danger zone — clear exports / reset semantic / delete graph | ✅ | `plugin/.../ui/GraphCleanupService.kt` + `OneLensToolWindow.kt:DangerZoneAction` |
+| U4 | VRAM display per MCP pid (nvidia-smi --query-compute-apps) | ✅ | `plugin/.../ui/SystemMonitor.kt` + `semanticLabel` 5s tick |
+| U5 | Compact `onelens_retrieve` response — cap snippet 600 chars, drop context_text/callers/callees | ✅ | `mcp_server.py:onelens_retrieve` |
+| U6 | Augment-style `onelens_retrieve` docstring (when-to-use + compact shape) | ✅ | `mcp_server.py` + `python/src/onelens/SKILL.md` |
+| U7 | Fix: empty `snippet` — thread `ONELENS_PROJECT_ROOT` through `syncToGraph(projectBasePath)` | ✅ | `ExportService.kt`, `ExportFullAction.kt`, `AutoSyncService.kt`, `ToggleSemanticIndexAction.kt` |
+| U8 | Fix: TRT workspace 2GB→512MB (A2000/3050 fit) + `ONELENS_LOCAL_TRT_WORKSPACE_MB` override | ✅ | `context/embed_backends/local_backend.py` |
+| U9 | Fix: TRT engine-cache collision — per-model `cache_slug` ("jina-v2-code" vs "bge-reranker-base") | ✅ | `local_backend.py`, `local_reranker.py` |
+| U10 | Fix: `SnapshotManager` `InstantiationException` — drop unused `CoroutineScope` ctor param (Ktor coroutines-core clash) | ✅ | `plugin/.../snapshots/SnapshotManager.kt` |
+| U11 | Fix: ChromaBackend dim-check numpy truthiness crash — delete the check (ChromaDB native dim error is sufficient) | ✅ | `context/backends/chroma.py` |
+| U12 | Fix: TRT settings auto-heal when tensorrt installed outside the plugin button | ✅ | `plugin/.../settings/SemanticSettingsConfigurable.kt` |
+
+---
 
 ## Phase T — Plugin ⇄ MCP HTTP (2026-04-21)
 
