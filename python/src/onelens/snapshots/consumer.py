@@ -156,6 +156,12 @@ def pull(
             if dst_ctx.exists():
                 shutil.rmtree(dst_ctx)
             shutil.copytree(unpack / "context" / f"{graph}@{tag}", dst_ctx)
+            # ChromaDB drawers carry `wing = <source-graph>` as metadata.
+            # Retrieval filters by wing, so without this rewrite the
+            # restored graph `<graph>@<tag>` sees zero semantic hits even
+            # though all 49k embeddings are on disk.
+            if src_key != dst_key:
+                _rewrite_wing_in_chroma(dst_ctx / "chroma.sqlite3", src_key, dst_key, warnings)
 
     return {
         "graph_name": f"{graph}@{tag}",
@@ -210,6 +216,32 @@ def _fetch_sidecar_sha(repo: str, tag: str, bundle_name: str, warnings: list[str
         return text.split()[0] if text else None
     except Exception:
         return None
+
+
+def _rewrite_wing_in_chroma(sqlite_path: Path, old: str, new: str, warnings: list[str]) -> None:
+    """Update `embedding_metadata.string_value` where key='wing' from old→new.
+
+    ChromaDB's HNSW bin files reference rows by id; the sqlite's
+    `embedding_metadata` table holds the `{wing, room, hall, fqn, type,
+    importance, filed_at}` facets retrieval filters on. Renaming the
+    graph key in the rdb without rewriting `wing` here leaves the
+    restored graph with 49k orphan embeddings — on disk but never
+    matched because `where_clause = {'wing': <new-graph>}`.
+    """
+    if not sqlite_path.is_file():
+        return
+    try:
+        import sqlite3
+        with sqlite3.connect(str(sqlite_path)) as conn:
+            cur = conn.execute(
+                "UPDATE embedding_metadata SET string_value = ? WHERE key = 'wing' AND string_value = ?",
+                (new, old),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                warnings.append(f"no `wing={old}` rows found in chroma.sqlite3 — collection may have been published with a different wing")
+    except Exception as exc:
+        warnings.append(f"Chroma wing rewrite failed: {exc}")
 
 
 def _rename_graph_in_rdb(rdb_path: Path, old: str, new: str, warnings: list[str]) -> None:
