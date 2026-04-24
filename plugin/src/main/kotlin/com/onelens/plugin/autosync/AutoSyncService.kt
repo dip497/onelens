@@ -142,7 +142,7 @@ class AutoSyncService(private val project: Project) : Disposable {
             syncing.set(false)
             return
         }
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
+        val task = object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
             override fun run(indicator: ProgressIndicator) {
                 val start = System.currentTimeMillis()
                 try {
@@ -199,7 +199,13 @@ class AutoSyncService(private val project: Project) : Disposable {
                 coordinator.killActive()
                 OneLensEvents.warn("Auto-sync cancelled by user")
             }
-        })
+        }
+        try {
+            ProgressManager.getInstance().run(task)
+        } catch (t: Throwable) {
+            coordinator.release()
+            throw t
+        }
     }
 
     override fun dispose() {

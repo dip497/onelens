@@ -442,11 +442,25 @@ class ExportService {
             while (process.isAlive) {
                 if (indicator?.isCanceled == true) {
                     publish(OneLensEvent.Warn("Cancelled — killing onelens CLI (pid ${process.pid()})"))
-                    process.descendants().forEach { it.destroyForcibly() }
-                    process.destroyForcibly()
-                    process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
-                    reader.join(1000)
+                    // Two-phase kill: SIGTERM first so Python child can
+                    // flush Chroma batches + release CUDA contexts
+                    // cleanly; SIGKILL only if it ignores us after 10 s.
+                    // Re-read descendants between phases because embedder
+                    // workers can fork grandchildren after the first
+                    // snapshot — a single kill of the initial list leaks
+                    // those and pins GPU memory.
+                    process.descendants().forEach { it.destroy() }
+                    process.destroy()
+                    if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                        publish(OneLensEvent.Warn("CLI did not exit on SIGTERM — sending SIGKILL"))
+                        process.descendants().forEach { it.destroyForcibly() }
+                        process.destroyForcibly()
+                        process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                    }
+                    runCatching { process.inputStream.close() }
+                    reader.join(2000)
                     coordinator.setActiveProcess(null)
+                    coordinator.release()
                     throw com.intellij.openapi.progress.ProcessCanceledException()
                 }
                 process.waitFor(200, java.util.concurrent.TimeUnit.MILLISECONDS)

@@ -27,6 +27,18 @@ import java.io.File
 object StartFromSnapshotAction {
 
     fun run(project: Project, graph: String, tag: String, alreadyInstalled: Boolean) {
+        // Promotion renames graph keys in the rdb + swaps the live graph
+        // folder. A live sync writing the rdb at the same time ends up
+        // half-copied. Gate identically to the Publish path.
+        if (com.onelens.plugin.export.SyncCoordinator.getInstance().isRunning()) {
+            com.intellij.notification.NotificationGroupManager.getInstance().getNotificationGroup("OneLens")
+                .createNotification(
+                    "OneLens: cannot start from snapshot while sync is running",
+                    "Wait for the current sync to finish (or cancel it from Background Tasks) before promoting a snapshot.",
+                    com.intellij.notification.NotificationType.WARNING,
+                ).notify(project)
+            return
+        }
         ProgressManager.getInstance().run(object : Task.Backgroundable(
             project, "OneLens: Preparing seed from $graph@$tag", true,
         ) {

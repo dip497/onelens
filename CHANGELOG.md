@@ -30,6 +30,36 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   token-efficiency feedback. Augment-style docstring documents the
   compact shape + when-to-use examples.
 
+### Fixed — Phase U.1 review follow-up (2026-04-24)
+
+- **Coordinator slot leak on submission failure.** If
+  `ProgressManager.run()` threw before the task started (rejected
+  task, configuration-error path), the coordinator's `running` flag
+  stayed `true` forever because `onFinished()` never fired.
+  `ExportFullAction` and `AutoSyncService` now wrap the submit in a
+  `try/catch` that releases the slot + rethrows.
+- **Snapshot actions race with live sync.** `PublishSnapshotAction`
+  was copying `<graph>.rdb` + `context/<graph>/` straight off disk
+  while an import could be writing to the same files →
+  half-baked bundle. `StartFromSnapshotAction` was renaming graph
+  keys in the rdb at the same time. Both paths now refuse with a
+  clear notification if `SyncCoordinator.isRunning()`, matching the
+  existing `GraphCleanupService` gate.
+- **CLI kill upgraded to two-phase.** `ExportService.syncToGraph`
+  used to hit the child with `destroyForcibly()` (SIGKILL) on
+  cancel, which left partially-flushed Chroma batches and occupied
+  CUDA contexts. Now: `destroy()` (SIGTERM) → wait 10 s → only then
+  `destroyForcibly()`. Descendants are re-read between phases so
+  workers forked after the first snapshot still get killed instead
+  of orphaning GPU memory.
+- **Publisher manifest no longer encodes dim-keyed embedder guess.**
+  Two 1024-dim models (Qwen3-Embedding-0.6B, mxbai-embed-large) and
+  multiple 768-dim models mean a "guess" from dim alone risks
+  consumers mounting a mismatched tokenizer. Fallback is now
+  `unknown`; explicit env or backend name is required for a concrete
+  label. The `local` backend (only Jina v2 base code on-disk today)
+  still resolves to its known name.
+
 ### Added — Phase U.1 · Cancellable sync + cleanup guard (2026-04-24)
 
 - **Sync is now actually cancellable.** `ExportService.syncToGraph`

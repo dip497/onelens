@@ -18,6 +18,19 @@ class PublishSnapshotAction : DumbAwareAction("Publish Snapshot…") {
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
+        // Publishing copies `<graph>.rdb` + ~/.onelens/context/<graph>/ raw
+        // off disk. If a live sync is writing to either, we produce a
+        // half-baked bundle. Refuse up front — consistent with the
+        // GraphCleanupService guard.
+        if (com.onelens.plugin.export.SyncCoordinator.getInstance().isRunning()) {
+            NotificationGroupManager.getInstance().getNotificationGroup("OneLens")
+                .createNotification(
+                    "OneLens: cannot publish while sync is running",
+                    "Wait for the current sync to finish (or cancel it from Background Tasks) before publishing a snapshot — otherwise the bundle can be corrupt.",
+                    NotificationType.WARNING,
+                ).notify(project)
+            return
+        }
         val workspace = try { WorkspaceLoader.load(project) } catch (_: Exception) { return }
 
         // git tag listing shells out and must not run on EDT.
