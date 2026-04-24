@@ -3,6 +3,7 @@ package com.onelens.plugin.framework.springboot
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
@@ -28,39 +29,57 @@ object SpringModelCollector {
 
     private val LOG = logger<SpringModelCollector>()
 
-    fun collect(project: Project, workspace: Workspace): List<SpringBean> =
-        ReadAction.compute<List<SpringBean>, Throwable> {
-            if (DumbService.isDumb(project)) {
-                LOG.info("SpringModelCollector skipped — dumb mode")
-                return@compute emptyList()
-            }
-            val manager = SpringManager.getInstance(project)
-            val modules = ModuleManager.getInstance(project).modules
-            val out = ArrayList<SpringBean>()
-            val seen = HashSet<String>()  // dedupe by classFqn|name
-
-            for (module in modules) {
-                val model = try { manager.getCombinedModel(module) } catch (e: Throwable) {
-                    LOG.debug("No Spring model for module ${module.name}: ${e.message}")
-                    continue
-                } ?: continue
-
-                val beans = try { model.getAllCommonBeans() } catch (e: Throwable) {
-                    LOG.debug("getAllCommonBeans failed for ${module.name}: ${e.message}")
-                    continue
-                }
-                val profiles = runCatching { model.activeProfiles?.toList() ?: emptyList() }
-                    .getOrDefault(emptyList())
-
-                for (pointer in beans) {
-                    val bean = toSpringBean(pointer, profiles, workspace) ?: continue
-                    val dedupKey = "${bean.classFqn}|${bean.name}|${bean.factoryMethodFqn ?: ""}"
-                    if (seen.add(dedupKey)) out += bean
-                }
-            }
-            LOG.info("SpringModelCollector: ${out.size} beans across ${modules.size} modules")
-            out
+    fun collect(project: Project, workspace: Workspace): List<SpringBean> {
+        if (ReadAction.compute<Boolean, Throwable> { DumbService.isDumb(project) }) {
+            LOG.info("SpringModelCollector skipped — dumb mode")
+            return emptyList()
         }
+        val modules = ReadAction.compute<Array<com.intellij.openapi.module.Module>, Throwable> {
+            ModuleManager.getInstance(project).modules
+        }
+        val out = ArrayList<SpringBean>()
+        val seen = HashSet<String>()  // dedupe by classFqn|name
+
+        // One ReadAction PER module instead of one around the whole scan.
+        // The previous wrap-everything pattern held the read lock for the
+        // full duration on 10k-bean projects, which blocked EDT write-intent
+        // requests and surfaced as a SuvorovProgress freeze overlay. Giving
+        // the lock up between modules lets editor events + JAM index updates
+        // interleave. Each module's beans are processed inside a
+        // NonBlockingReadAction so we yield if a write comes in mid-module,
+        // then resume — matches the Vue3 collector pattern already in the
+        // repo and LESSONS-LEARNED #1.
+        for (module in modules) {
+            ProgressManager.checkCanceled()
+            val moduleBeans = try {
+                com.intellij.openapi.application.ReadAction
+                    .nonBlocking<List<SpringBean>> {
+                        val manager = SpringManager.getInstance(project)
+                        val model = try { manager.getCombinedModel(module) } catch (_: Throwable) { null } ?: return@nonBlocking emptyList()
+                        val beans = try { model.getAllCommonBeans() } catch (_: Throwable) { return@nonBlocking emptyList() }
+                        val profiles = runCatching { model.activeProfiles?.toList() ?: emptyList() }
+                            .getOrDefault(emptyList())
+                        val local = ArrayList<SpringBean>(beans.size)
+                        for (pointer in beans) {
+                            ProgressManager.checkCanceled()
+                            val bean = toSpringBean(pointer, profiles, workspace) ?: continue
+                            local += bean
+                        }
+                        local
+                    }
+                    .executeSynchronously()
+            } catch (e: Throwable) {
+                LOG.debug("SpringModelCollector failed for ${module.name}: ${e.message}")
+                emptyList()
+            }
+            for (bean in moduleBeans) {
+                val dedupKey = "${bean.classFqn}|${bean.name}|${bean.factoryMethodFqn ?: ""}"
+                if (seen.add(dedupKey)) out += bean
+            }
+        }
+        LOG.info("SpringModelCollector: ${out.size} beans across ${modules.size} modules")
+        return out
+    }
 
     private fun toSpringBean(
         pointer: SpringBeanPointer<*>,
