@@ -79,8 +79,22 @@ class ExportFullAction : DumbAwareAction() {
                 val hasPreviousExport = state.state.lastExportTimestamp > 0
                 val lastExportExists = state.state.lastExportPath.isNotEmpty() &&
                     java.io.File(state.state.lastExportPath).exists()
+                // Snapshot-as-seed (Stage 1d): if the user just promoted a
+                // snapshot, ~/.onelens/graphs/<graph>/.onelens-baseline
+                // is present. `hasPreviousExport` is false (the local
+                // state has never seen an export), but the seed commit
+                // IS a valid baseline — DeltaTracker.consumeBaselineMarker
+                // will read it. Skip the "first time → full" shortcut so
+                // the delta path can kick in. Otherwise every snapshot
+                // restore re-exports the entire codebase, defeating the
+                // whole point of the seed.
+                val baselineMarker = java.io.File(
+                    System.getProperty("user.home"),
+                    ".onelens/graphs/${workspace.graphId}/.onelens-baseline",
+                )
+                val hasSeed = baselineMarker.isFile
 
-                if (!hasPreviousExport || !lastExportExists) {
+                if (!hasSeed && (!hasPreviousExport || !lastExportExists)) {
                     // First time OR last export file missing → full export
                     state.state.lastExportTimestamp = 0  // reset stale state
                     state.state.lastGitHash = ""
