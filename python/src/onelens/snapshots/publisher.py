@@ -230,16 +230,19 @@ def _detect_embedder(ctx_src: Path | None) -> tuple[str, int | None]:
         return env_model, dim
 
     backend = (os.environ.get("ONELENS_EMBED_BACKEND") or "").lower()
+    # Intentional: no dim-keyed guess fallback. Two widely-used 1024-dim
+    # models exist (Qwen3-Embedding-0.6B, mxbai-embed-large) plus other
+    # 768-dim models beyond Jina v2. A "guess" shipped in a manifest
+    # misleads consumers into mounting a mismatched tokenizer. Better to
+    # record "unknown" and let the consumer decide whether to trust the
+    # collection dim alone.
     if backend == "local":
+        # Backend name alone is unambiguous: only Jina v2 base code ships
+        # on the local ONNX path today. If this ever gains a second local
+        # model we flip to "unknown" here and require ONELENS_EMBED_MODEL.
         return "jinaai/jina-embeddings-v2-base-code", dim
     if backend == "openai":
         return "openai-compatible", dim
-
-    # Last-resort dim-keyed guess — keeps older / no-env runs readable.
-    if dim == 768:
-        return "jinaai/jina-embeddings-v2-base-code", dim
-    if dim == 1024:
-        return "Qwen/Qwen3-Embedding-0.6B", dim
     return "unknown", dim
 
 

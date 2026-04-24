@@ -53,7 +53,12 @@ class ExportFullAction : DumbAwareAction() {
             notify(project, "OneLens: A sync is already running. Stop it from the Background Tasks widget first.", NotificationType.WARNING)
             return
         }
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Syncing Graph", true) {
+        // Wrap ProgressManager.run so a submission failure (rejected task,
+        // RuntimeException before run() starts) does not leak the
+        // coordinator slot — onFinished() only fires if the task actually
+        // executed, so a throw on submit would strand `running=true` until
+        // IDE restart.
+        val task = object : Task.Backgroundable(project, "OneLens: Syncing Graph", true) {
             override fun run(indicator: ProgressIndicator) {
                 indicator.isIndeterminate = false
                 val service = ApplicationManager.getApplication().getService(ExportService::class.java)
@@ -140,7 +145,13 @@ class ExportFullAction : DumbAwareAction() {
                 coordinator.killActive()
                 com.onelens.plugin.ui.OneLensEvents.publish(com.onelens.plugin.ui.OneLensEvent.Warn("Sync cancelled by user"))
             }
-        })
+        }
+        try {
+            ProgressManager.getInstance().run(task)
+        } catch (t: Throwable) {
+            coordinator.release()
+            throw t
+        }
     }
 
     private fun doFullExport(
