@@ -65,6 +65,13 @@ object OneLensMcpClient {
         val endpoint = OneLensMcpService.getInstance().endpoint ?: return null
         val session = ensureSession(endpoint) ?: return null
         val jsonArgs = toJsonObject(arguments)
+        // No timeout here on purpose. Real imports can run 20+ min on a
+        // CPU-only box (100k-method embedding pass), and the user can
+        // always hit Stop — the Backgroundable.onCancel path in
+        // ExportFullAction / AutoSyncService kills the MCP child. Adding
+        // an artificial cap risks false-positive aborts on slow hardware.
+        // The handshake path in ensureSession has its own 30 s cap to
+        // catch a wedged initialize, which was the actual failure mode.
         return try {
             runBlocking {
                 session.client.callTool(
@@ -100,7 +107,11 @@ object OneLensMcpClient {
                 clientInfo = Implementation(name = "onelens-plugin", version = "0.2.0")
             )
             val transport = StreamableHttpClientTransport(client = http, url = endpoint)
-            runBlocking { client.connect(transport) }
+            // Cap handshake at 30s. A stalled initialize → indefinite wedge
+            // was observed against FastMCP in stateless mode: plugin thread
+            // blocked in session init forever, no fallback fired. On
+            // timeout we bail so callers drop to the cold CLI path.
+            runBlocking { kotlinx.coroutines.withTimeout(30_000L) { client.connect(transport) } }
             val session = Session(endpoint, http, client)
             current.set(session)
             session
