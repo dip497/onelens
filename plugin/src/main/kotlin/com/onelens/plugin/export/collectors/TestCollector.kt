@@ -3,6 +3,7 @@ package com.onelens.plugin.export.collectors
 import com.intellij.codeInsight.AnnotationUtil
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.psi.JavaPsiFacade
@@ -110,44 +111,78 @@ object TestCollector {
     )
 
     fun collect(project: Project, workspace: Workspace): Result {
-        return ReadAction.compute<Result, Throwable> {
-            if (DumbService.isDumb(project)) {
-                LOG.info("TestCollector skipped — dumb mode")
-                return@compute Result(emptyList(), emptyList(), emptyList())
-            }
-
-            val scope = workspace.scope(project)
-            val facade = JavaPsiFacade.getInstance(project)
-            val tests = LinkedHashMap<String, TestCaseData>()  // methodFqn → data (first framework wins)
-
-            // Every framework's annotations contribute candidate methods.
-            for (fw in FRAMEWORKS) {
-                for (annoFqn in fw.testAnnotations) {
-                    val annoClass = facade.findClass(annoFqn, com.intellij.psi.search.GlobalSearchScope.allScope(project))
-                        ?: continue
-                    AnnotatedElementsSearch.searchPsiMethods(annoClass, scope).forEach { method ->
-                        val methodFqn = fqnOf(method) ?: return@forEach
-                        if (methodFqn in tests) return@forEach  // first-framework wins
-                        val data = buildTestCaseData(method, fw) ?: return@forEach
-                        tests[methodFqn] = data
-                    }
-                }
-            }
-
-            // @MockBean / @SpyBean fields — one pass per annotation, class-scoped.
-            val mocks = mutableListOf<TestBeanBinding>()
-            val spies = mutableListOf<TestBeanBinding>()
-            val testClassFqns = tests.values.map { it.testClass }.toSet()
-            if (testClassFqns.isNotEmpty()) {
-                collectBeanBindings(project, scope, testClassFqns, MOCK_BEAN, mocks)
-                collectBeanBindings(project, scope, testClassFqns, SPY_BEAN, spies)
-            }
-
-            LOG.info(
-                "TestCollector: ${tests.size} tests, ${mocks.size} @MockBean, ${spies.size} @SpyBean"
-            )
-            Result(tests.values.toList(), mocks, spies)
+        if (ReadAction.compute<Boolean, Throwable> { DumbService.isDumb(project) }) {
+            LOG.info("TestCollector skipped — dumb mode")
+            return Result(emptyList(), emptyList(), emptyList())
         }
+
+        val tests = LinkedHashMap<String, TestCaseData>()  // methodFqn → data (first framework wins)
+
+        // Fragment the scan so each (framework, annotation) pair is its own
+        // NonBlockingReadAction. Previously the whole sweep (including the
+        // inner MockBean / SpyBean passes) was wrapped in a single
+        // ReadAction.compute that held the read lock for the entire test
+        // index walk — on a large repo (7k+ test methods resolved through
+        // AnnotatedElementsSearch + stub index) this blocked EDT
+        // write-intent requests and surfaced as a SuvorovProgress freeze.
+        // Same fix shape as SpringModelCollector (see LESSONS-LEARNED #1).
+        for (fw in FRAMEWORKS) {
+            for (annoFqn in fw.testAnnotations) {
+                ProgressManager.checkCanceled()
+                val partial = try {
+                    com.intellij.openapi.application.ReadAction
+                        .nonBlocking<Map<String, TestCaseData>> {
+                            val scope = workspace.scope(project)
+                            val facade = JavaPsiFacade.getInstance(project)
+                            val annoClass = facade.findClass(annoFqn, com.intellij.psi.search.GlobalSearchScope.allScope(project))
+                                ?: return@nonBlocking emptyMap()
+                            val local = LinkedHashMap<String, TestCaseData>()
+                            AnnotatedElementsSearch.searchPsiMethods(annoClass, scope).forEach { method ->
+                                ProgressManager.checkCanceled()
+                                val methodFqn = fqnOf(method) ?: return@forEach
+                                if (methodFqn in local) return@forEach
+                                val data = buildTestCaseData(method, fw) ?: return@forEach
+                                local[methodFqn] = data
+                            }
+                            local
+                        }
+                        .executeSynchronously()
+                } catch (e: Throwable) {
+                    LOG.debug("TestCollector[$annoFqn] failed: ${e.message}")
+                    emptyMap()
+                }
+                // First-framework-wins: only add methodFqns not already seen.
+                for ((fqn, data) in partial) tests.putIfAbsent(fqn, data)
+            }
+        }
+
+        // @MockBean / @SpyBean passes — each gets its own non-blocking
+        // read action so the test class set is captured once but the
+        // field scan can yield to EDT if needed.
+        val mocks = mutableListOf<TestBeanBinding>()
+        val spies = mutableListOf<TestBeanBinding>()
+        val testClassFqns = tests.values.map { it.testClass }.toSet()
+        if (testClassFqns.isNotEmpty()) {
+            try {
+                com.intellij.openapi.application.ReadAction.nonBlocking<Unit> {
+                    collectBeanBindings(project, workspace.scope(project), testClassFqns, MOCK_BEAN, mocks)
+                }.executeSynchronously()
+            } catch (e: Throwable) {
+                LOG.debug("TestCollector[@MockBean] failed: ${e.message}")
+            }
+            try {
+                com.intellij.openapi.application.ReadAction.nonBlocking<Unit> {
+                    collectBeanBindings(project, workspace.scope(project), testClassFqns, SPY_BEAN, spies)
+                }.executeSynchronously()
+            } catch (e: Throwable) {
+                LOG.debug("TestCollector[@SpyBean] failed: ${e.message}")
+            }
+        }
+
+        LOG.info(
+            "TestCollector: ${tests.size} tests, ${mocks.size} @MockBean, ${spies.size} @SpyBean"
+        )
+        return Result(tests.values.toList(), mocks, spies)
     }
 
     // --- per-method classification ------------------------------------------

@@ -90,24 +90,47 @@ object JpaCollector {
     )
 
     fun collect(project: Project, workspace: Workspace): JpaData? {
-        return ReadAction.compute<JpaData?, Throwable> {
-            if (DumbService.isDumb(project)) {
-                LOG.info("JpaCollector skipped — dumb mode")
-                return@compute null
-            }
-            val scope = workspace.scope(project)
-            val facade = JavaPsiFacade.getInstance(project)
-
-            val entities = collectEntities(project, facade, scope, workspace)
-            val repositories = collectRepositories(project, facade, scope, workspace)
-
-            if (entities.isEmpty() && repositories.isEmpty()) {
-                LOG.info("No JPA entities or repositories found")
-                return@compute null
-            }
-            LOG.info("JpaCollector: ${entities.size} entities, ${repositories.size} repositories")
-            JpaData(entities = entities, repositories = repositories)
+        if (ReadAction.compute<Boolean, Throwable> { DumbService.isDumb(project) }) {
+            LOG.info("JpaCollector skipped — dumb mode")
+            return null
         }
+        // Split entity + repository scans into separate NonBlockingReadActions
+        // so EDT write-intent requests can interleave between the two passes.
+        // Previously the outer ReadAction.compute held the read lock across
+        // both walks plus all their column/FK dereferences — on 700+ entity
+        // / 500+ repo projects this surfaced as the SuvorovProgress freeze
+        // from LESSONS-LEARNED #1.
+        val entities = try {
+            com.intellij.openapi.application.ReadAction
+                .nonBlocking<List<JpaEntity>> {
+                    val facade = JavaPsiFacade.getInstance(project)
+                    val scope = workspace.scope(project)
+                    collectEntities(project, facade, scope, workspace)
+                }
+                .executeSynchronously()
+        } catch (e: Throwable) {
+            LOG.debug("JpaCollector[entities] failed: ${e.message}")
+            emptyList()
+        }
+        val repositories = try {
+            com.intellij.openapi.application.ReadAction
+                .nonBlocking<List<com.onelens.plugin.export.JpaRepository>> {
+                    val facade = JavaPsiFacade.getInstance(project)
+                    val scope = workspace.scope(project)
+                    collectRepositories(project, facade, scope, workspace)
+                }
+                .executeSynchronously()
+        } catch (e: Throwable) {
+            LOG.debug("JpaCollector[repositories] failed: ${e.message}")
+            emptyList()
+        }
+
+        if (entities.isEmpty() && repositories.isEmpty()) {
+            LOG.info("No JPA entities or repositories found")
+            return null
+        }
+        LOG.info("JpaCollector: ${entities.size} entities, ${repositories.size} repositories")
+        return JpaData(entities = entities, repositories = repositories)
     }
 
     private fun collectEntities(
