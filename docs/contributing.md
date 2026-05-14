@@ -31,7 +31,7 @@ cd plugin
 
 ```bash
 cd python
-pip install -e ".[context]"    # includes Qwen3 + mxbai deps
+pip install -e ".[context]"    # includes ONNX embedder (Jina-v2-base-code default) + mxbai deps
 ruff format .
 ruff check .
 mypy src/onelens               # advisory today

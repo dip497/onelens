@@ -107,7 +107,7 @@ $onelens mcp-server  # stdio transport; wire into your MCP-compatible client
 
 ## Daemon (optional, speeds up semantic queries)
 
-Keeps Qwen3-Embedding-0.6B and mxbai-rerank-base warm in memory across CLI invocations:
+Keeps the local embedder (Jina-v2-base-code by default; `gemma` / `tiny` profile via `ONELENS_LOCAL_EMBED_PROFILE`) and `mxbai-rerank-base` warm in memory across CLI invocations:
 
 ```bash
 $onelens daemon start
@@ -130,7 +130,7 @@ $onelens daemon stop
 | Spring injections | `@Autowired` + constructor injection |
 | Annotation usages | `PsiModifierList.getAnnotations()` |
 | External library stubs | Auto-created from resolved call targets |
-| Method body + javadoc embeddings | Qwen3-Embedding-0.6B → ChromaDB |
+| Method body + javadoc embeddings | Jina-v2-base-code (default) → ChromaDB |
 | PageRank (personalized, seeded by entry points) | NetworkX, stored as node property |
 
 ## Why IntelliJ PSI over tree-sitter?
@@ -165,13 +165,13 @@ Derived properties (written at import by PageRank prebake):
 │  onelens CLI (Python, cyclopts-generated)            │
 │  ├── import-graph — auto-detects full vs delta       │
 │  ├── retrieve / impact / trace / search / query      │
-│  ├── daemon — warm Qwen3 + mxbai                     │
+│  ├── daemon — warm embedder + mxbai                  │
 │  └── mcp-server — same ops via MCP stdio             │
 └───────────┬──────────────────────────┬───────────────┘
             │                          │
     ┌───────┴────────┐         ┌───────┴────────────┐
     │ FalkorDB       │         │ ChromaDB           │
-    │ Cypher + FTS   │         │ Qwen3 embeddings   │
+    │ Cypher + FTS   │         │ Jina-v2 embeddings │
     │ + browser UI   │         │ + mxbai rerank     │
     └────────────────┘         └────────────────────┘
 ```

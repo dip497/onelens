@@ -587,7 +587,20 @@ data class AnnotationUsage(
     val targetKind: String,
     val annotationFqn: String,
     val params: Map<String, String> = emptyMap(),
-    val attributes: String = "{}"
+    val attributes: String = "{}",
+    /**
+     * Resolved primitive attribute values, flattened for direct edge-
+     * property querying. `@RequestMapping(value="/foo", method="GET")` →
+     * `{"value": "/foo", "method": "GET"}` lands as edge properties
+     * `attr_value="/foo"`, `attr_method="GET"` after loader UNWIND.
+     *
+     * Only primitive resolved values appear here (strings, numbers,
+     * enum names, class FQNs as strings). Arrays and nested
+     * annotations stay in the JSON `attributes` blob — this map is
+     * the convenience layer for the 80% case where the attribute is
+     * a single flat value.
+     */
+    val attrValues: Map<String, String> = emptyMap()
 )
 
 @Serializable

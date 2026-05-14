@@ -1145,3 +1145,380 @@ still run `onelens daemon start` manually.
 Cross-references: ADR-027 (local semantic stack — this is the transport
 upgrade on top), hechtcarmel/jetbrains-index-mcp-plugin (prior art for
 IDE-hosted MCP), `plugin/.../mcp/OneLensMcpService.kt` + `OneLensMcpClient.kt`.
+
+---
+
+## ADR-029 · 2026-04-26 · Global CLI owns bootstrap; MCP registers independent of plugin
+
+**Status:** Accepted (design) — implementation Phase V (see PROGRESS.md).
+
+### Decision
+
+Move all bootstrap (uv install, venv create, dep install, semantic stack, GPU
+stack, TensorRT, key storage, MCP registration) out of the IntelliJ plugin
+(`PythonEnvManager`, ~660 LOC Kotlin) and into the Python CLI as `onelens
+setup`, `onelens onboard`, `onelens doctor`, `onelens config` commands. Plugin
+becomes thin: detect `onelens` on PATH, balloon-install if missing, shell-out
+for everything else.
+
+MCP server registers directly with Claude Code via `claude mcp add --scope
+project --transport stdio onelens -- onelens mcp serve`. Lifecycle is
+Claude-Code-managed (per-session stdio child). Plugin is no longer in the MCP
+critical path.
+
+### Context
+
+Plugin-owned bootstrap blocks four real use cases:
+
+1. **Headless / CI** — no IntelliJ, no bootstrap.
+2. **VS Code / other editors** — no path to onboard without IntelliJ.
+3. **MCP after IDE exit** — Claude Code sessions outside IntelliJ lose the
+   tool because the MCP child dies with the IDE.
+4. **Duplicate logic** — `installSemanticStack`, GPU stack, key handling all
+   live in Kotlin then again as CLI flags. Drift inevitable.
+
+Competitors (GitNexus `npm i -g gitnexus`, Graphify `pip install graphifyy`)
+onboard in one command. OneLens onboarding feels heavy by comparison.
+
+### Alternatives considered
+
+- **Status quo (plugin-owned).** Rejected — blocks every non-IntelliJ path.
+- **Single-file binary (PyInstaller / shiv / pex).** Rejected — torch +
+  transformers + chromadb payload = 500 MB-1.5 GB. uv tool install ships
+  prebuilt wheels in seconds for ~30 MB structural-only.
+- **`pipx install` as primary.** Demoted to fallback. uv tool install is
+  10-100× faster, doesn't require Python pre-installed (uv bundles its own
+  rust binary), single curl-bash bootstrap.
+- **Global-scope MCP (like GitNexus).** Rejected — OneLens graphs are
+  repo-bound (graph name = project name, embeddings keyed by `wing` =
+  graph). MCP scope should match. Default = project (`<repo>/.mcp.json`),
+  `--global` opt-in.
+- **HTTP/SSE MCP transport.** Rejected for default — local single-user dev
+  tool. stdio is simpler, stateless, kills with session. SSE/HTTP only when
+  remote / multi-tenant / shared (not our case).
+- **Long-running daemon as default.** Rejected — lifecycle pain (systemd
+  unit, launchd, Windows service). Kept as opt-in flag for power users
+  who want warm Qwen3 + mxbai (~50 ms cold-start vs ~3 s).
+- **Always-keyring secret storage.** Rejected — research-validated that
+  Python `keyring` fails silently on headless Linux / WSL without D-Bus +
+  gnome-keyring. Industry pattern (gh, aws, gcloud, aider, Claude Code
+  itself) is plaintext + chmod 600. We mirror gh: try keyring, fall back
+  to `~/.onelens/keys.json` chmod 600 with explicit warning, expose
+  `--insecure-storage` flag for opt-in.
+
+### Cloud embedder default = voyage-code-3 (not OpenAI)
+
+Validated against MTEB / CoIR Apr 2026:
+
+- voyage-code-3: CoIR 77.33, code-tuned, 32 K context, Matryoshka dims.
+- text-embedding-3-small: generic, $0.02/1M, fallback option.
+- jina-embeddings-v4: CoIR 71.59 — below voyage on code despite marketing.
+- nomic-embed-code: open-weights hedge against Voyage pricing changes.
+
+Onboard recommends voyage; OpenAI listed as fallback. Embedder interface
+kept single-config-line so swap is trivial.
+
+### Secrets never exposed via MCP
+
+CI guard: `grep -r "@mcp.tool" python/src/onelens/cli_only/` must be empty.
+Config / key tools live in `python/src/onelens/cli_only/`, never imported
+by `mcp_server.py`. Agent cannot read or write API keys via MCP.
+
+### Idempotency caveat (Claude Code #8288)
+
+`claude mcp add` lacks stable "already registered" exit code. Onboard
+implementation parses `claude mcp list` JSON before add; on parse failure
+falls back to remove+add. Document fragility; pin tested `claude` versions.
+
+### Revisit when
+
+- Claude Code ships stable `mcp add --idempotent` behavior (#8288 closed) —
+  simplify our parsing logic.
+- We grow a hosted SaaS / multi-tenant graph backend → revisit HTTP/SSE
+  transport for MCP.
+- Cursor-style team-shared embedding cache (chunk-hash keyed) becomes a
+  competitive must-have → likely separate plan, not a reversal of this ADR.
+- scip-java grows Spring annotation indexing (today: NO) — could enable
+  fully headless indexer without IntelliJ Ultimate / Qodana dependency.
+
+### Cross-references
+
+- `docs/design/PLAN-onboard-cli.md` — full plan (research-validated v2)
+- ADR-009 — plugin auto-installs venv (this ADR supersedes the
+  bootstrap-ownership half; venv mechanism unchanged, owner moves)
+- ADR-028 — plugin owns MCP child (this ADR supersedes for global / headless
+  use; in-IDE plugin-spawned MCP remains as optional power-user mode)
+- ADR-013 — platformType IU dev, runtime portable (still holds)
+- Research citations: see PLAN-onboard-cli.md §11 References
+- Claude Code MCP docs — https://code.claude.com/docs/en/mcp
+- Idempotency bug — https://github.com/anthropics/claude-code/issues/8288
+- voyage-code-3 — https://blog.voyageai.com/2024/12/04/voyage-code-3/
+- uv tool install — https://docs.astral.sh/uv/concepts/tools/
+
+---
+
+## ADR-W01 · 2026-04-30 · MCP server is the only OneLens runtime — no separate daemon command, no plugin CLI fallback
+
+### Decision
+
+`onelens mcp serve` is the **single long-lived process** that hosts every
+runtime concern: ML model load (Jina v2 + BGE), FalkorDB connection,
+ChromaDB collections, all `@mcp.tool` operations. There is no separate
+`onelens daemon start|stop|status` command — the MCP server *is* the
+daemon. The plugin's only job around the runtime is "ensure it's up";
+all sync / query / retrieve flows over HTTP to the same MCP child.
+
+Singleton enforced via `fcntl.lockf` (POSIX) / `msvcrt.locking` (Windows)
+on `~/.onelens/mcp.lock`. Second `onelens mcp serve --http` invocation
+reads `~/.onelens/mcp.port` and exits 0. Multi-IDE setups (two IntelliJ
+windows, plugin + Claude Code, headless CI) all converge on one process.
+
+### Context
+
+Three coupled symptoms hit on the same day:
+
+1. **EDT freezes (~19 s).** Status tab's 5 s Swing Timer ran
+   `nvidia-smi` from the EDT; NVML driver-lock contention from a
+   concurrent TRT engine build (or a second IDE on the same GPU)
+   blocked the subprocess for tens of seconds.
+2. **Two IDEs collide.** `OneLensMcpService` is `@Service(Service.Level.APP)`,
+   one MCP per JVM. Two IntelliJ windows = 2× model load = OOM on 4 GB
+   cards. Plus port-file races, `~/.onelens/venv` install races, and
+   FalkorDB Lite data-dir races.
+3. **CLI shell-out from plugin.** `ExportService.syncToGraph` shells
+   out to `cli_generated.py` even when MCP HTTP is reachable, forcing
+   PythonEnvManager to manage Python child lifecycles for *both* the
+   persistent MCP and the per-sync CLI.
+
+Root cause: "one MCP per IDE" *and* duplicated tool calls between MCP
+HTTP and CLI shell-out. Collapsing to MCP-only fixes (1) by removing
+in-plugin telemetry shell-outs and (2) by sharing one MCP across IDEs.
+(3) becomes a downstream consequence: no CLI to fall back to, plugin
+always uses HTTP.
+
+### Alternatives
+
+- **Docker container default** — solves model duplication only when
+  paired with a *shared* container plus MCP-only routing. Adds 4-6 GB
+  image weight, nvidia-container-toolkit (Linux-easy, macOS impossible
+  without remote GPU). Rejected as default; opt-in packaging later.
+- **Per-IDE daemon (current state).** Worked when most users had one
+  project open; OOM under multi-IDE.
+- **Separate `daemon` command + MCP client.** Phase V's earlier split:
+  daemon keeps models warm, MCP child connects to daemon for inference.
+  Rejected — adds a second long-lived process for no benefit; FastMCP
+  lifespan already gives "model loaded once, shared across all tool
+  calls" (DeepWiki confirmed).
+- **Stateless HTTP per request.** Each request reloads the model.
+  Rejected — Jina + BGE load is ~30 s warm, ~2 min cold; per-request
+  reload makes retrieval unusable.
+- **External inference runtime (Triton / TEI / Ollama / vLLM / Ray
+  Serve / BentoML).** Researched (PLAN-mcp-only.md §9). **TEI** kept
+  as opt-in (`ONELENS_RERANK_BACKEND=tei`) — wins ~2–4× indexing
+  throughput on GPU but costs platform-specific Rust install + 2
+  TEI processes (one per model; upstream issue #92 closed not-planned).
+  **Triton** rejected for default — overkill at batch=1 (arxiv
+  2602.00053: FastAPI 22 ms p50 beats Triton 28 ms below batch=16).
+  **Ollama** rejected — reranker PRs unmerged since Oct 2024
+  (#7406, #7219). **vLLM/TGI** rejected — LLM-shaped, no encoder/
+  cross-encoder primitives. **BentoML/Ray Serve** rejected — solve
+  packaging or distributed scale-out, not single-process serving.
+
+### Consequences
+
+- Plugin's `installSemanticStack` / `installTensorrt` / CLI shell-out
+  path (~400 LOC across `ExportService.kt` and `PythonEnvManager.kt`)
+  becomes obsolete once Phase W2 lands. Kept until Phase V's installer
+  ships.
+- The CLI shrinks to `onelens onboard` (interactive setup) +
+  `onelens mcp serve` (the runtime). Standalone CLI commands still work
+  via `cli_generated.py` for headless CI but no longer the plugin's
+  path.
+- Singleton lock means the first `onelens mcp serve` to start owns the
+  GPU. Subsequent invocations are no-ops. UX: identical to "first
+  process to call `start()` wins."
+- `mcp.port` is the single discovery channel; external clients (Claude
+  Code, Codex) read it once at startup. Atomic write via `os.replace`
+  prevents partial-write races.
+
+### Revisit when
+
+- Multi-user shared workstation becomes a real deployment shape →
+  switch from per-user lock to per-machine + multi-tenant routing.
+- Docker becomes the dominant install mode → re-anchor lock on
+  `/var/run/onelens.lock` inside the container.
+- FastMCP grows native singleton support (asked upstream; today: no).
+- A genuine need for "warm model independent of MCP server lifecycle"
+  emerges — then resurrect the daemon split.
+
+### Cross-references
+
+- `docs/design/PLAN-mcp-only.md` — full plan + research citations
+- ADR-028 — plugin owns MCP child (this ADR generalises: plugin starts
+  MCP child, but MCP is now expected to outlive the plugin)
+- ADR-029 — global CLI owns bootstrap (still holds; this ADR sharpens
+  runtime: CLI installs, MCP runs, plugin observes)
+- DeepWiki `jlowin/fastmcp` — lifespan + EventStore patterns
+- Anthropic — `claude mcp add --scope user --transport http`
+- Exa — single-instance fcntl/msvcrt patterns (StackOverflow #220525,
+  ActiveState recipe), `nvidia-smi` NVML-lock contention
+
+---
+
+## ADR-030 · 2026-05-07 · Embedder profiles for low-end CPUs
+
+**Decision.** `LocalEmbedder` gains an `ONELENS_LOCAL_EMBED_PROFILE`
+shorthand env (`balanced` | `gemma` | `tiny`) plus
+`ONELENS_LOCAL_EMBED_QUANT=q4|q8|fp32` to pick the ONNX variant from
+repos that ship multiple. Default stays `jinaai/jina-embeddings-v2-base-code`
+(unchanged, drawer-compatible). EmbeddingGemma-300m and BGE-small are
+opt-in.
+
+**Context.** User asked "can we use a less heavy model so all people
+can use it?" — the perception was Qwen3-Embedding-0.6B (the legacy
+`embedder.py` path, 1.2 GB) was the active model. In reality, the
+default has been Jina-v2-base-code (161 M, 320 MB, CPU-OK) since
+ADR-027. But: (a) the perception drift means docs were stale; (b)
+truly tiny machines (sub-8GB-RAM laptops) want sub-50 MB models with
+q4 quant; (c) we want a path to EmbeddingGemma now that an ungated
+ONNX mirror (`onnx-community/embeddinggemma-300m-ONNX`) ships fp32 +
+q4 + q8 in the same repo.
+
+**Why opt-in vs flipping default.** Existing ChromaDB drawers were
+embedded with Jina-v2-base-code. Switching the default model
+silently invalidates every drawer (cosine similarities are
+nonsense across model families). Forcing a re-mine on every existing
+install for a marginal recall gain is hostile. Profile = explicit
+opt-in + obvious re-mine step.
+
+**Why EmbeddingGemma over BGE-large / nomic-embed / Qwen3.**
+- Same 768-dim as our default → drawer schema unchanged
+- MTEB Code #1 sub-500M (Sept 2025), beats prior SOTA
+- Matryoshka: truncatable to 128/256/512 if storage matters
+- onnx-community mirror is **ungated** (Google's repo is gated under
+  the Gemma license — bad for "everyone can run it" goal)
+- `transformers.js`-friendly export means q4 quant exists and works
+  on phones/Chromebooks
+- fp16 unsupported (per Google's model card) but irrelevant for
+  CPU-first deployment; q4/q8 is the actual win
+
+**Why BGE-small as the `tiny` tier.** 33 M params, 128 MB on disk,
+CPU-fast on a Raspberry Pi. Different dim (384) so it's a
+break-glass option when the user explicitly wants minimum footprint
+and is happy to invalidate drawers.
+
+**Implementation gotcha.** ONNX exports >2 GB use external-weights
+mode (`save_as_external_data=True`), which produces a
+`model.onnx_data` sidecar. The previous `_download_model`
+`allow_patterns` only included `model.onnx`, so EmbeddingGemma /
+Qwen3 ONNX exports loaded the graph but failed at first inference
+with "Tensor data is empty". Fixed regardless of which profile a
+user picks. Jina v2 base code is below the 2 GB threshold so the
+bug never surfaced on the default.
+
+**Alternatives considered.**
+
+- *Auto-detect: GPU → Jina, CPU → Gemma.* Rejected — silent default
+  flips invalidate drawers without consent.
+- *Single env `ONELENS_LOCAL_EMBED_MODEL` (already supported).*
+  Still works; profile is a discoverability layer for the 80%
+  who don't want to memorise repo ids.
+- *Ship pre-quantized model.onnx in the plugin JAR.* Bloats the
+  IDE plugin distribution to 200+ MB. Lazy HF download remains
+  the right shape.
+
+**Revisit when.** (a) MTEB releases a model that beats EmbeddingGemma
+on Code while staying ≤300M and ungated; (b) we add
+`ONELENS_RETRIEVAL_AUTO_REMINE` so flipping profiles becomes
+non-hostile; (c) browser-side retrieval (Transformers.js) becomes
+a real OneLens shape, in which case `q4` Gemma becomes the
+default for that path.
+
+---
+
+## ADR-031 · 2026-05-08 · Skill + warm-aware CLI over `claude mcp add`
+
+**Decision.** OneLens does NOT register itself as an MCP server with
+Claude Code via `claude mcp add`. Instead, the LLM-facing surface stays
+the existing `SKILL.md` (bash → `onelens` CLI), and the CLI auto-routes
+to a running MCP daemon over HTTP when one exists. Warm process,
+single GPU model load, zero MCP-tool schemas in the LLM's context.
+
+**Context.** Three callers need OneLens: the IntelliJ plugin (already
+HTTP via `OneLensMcpService`), terminal users running `onelens X`, and
+Claude Code through `SKILL.md` calling the CLI via the bash tool. Until
+this ADR, the CLI used `Client(_server)` (in-process FastMCP) which
+re-loaded the embedder + reranker on every invocation — ~22-30 s cold
+start per call. The plugin path was warm; the skill path was not.
+
+The obvious fix was "register OneLens as an MCP server with Claude Code"
+(`claude mcp add --transport http onelens http://127.0.0.1:<port>/mcp/`).
+Rejected — see Alternatives.
+
+**Alternatives considered.**
+
+- *Register OneLens as a Claude Code MCP server.* Would have given
+  Claude Code warm HTTP access. **Rejected** because doing so injects
+  all 20 OneLens tool schemas into the LLM's context every session
+  (~5-10 KB tokens of pure plumbing). The skill approach has zero
+  schema overhead — Claude Code reads SKILL.md (which is just
+  documentation, not a tool surface) and learns to call `onelens X`
+  via bash. Industry consensus through 2026 (Cursor, Perplexity, the
+  HuggingFace and DevOps Daily comparisons we surveyed) has converged
+  on "Skills + CLI for the LLM, MCP only when stateful sessions or
+  multi-tenant auth are needed." OneLens is single-user and the
+  daemon stays warm via a different lock; we don't earn the schema
+  tax.
+- *Daemon-only — no in-process fallback in the CLI.* Would simplify
+  `cli_generated.py` to a single transport. Rejected — first-ever
+  invocation, air-gapped CI, and fresh installs all need a working
+  CLI before any daemon exists. In-process fallback IS the bootstrap
+  path.
+- *Auto-spawn daemon when CLI finds none.* Tempting (zero-config UX).
+  Rejected for v0.x because the MCP server has no idle-shutdown timer
+  yet — auto-spawn would create silent process leaks holding 1.5 GB
+  VRAM forever. Tracked as EP-17; will revisit once idle-shutdown ships.
+- *Skip the skill, register MCP, accept the schema cost.* Cleaner from
+  a "one transport" purity argument. Rejected because OneLens already
+  ships the skill (bundled in plugin JAR, copied to
+  `~/.claude/skills/onelens/`); throwing it away to gain one transport
+  is a regression in install-UX simplicity.
+
+**Why this works for OneLens specifically.**
+
+The standard CLI-vs-MCP framing ("CLI is cheap subprocess, MCP is
+warm protocol") inverts here. OneLens "CLI" was the *expensive* one
+(spawned a fresh Python with cold model loads per call). OneLens
+"MCP" via HTTP is the *cheap* one (warm, ~200 ms). By making the CLI
+prefer HTTP when available, we get cheap-everywhere behavior under
+the cheaper-LLM-context surface (skill).
+
+**Implementation.**
+
+`cli_generated.py::_resolve_client_spec()` is called per
+`Client(_resolve_client_spec())` invocation. It reads
+`~/.onelens/mcp.port`, TCP-probes `127.0.0.1:<port>`, returns the
+URL string `"http://127.0.0.1:<port>/mcp/"` if reachable, else
+returns the in-process `_server` (`FastMCPTransport`). FastMCP's
+`Client` auto-infers `StreamableHttpTransport` from `http://` prefix
+(v2.3.0+) — no explicit transport class import needed. The patch
+lives in `python/scripts/regen_cli.sh` so it survives `fastmcp
+generate-cli` regeneration.
+
+`ONELENS_FORCE_LOCAL_CLIENT=1` short-circuits the resolver to the
+in-process path — useful for cold-load benchmarks and air-gapped
+CI that must not touch the network stack.
+
+**Revisit when.** (a) Anthropic ships a way to register MCP servers
+without dumping all tool schemas into the LLM context (e.g. lazy
+schema discovery via `tools/list` on demand — already on the spec
+roadmap); (b) OneLens grows multi-user / per-user-token semantics
+that warrant MCP's auth model; (c) we add idle-shutdown to the
+daemon (EP-17) and want CLI auto-spawn for zero-config UX.
+
+**References.**
+- FastMCP `Client` transport inference: `fastmcp/clients/transports`
+- FastMCP `generate-cli` `CLIENT_SPEC` edit point: official docs
+- Industry CLI-vs-MCP analyses (Feb-Apr 2026): HuggingFace blog,
+  ddewhurst.com, clifor.ai, addyosmani/agent-engineer
+

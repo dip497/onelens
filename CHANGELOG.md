@@ -7,6 +7,314 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Flat annotation attribute properties (2026-05-08)
+
+- **`ANNOTATED_WITH.attr_<key>` edge properties.** Each primitive
+  resolved annotation attribute value (string / number / enum name /
+  class FQN) lands as a first-class edge property in addition to the
+  JSON `attributes` blob. `@RequestMapping(value="/foo", method="GET")`
+  on a method now produces an edge with `r.attr_value="/foo"` +
+  `r.attr_method="GET"`. Exact-match queries work without JSON
+  substring traps:
+  ```cypher
+  MATCH (m:Method)-[r:ANNOTATED_WITH]->(:Annotation {name:'RequestMapping'})
+  WHERE r.attr_value = '/users'
+  RETURN m.fqn
+  ```
+- Arrays and nested annotations intentionally stay JSON-only in
+  `attributes` — `SET r += $map` with arbitrary nested values would
+  produce edge property names that aren't queryable. The flat
+  `attr_<key>` layer is the convenience for the 80% case (single
+  primitive); the JSON blob remains the fallback for structure.
+- Plugin emits `attrValues: Map<String, String>` on
+  `AnnotationUsage`. Loader promotes via Cypher
+  `SET r += edge.attr_props` in a single UNWIND pass — no extra
+  round-trips per edge. Same path on both full and delta importers.
+
+### Fixed — Review hardening (2026-05-08)
+
+- **Drawer stamp now fails-closed on unstamped legacy collections.**
+  `ChromaBackend._validate_stamp` raises new
+  `UnstampedLegacyCollectionError` when a collection has no
+  `onelens_embedder_model` metadata (i.e. was created before EP-6 /
+  2026-05-08). Previously the `if stored_model and ...` short-circuit
+  let unstamped collections silently dodge the embedder-mismatch
+  guard. Recovery is the same `--clear` re-mine path users already
+  take for an actual mismatch. We don't backfill the stamp with the
+  current embedder because we have no proof the legacy data was
+  written by it — backfilling a guess would lock the wrong baseline
+  in.
+- **Plugin always writes `ONELENS_LOCAL_EMBED_PROFILE` /
+  `ONELENS_LOCAL_EMBED_QUANT` env vars** to the spawned MCP child,
+  even when set to defaults. `pb.environment().putAll(env)` overlays
+  the IDE's inherited environment; the previous "skip on default"
+  optimisation could leak a parent-shell `ONELENS_LOCAL_EMBED_PROFILE=gemma`
+  through to the child after a user flipped Settings back to balanced.
+  Settings UI is now the single source of truth.
+- **`regen_cli.sh` post-generation invariants.** Verifies the
+  resolver helper, in-process fallback import, callsite rewrites,
+  and `socket` import all landed in the regenerated `cli_generated.py`
+  — exits non-zero with a pointed message otherwise. Catches the
+  case where a future fastmcp release changes its emitted
+  `CLIENT_SPEC = StdioTransport(...)` shape and the regex above
+  silently no-ops.
+
+### Added — Warm-aware CLI routing (2026-05-08)
+
+- **`cli_generated.py` resolves transport per call.** New
+  `_resolve_client_spec()` reads `~/.onelens/mcp.port`, TCP-probes
+  `127.0.0.1:<port>`, returns the daemon's HTTP URL when reachable,
+  else falls back to in-process FastMCP. Per-call resolution means a
+  daemon started mid-session is picked up on the next invocation
+  without restart. **Net: skill / terminal CLI gets warm-MCP
+  performance (~200 ms) instead of paying ~22-30 s cold model load
+  per call.**
+- **Plugin's CLI shell-out fallback inherits the warmth.**
+  `ExportService.kt::syncToGraph` uses the same `cli_generated.py`
+  for its rare cold-path fallback — that path now also reuses the
+  daemon if one is up, instead of double-loading the embedder.
+- **`ONELENS_FORCE_LOCAL_CLIENT=1`** short-circuits the resolver to
+  in-process. Lets benchmarks measure cold-load time honestly, and
+  lets air-gapped CI avoid the network stack.
+- **Patch survives `fastmcp generate-cli` regeneration.**
+  `python/scripts/regen_cli.sh` extended with the resolver injection
+  block, so re-running it after a Python MCP API change keeps the
+  warm-routing behavior.
+- **No `claude mcp add` registration.** OneLens stays a skill +
+  CLI from Claude Code's perspective — keeps the LLM context clean
+  of MCP tool schemas. See ADR-031.
+
+### Added — Embedder hardening + plugin UX (2026-05-08)
+
+- **Drawer version stamp.** `ChromaBackend.get_collection` writes
+  `onelens_embedder_model` + `onelens_embedder_dim` into collection
+  metadata at create time; reads check that the current process's
+  embedder matches and raise `EmbedderMismatchError` if not. Stops
+  silent retrieval corruption when a user flips
+  `ONELENS_LOCAL_EMBED_PROFILE` against a graph that was already
+  mined with a different model.
+- **TRT cache slug includes quant.** `~/.onelens/trt-cache/<slug>-<quant>/`
+  scoping prevents engine reuse across q4/q8/fp32 variants of the
+  same model — they have different graphs and would corrupt the
+  cache silently.
+- **Plugin cold-load progress message.** Before spawning the MCP
+  Python child, `OneLensMcpService` publishes an explicit
+  status-panel event ("first run loads embedder model — ~30 s on
+  CPU, ~22 s on GPU with cache") so the IDE doesn't appear to hang.
+- **Profile + quant pickers in plugin Settings.** Preferences →
+  Tools → OneLens Semantic adds two ComboBoxes for embedder profile
+  and ONNX quant. Values flow through `OneLensMcpService.buildEnv`
+  to `ONELENS_LOCAL_EMBED_PROFILE` / `_QUANT` only when ≠ default
+  (keeps env clean and lets future Python-side default flips
+  propagate).
+- **Removed legacy `python/src/onelens/context/embedder.py`** — the
+  decoder-style Qwen3-0.6B ONNX wrapper. Last consumer was a
+  docstring reference; its removal closes the risk of someone
+  re-wiring it as the default. Modal-internal embedding still works
+  via `embed_backends/local_backend.py` (the active path since
+  ADR-027). Chroma docstrings, `modal_app.py` import comment,
+  `CLAUDE.md`, and `docs/architecture.md` updated to match.
+
+### Added — Embedder profiles for low-end CPUs (2026-05-07)
+
+- **`ONELENS_LOCAL_EMBED_PROFILE`** shorthand env on `LocalEmbedder` —
+  picks model without forcing users to memorise HF repo ids:
+  - `balanced` (default) → `jinaai/jina-embeddings-v2-base-code` (161M, 768-d, code-tuned)
+  - `gemma` → `onnx-community/embeddinggemma-300m-ONNX` (300M, 768-d,
+    MTEB Code #1 sub-500M, drawer-compatible drop-in once re-mined,
+    q4 / q8 quants for tiny-RAM laptops)
+  - `tiny` → `BAAI/bge-small-en-v1.5` (33M, 384-d, fastest CPU; requires
+    fresh drawers — different dim from default)
+- **`ONELENS_LOCAL_EMBED_QUANT=q4|q8|fp32`** picks the ONNX variant for
+  repos that ship multiple (EmbeddingGemma, Qwen3). q4 ≈ 150 MB on disk
+  vs ~600 MB fp32; ~1 pt MTEB drop.
+- **`_download_model` allow_patterns now covers `model.onnx_data`
+  sidecar** (>2 GB external-weights file produced by ONNX
+  `save_as_external_data=True`). Without it, EmbeddingGemma + Qwen3
+  ONNX exports loaded the graph but failed at first inference with
+  "Tensor data is empty". Jina v2 base code is small enough to ship a
+  monolithic `model.onnx` so the bug never showed on the default path.
+- Falls back to `model.onnx` if the requested quant variant is missing
+  on the chosen repo (e.g. user sets `QUANT=q4` while staying on Jina,
+  which only ships fp32). Keeps the surface area forgiving.
+- Default unchanged. Existing drawers stay valid.
+
+### Fixed — Phase W · MCP-only runtime + EDT freeze (2026-04-30)
+
+- **W2.5 — MCP child no longer killed on IDE close.** `OneLensMcpService.dispose()`
+  used to call `stop()` which `destroyForcibly()`'d the Python process.
+  Now disposes only in-process bookkeeping (HTTP client reset). The OS
+  child process keeps running. Result: Claude Code continues working
+  when the user closes IntelliJ; next IDE open reuses the warm model
+  instead of paying ~30 s lifespan reload. Singleton flock at
+  `~/.onelens/mcp.lock` is the singleton guarantee, not the JVM
+  `processRef`. `plugin/.../mcp/OneLensMcpService.kt::dispose`.
+- **W5 — Plugin reuses external MCP if one is up.** `start()` now reads
+  `~/.onelens/mcp.port` and probes `GET /mcp` before spawning. If
+  another IntelliJ window or `onelens mcp serve` from a terminal is
+  already running, point at it instead of fighting the singleton lock
+  and burning seconds on lock-loss. `readExternalPort` +
+  `probeReachable` helpers.
+- **W7 — DeltaTracker rename parser bug.** `git diff --name-status`
+  emits 3-column `R100\tfrom\tto` rows on rename / copy. Old code
+  used `split("\t", limit=2)` → `filePath = "from\tto"` (corrupt
+  string), and the old path was never marked deleted, so renamed
+  classes orphaned in the graph. Now parses 3-col rows explicitly:
+  `from` → deleted set, `to` → modified set. Same fix for `C` (copy)
+  status. `plugin/.../export/delta/DeltaTracker.kt::getGitChanges`.
+- **W4 partial — MCP-first sync path.** `ExportService.syncToGraph`
+  now auto-starts the singleton MCP when not reachable + semantic is
+  on, before considering CLI shell-out. Multi-IDE setups + Claude
+  Code share one warm model instead of every sync booting a fresh
+  Python child. CLI fallback retained as cold-path safety net for
+  users without a working venv yet — full removal blocked on Phase V
+  installer guarantee that every user has `onelens` on PATH.
+- **EDT freeze (~19 s) on Status tab.** 5 s Swing Timer was running
+  `nvidia-smi` and `python -c …` from the EDT; under NVML driver-lock
+  contention (TRT engine build, second IDE on GPU) the subprocess
+  could block 10–30 s. Telemetry now runs on a pooled thread; only
+  the `JBLabel.text` update is on the EDT.
+  `plugin/.../ui/OneLensToolWindow.kt::updateSemanticLine`,
+  `plugin/.../ui/SystemMonitor.kt`.
+- **`nvidia-smi` runaway.** Added 1 s `Process.waitFor(timeout)` +
+  `destroyForcibly()` on overrun so a hung NVML lock can't wedge
+  the pool thread either. `SystemMonitor.kt::gpuMemoryBytesForPid`.
+- **`detectLocalProvider()` re-probed every 5 s.** Cached for the
+  IDE session — venv layout doesn't change without explicit user
+  action via Settings → Apply.
+  `OneLensToolWindow.kt::cachedProvider`.
+- **`local_backend.py` ignored `ONELENS_LOCAL_EMBED_MODEL`.**
+  Constructor's default param value short-circuited the env lookup;
+  override path was dead. Now resolved env-first.
+- **`local_backend.py` hard-coded 768 dim.** Swapping to a non-768
+  model (jina-v3 = 1024) silently produced corrupt embeddings via
+  `np.empty((N, 768))` truncation. Dim now derived from
+  `session.get_outputs()[0].shape[-1]` with a 1-token warmup probe
+  fallback for fully-dynamic exports.
+- **`get_reranker() -> RerankBackend` referenced an undefined name.**
+  Hidden by `from __future__ import annotations` lazy-eval but broke
+  `typing.get_type_hints()` and mypy. Now `-> RerankerBase`.
+  `python/src/onelens/context/embed_backends/__init__.py`.
+
+### Changed — Phase W
+
+- **`embed_backends/__init__.py` defaults flipped to `local`.** Plugin's
+  `OneLensSettings.embedderBackend` already defaulted to `local`; CLI /
+  standalone MCP now matches so users without the plugin don't
+  accidentally hit Modal cloud.
+- **`ONELENS_LOCAL_EMBED_MAXLEN` default 256 → 512.** Matches Jina
+  v2's training seq length per the upstream model card. The 256 cap
+  was truncating mid-method on bodies past ~256 tokens.
+- **`onelens mcp serve --http` is now a singleton per user.** Uses
+  `fcntl.lockf` (POSIX) / `msvcrt.locking` (Windows) on
+  `~/.onelens/mcp.lock`. Second invocation reads `~/.onelens/mcp.port`,
+  prints `already running on http://127.0.0.1:<port>/mcp`, exits 0.
+  Multi-IDE setups (two IntelliJ windows + Claude Code) converge on
+  one MCP child instead of each spawning their own and racing on
+  VRAM, the port file, and the FalkorDB Lite data dir.
+  `python/src/onelens/mcp_server.py::_acquire_singleton_lock`.
+- **`mcp.port` written atomically** via `os.replace`. Concurrent
+  readers see either the old port or the new one — never a partial
+  write. `_write_port_atomic`.
+
+### Added — Phase W
+
+- **`docs/design/PLAN-mcp-only.md`** — research-validated design for
+  MCP-only runtime (FastMCP lifespan owns model load, plugin shells
+  out only to start it, no separate `daemon` command). Supersedes the
+  daemon split in `PLAN-onboard-cli.md` §4.3. Backed by DeepWiki
+  `jlowin/fastmcp` (lifespan + EventStore patterns), Anthropic docs
+  (claude mcp scopes + reconnect backoff), Exa (single-instance
+  fcntl/msvcrt patterns), HF model card (Jina v2 dim + maxlen).
+- **TEI (HuggingFace Text Embeddings Inference) reranker backend**
+  (`tei_backend.py::TEIReranker`). Opt-in via
+  `ONELENS_RERANK_BACKEND=tei` + `ONELENS_TEI_RERANK_URL=…`. TEI
+  embedding side already covered by the existing `openai_compat`
+  backend pointed at TEI's `/v1/embeddings`. Power users on Linux
+  running TEI for other reasons get 2–4× indexing throughput via
+  Flash Attention + token-based dynamic batching; default stays
+  in-process ONNX (no new install cost).
+- **§9 in `PLAN-mcp-only.md`** — runtime comparison matrix (TEI /
+  Triton / Ollama / vLLM / BentoML / Ray Serve / FastAPI). Decision:
+  pluggable inference backend, default unchanged. Triton rejected
+  (overkill at batch=1 — arxiv 2602.00053 shows FastAPI wins below
+  batch=16); Ollama rejected (reranker PRs unmerged since Oct 2024);
+  vLLM/TGI rejected (LLM-shaped, no encoder primitives).
+- **`docs/competitive-landscape.md`** — capability matrix vs Graphify
+  (`safishamsi/graphify`, ~30k stars, multi-modal NetworkX+Leiden,
+  no Spring) and GitNexus (`abhigyanpatwari/GitNexus`, 16-language
+  tree-sitter, LadybugDB embedded Cypher, Snowflake arctic-embed-xs
+  384d, 16 MCP tools, global multi-repo registry). Sourced from
+  Exa + DeepWiki dives. Identifies three durable OneLens advantages
+  (PSI parsing, Spring/JPA depth, IDE plugin auto-sync) and two
+  patterns worth borrowing (GitNexus `~/.gitnexus/registry.json`
+  global registry + lazy-connect+evict, Graphify slash-command skill
+  multi-targeting Codex/Cursor/Cline/12+ assistants).
+- **Deep-dive addendum** to `competitive-landscape.md` — second-pass
+  DeepWiki research with implementation specifics for direct copy:
+  GitNexus's CrossFile type-propagation algorithm (Kahn topological
+  sort + 3 enrichment mechanisms E1/E2/E3 + fixpoint loop —
+  irrelevant for us because PSI), MRO plug-in pattern, MCP tool
+  return shapes (`route_map` / `shape_check` / `api_impact` with
+  LOW/MEDIUM/HIGH risk thresholds), cross-repo group + bridge-db
+  pattern (`group.yaml`, GrpcExtractor, HttpRouteExtractor,
+  TopicExtractor, exact-match cascade, `MAX_SUPPORTED_CROSS_DEPTH=1`),
+  Snowflake arctic-embed-xs 384d via `GITNEXUS_EMBEDDING_*` env vars,
+  RRF K=60 hybrid search formula, BFS forward process detection from
+  entry-point seeds; Graphify's confidence-tag system (EXTRACTED=1.0,
+  INFERRED=0.6–0.9, AMBIGUOUS=0.1–0.3) and skill multi-targeting
+  pattern (one Python pipeline + per-platform manifest files
+  `skill-codex.md` / `skill-aider.md` / `skill-trae.md` / etc., with
+  syntactic-only deltas).
+- **Phase X expanded** with 5 new ⬜ rows derived from research:
+  `onelens_route_map`, `onelens_shape_check`, `onelens_api_impact`
+  (data already in graph — just need the join queries),
+  `confidence`+`reason` edge properties (Graphify-style tag system),
+  `onelens_processes` (BFS forward from PageRank entry-point seeds).
+- **Phase Y planned** — cross-repo bridge graph mirroring GitNexus's
+  group.yaml + bridge-db pattern. 11 ⬜ rows covering config schema,
+  separate `~/.onelens/bridges/<groupId>.rdb` FalkorDB instance,
+  HTTP/gRPC/Topic/SharedLibs extractors, exact-match cascade sync,
+  cross-impact tool with bridge fan-out.
+- **Phase Z planned** — skill multi-targeting (Codex / Cursor / Cline
+  / Aider / Gemini CLI) per Graphify's pattern. 7 ⬜ rows covering
+  per-platform manifest files, `InstallSkillAction` agent detection,
+  CI drift guard.
+- **Second deep-pass addendum** to `competitive-landscape.md` — code-
+  level specifics from third DeepWiki round + Exa sweep on adjacent
+  tools. New sections §I–§Q. Concrete adds: GitNexus's RRF formula
+  confirmed `1/(60+i)` summed across rankings (we already match);
+  GitNexus's BM25 = LadybugDB FTS + Porter stemmer (we use weighted
+  FTS without stemming — *not* adopting, Porter on `getUser` →
+  `getus` likely hurts code retrieval, deferred to benchmark);
+  GitNexus's `pool-adapter.ts` exact data structure (`Map<string,
+  PoolEntry>` + `setInterval` 60s reaper + `evictLRU`) — Python port
+  spec written for Phase X3; Graphify's rationale-comment regex
+  (`# NOTE:` / `# WHY:` / `# FIXME:` etc.) — Java/Kotlin/Vue port
+  spec for Phase X11; Graphify's MCP-as-text-not-JSON design tradeoff
+  (sticking with JSON, adding `format="text"` flag for token-tight
+  contexts, X13). Discovered missed competitors: **scip-java** (real
+  contender — javac compiler plugin, compiler-grade type accuracy,
+  same level as PSI, complementary not competing — PSI wins live
+  editing + framework awareness, SCIP wins headless CI), **blarify**
+  (multilspy LSP + optional SCIP, claims 330× speedup), **codemem-
+  storage** (tree-sitter + SCIP confidence fusion). Identifies 6
+  new action items including SCIP fusion for headless CI (Y4-SCIP)
+  and confidence-fusion pattern from codemem (X14). Confirms 7
+  parity-or-better wins to surface in README (RRF K=60 match,
+  PageRank, live IDE updates, Spring/JPA depth, Vue cross-stack,
+  persistent graph, MCP HTTP transport).
+- **ADR-W01** — MCP server is the only OneLens runtime; plugin role
+  collapses to "ensure MCP up + speak HTTP."
+
+### Added — Phase V · Onboard CLI + MCP decoupling (2026-04-26, design)
+
+- **Plan landed** — `docs/design/PLAN-onboard-cli.md` (research-validated v2). Move bootstrap from plugin (`PythonEnvManager`, ~660 LOC) to global Python CLI: `curl | sh` → `uv tool install onelens` → per-project `onelens onboard`.
+- **ADR-029** — global CLI owns bootstrap; MCP registers independent of plugin (project-scope `.mcp.json` default; `--global` opt-in).
+- **Research validation** — installer (uv tool install > pipx); cloud embedder default = voyage-code-3 (CoIR 77.33 SOTA Apr 2026, not OpenAI); keyring → file fallback (chmod 600, mirrors `gh`); `claude mcp add` idempotency unstable (#8288 → parse-then-add).
+- **Security boundary** — secrets never exposed as `@mcp.tool` (config/key tools live in `python/src/onelens/cli_only/`, CI guard enforced).
+- **Implementation**: V1-V12 in `docs/PROGRESS.md` (all ⬜ — design only at this point).
+
 ### Added — Phase U · Status tab UX + reindex tool (2026-04-23)
 
 - **Toggle Semantic Index toolbar button** in the OneLens tool window.

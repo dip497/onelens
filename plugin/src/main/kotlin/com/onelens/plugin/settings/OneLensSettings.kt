@@ -36,13 +36,26 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         // and unlock natural-language retrieval (`onelens retrieve`).
         var buildSemanticIndex: Boolean = false,
         // Embedder backend, user-selectable from Settings → Tools → OneLens Semantic.
-        //   "local"  — default. Jina-v2-base-code via onnxruntime-gpu +
-        //              CUDA 12 runtime (pip wheels). Air-gapped, ~1 GB install.
+        //   "local"  — default. ONNX runtime, CUDA / CPU autopick.
         //   "openai" — any /v1/embeddings-compatible API (OpenAI, Voyage, Together,
         //              Mistral, TEI). BYOK — the key lives in PasswordSafe, not XML.
         // Modal is intentionally NOT exposed in the UI — it was the legacy dev
         // default; set ONELENS_EMBED_BACKEND=modal manually if you need it.
         var embedderBackend: String = "local",
+        // Local embedder profile — `balanced` (Jina-v2-base-code, default,
+        // 161M, GPU/CPU), `gemma` (EmbeddingGemma-300m, MTEB Code #1
+        // sub-500M, q4/q8 quants for tiny CPUs — drawer-compatible drop-in
+        // for Jina but requires re-mine), `tiny` (BGE-small 33M, fastest
+        // CPU, different dim — fresh drawers required). Read by the
+        // Python `LocalEmbedder` via the `ONELENS_LOCAL_EMBED_PROFILE`
+        // env. Switching INVALIDATES existing ChromaDB drawers — a hard
+        // error fires (EmbedderMismatchError) on the first retrieve until
+        // the user re-syncs with `--clear`.
+        var localEmbedderProfile: String = "balanced",
+        // ONNX quant variant. Only meaningful for repos that ship multiple
+        // (EmbeddingGemma, Qwen3). `q4` ≈ 150 MB on disk, ~1pt MTEB drop.
+        // `fp32` is the default. Read via `ONELENS_LOCAL_EMBED_QUANT`.
+        var localEmbedderQuant: String = "fp32",
         // Set to true once the user clicks "Install TensorRT acceleration" on
         // the Semantic settings screen. local_backend.py reads this indirectly:
         // TRT is auto-enabled whenever `tensorrt-cu12` is importable, which only

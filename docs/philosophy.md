@@ -46,8 +46,9 @@ Manual steps are the enemy of adoption.
 
 Graph backend is pluggable (FalkorDB / FalkorDBLite / Neo4j), but
 default is FalkorDB. Embedder is pluggable, but default is
-Qwen3-Embedding-0.6B. The first release ships one opinionated
-path through each seam; extensibility never delays shipping.
+`jinaai/jina-embeddings-v2-base-code` (161M, ONNX, code-tuned, runs
+on CPU). The first release ships one opinionated path through each
+seam; extensibility never delays shipping.
 
 ## 7. Privacy first
 

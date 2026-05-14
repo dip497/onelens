@@ -107,7 +107,9 @@ Terms that sound like they belong here but don't:
 
 - **Indexer** — use *collector* (for plugin) or *loader* (for
   Python).
-- **Embedding model** — use *embedder* if you must; concretely
-  it's Qwen3-Embedding-0.6B.
+- **Embedding model** — use *embedder* if you must; default is
+  `jinaai/jina-embeddings-v2-base-code` (161M, 768-d, ONNX).
+  Opt-in: EmbeddingGemma-300m or BGE-small via
+  `ONELENS_LOCAL_EMBED_PROFILE`.
 - **Reranker** — use *cross-encoder*; concretely it's
   mxbai-rerank-base.

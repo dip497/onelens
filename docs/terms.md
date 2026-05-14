@@ -32,10 +32,14 @@ explicit patent grant applies to all contributions.
 
 ## Third-party content
 
-OneLens embeds and loads third-party open-source models
-(Qwen3-Embedding-0.6B, mxbai-rerank-base) downloaded from
-HuggingFace Hub on first use. Those models carry their own
-licences; consumers respect whatever terms those authors attach.
+OneLens loads third-party open-source models on demand from
+HuggingFace Hub: `jinaai/jina-embeddings-v2-base-code` (default
+embedder, Apache 2.0) and `mixedbread-ai/mxbai-rerank-base-v1`
+(reranker, Apache 2.0). Optional opt-in models — `onnx-community/embeddinggemma-300m-ONNX`
+(Gemma licence) and `BAAI/bge-small-en-v1.5` (MIT) — pull on first
+use of the corresponding `ONELENS_LOCAL_EMBED_PROFILE`. Those
+models carry their own licences; consumers respect whatever terms
+those authors attach.
 
 FalkorDB, ChromaDB, NetworkX, FastMCP, cyclopts, and other
 dependencies are governed by their own respective licences

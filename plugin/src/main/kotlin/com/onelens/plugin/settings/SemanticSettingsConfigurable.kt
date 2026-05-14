@@ -42,6 +42,15 @@ class SemanticSettingsConfigurable : Configurable {
     private val providerLabel = JBLabel("Provider: detecting…")
     private val installTrtBtn = JButton("Install TensorRT fp16 acceleration (+1 GB, ~3× faster)")
 
+    // Profile + quant pickers — surface the new env knobs in-UI so users
+    // don't need to memorise ONELENS_LOCAL_EMBED_PROFILE / _QUANT.
+    private val profileCombo = ComboBox(arrayOf("balanced", "gemma", "tiny"))
+    private val quantCombo = ComboBox(arrayOf("fp32", "q8", "q4"))
+    private val profileWarn = JBLabel(
+        "<html><i>Switching profile invalidates existing semantic drawers — re-sync " +
+        "with Sync Graph after Apply.</i></html>"
+    )
+
     private val openaiBaseUrl = JBTextField()
     private val openaiApiKey = JBPasswordField()
     private val openaiModel = JBTextField()
@@ -58,6 +67,9 @@ class SemanticSettingsConfigurable : Configurable {
 
         val localBlock = FormBuilder.createFormBuilder()
             .addComponent(providerLabel)
+            .addLabeledComponent("Embedder profile", profileCombo)
+            .addLabeledComponent("ONNX quant", quantCombo)
+            .addComponent(profileWarn)
             .addComponent(installTrtBtn)
             .panel
 
@@ -106,6 +118,9 @@ class SemanticSettingsConfigurable : Configurable {
     private fun refreshEnabled() {
         val local = localRadio.isSelected
         providerLabel.isEnabled = local
+        profileCombo.isEnabled = local
+        quantCombo.isEnabled = local
+        profileWarn.isEnabled = local
         installTrtBtn.isEnabled = local && !settings.state.localEmbedderUseTRT
         openaiBaseUrl.isEnabled = !local
         openaiApiKey.isEnabled = !local
@@ -137,6 +152,8 @@ class SemanticSettingsConfigurable : Configurable {
         val s = settings.state
         val currentBackend = if (localRadio.isSelected) "local" else "openai"
         return currentBackend != s.embedderBackend ||
+            (profileCombo.selectedItem as String) != s.localEmbedderProfile ||
+            (quantCombo.selectedItem as String) != s.localEmbedderQuant ||
             openaiBaseUrl.text != s.openaiBaseUrl ||
             openaiModel.text != s.openaiEmbedModel ||
             openaiDim.text != s.openaiEmbedDim.toString() ||
@@ -146,6 +163,8 @@ class SemanticSettingsConfigurable : Configurable {
     override fun apply() {
         val s = settings.state
         s.embedderBackend = if (localRadio.isSelected) "local" else "openai"
+        s.localEmbedderProfile = (profileCombo.selectedItem as String)
+        s.localEmbedderQuant = (quantCombo.selectedItem as String)
         s.openaiBaseUrl = openaiBaseUrl.text.trim().ifEmpty { "https://api.openai.com/v1" }
         s.openaiEmbedModel = openaiModel.text.trim().ifEmpty { "text-embedding-3-small" }
         s.openaiEmbedDim = openaiDim.text.trim().toIntOrNull() ?: 1536
@@ -157,6 +176,8 @@ class SemanticSettingsConfigurable : Configurable {
         val local = s.embedderBackend.equals("local", ignoreCase = true)
         localRadio.isSelected = local
         openaiRadio.isSelected = !local
+        profileCombo.selectedItem = s.localEmbedderProfile
+        quantCombo.selectedItem = s.localEmbedderQuant
         openaiBaseUrl.text = s.openaiBaseUrl
         openaiModel.text = s.openaiEmbedModel
         openaiDim.text = s.openaiEmbedDim.toString()

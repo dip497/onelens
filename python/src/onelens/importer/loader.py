@@ -388,25 +388,38 @@ class GraphLoader:
                          for o in data.get("methodOverrides", [])]
             self._batch_edges(progress, "OVERRIDES", overrides, "Method", "fqn", "Method", "fqn")
 
-            # ANNOTATED_WITH — edges carry the `attributes` JSON blob (resolved
-            # values; `{}` for pre-1.1 exports). Group by target label since each
-            # label has its own primary-key column.
+            # ANNOTATED_WITH — edges carry both the `attributes` JSON blob
+            # (resolved values; structure-preserving — arrays / nested
+            # annotations live here) and a flat set of `attr_<key>` properties
+            # promoted from the export's `attrValues` map (primitive values
+            # only). The flat properties make queries like
+            #   MATCH (m:Method)-[r:ANNOTATED_WITH]->(:Annotation {fqn:'org.springframework.web.bind.annotation.RequestMapping'})
+            #   WHERE r.attr_value = '/users'
+            # trivial — no JSON substring traps.
+            #
+            # Group by target label since each label has its own primary-key
+            # column for the MATCH.
             ann_groups = {"Class": [], "Method": [], "Field": []}
             for a in data.get("annotations", []):
                 kind = a.get("targetKind", "CLASS")
                 label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
+                # Promote attrValues → attr_<key> property keys. Skip empty
+                # / dynamic markers so we don't pollute the edge schema with
+                # `attr_value="<dynamic>"` rows that defeat exact-match queries.
+                attr_props: dict[str, str] = {}
+                for k, v in (a.get("attrValues") or {}).items():
+                    if not v or v == "<dynamic>":
+                        continue
+                    attr_props[f"attr_{k}"] = v
                 ann_groups[label].append({
                     "src": a["targetFqn"],
                     "dst": a["annotationFqn"],
                     "attributes": a.get("attributes", "{}"),
+                    "attr_props": attr_props,
                 })
             for label, edges in ann_groups.items():
                 if edges:
-                    self._batch_edges_with_props(
-                        progress, f"ANNOTATED_WITH ({label})", edges,
-                        label, "fqn", "Annotation", "fqn",
-                        prop_names=["attributes"], rel_type="ANNOTATED_WITH",
-                    )
+                    self._batch_annotation_edges(progress, label, edges)
 
             # Spring edges
             if spring:
@@ -1524,6 +1537,59 @@ class GraphLoader:
                         """
                         self.db.execute(single_q, {"src": edge["src"], "dst": edge["dst"],
                                                     **{p: edge.get(p, "") for p in prop_names}})
+                    except Exception:
+                        failed_count += 1
+            progress.update(task, advance=len(batch))
+        if failed_count > 0:
+            logger.warning(f"{desc}: {failed_count} edges failed (missing nodes)")
+
+    def _batch_annotation_edges(self, progress, label: str, edges: list):
+        """Specialized batcher for ANNOTATED_WITH edges with dynamic
+        `attr_<key>` properties on top of the `attributes` JSON blob.
+
+        `_batch_edges_with_props` requires fixed prop names declared up
+        front; annotations have per-row variable keys (`@RequestMapping`
+        carries `attr_value` + `attr_method`, `@Qualifier` carries only
+        `attr_value`, etc.) so we use Cypher `SET r += $map` to write
+        the per-row map onto the relationship in the same UNWIND pass.
+
+        FalkorDB supports `SET r += map` per openCypher; behaviour:
+        existing keys overwritten, new keys added, missing keys left
+        alone. Empty `attr_props` is a no-op.
+        """
+        if not edges:
+            return
+
+        query = f"""
+            UNWIND $batch AS edge
+            MATCH (a:{label} {{fqn: edge.src}})
+            MATCH (b:Annotation {{fqn: edge.dst}})
+            CREATE (a)-[r:ANNOTATED_WITH {{attributes: edge.attributes}}]->(b)
+            SET r += edge.attr_props
+        """
+
+        failed_count = 0
+        desc = f"ANNOTATED_WITH ({label})"
+        task = progress.add_task(f"{desc}...", total=len(edges))
+        for i in range(0, len(edges), EDGE_BATCH):
+            batch = edges[i:i + EDGE_BATCH]
+            try:
+                self.db.execute(query, {"batch": batch})
+            except Exception as e:
+                logger.warning(f"Batch {desc} failed, retrying individually: {e}")
+                for edge in batch:
+                    try:
+                        single_q = f"""
+                            MATCH (a:{label} {{fqn: $src}})
+                            MATCH (b:Annotation {{fqn: $dst}})
+                            CREATE (a)-[r:ANNOTATED_WITH {{attributes: $attributes}}]->(b)
+                            SET r += $attr_props
+                        """
+                        self.db.execute(single_q, {
+                            "src": edge["src"], "dst": edge["dst"],
+                            "attributes": edge.get("attributes", "{}"),
+                            "attr_props": edge.get("attr_props", {}),
+                        })
                     except Exception:
                         failed_count += 1
             progress.update(task, advance=len(batch))

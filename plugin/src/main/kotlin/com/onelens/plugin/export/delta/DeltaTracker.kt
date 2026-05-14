@@ -181,18 +181,40 @@ object DeltaTracker {
 
             for (line in output.lines()) {
                 if (line.isBlank()) continue
-                val parts = line.split("\t", limit = 2)
+                // `git diff --name-status` row shapes:
+                //   "M\tpath"                  — modified
+                //   "A\tpath"                  — added
+                //   "D\tpath"                  — deleted
+                //   "R100\tfrom\tto"           — rename (3 cols!)
+                //   "C75\tfrom\tto"            — copy   (3 cols!)
+                // Old code split with limit=2 → renames produced
+                // `filePath = "from\tto"` (corrupt) and the old path was
+                // never marked deleted, so renamed classes orphaned in
+                // the graph. Parse 3-col rows explicitly.
+                val parts = line.split("\t")
                 if (parts.size < 2) continue
-
                 val status = parts[0].trim()
-                val filePath = parts[1].trim()
-
-                // Only track Java files
-                if (!filePath.endsWith(".java")) continue
 
                 when {
-                    status.startsWith("D") -> deleted.add(filePath)
-                    status.startsWith("A") || status.startsWith("M") || status.startsWith("R") -> modified.add(filePath)
+                    status.startsWith("D") -> {
+                        val p = parts[1].trim()
+                        if (p.endsWith(".java")) deleted.add(p)
+                    }
+                    status.startsWith("R") || status.startsWith("C") -> {
+                        // Rename / copy: parts[1] = from, parts[2] = to.
+                        // Treat from as deleted (so old FQN cleans up) +
+                        // to as modified (so new FQN gets emitted).
+                        if (parts.size >= 3) {
+                            val from = parts[1].trim()
+                            val to = parts[2].trim()
+                            if (from.endsWith(".java")) deleted.add(from)
+                            if (to.endsWith(".java")) modified.add(to)
+                        }
+                    }
+                    status.startsWith("A") || status.startsWith("M") -> {
+                        val p = parts[1].trim()
+                        if (p.endsWith(".java")) modified.add(p)
+                    }
                 }
             }
 

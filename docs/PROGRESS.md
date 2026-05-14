@@ -2,7 +2,159 @@
 
 Source of truth for what's landed, what's in flight, and what's deferred. Append-only per phase; mark status inline. Links point to the canonical artefact so this file stays skimmable.
 
-Last updated: 2026-04-24.
+Last updated: 2026-05-07.
+
+## Embedder profiles · low-end CPU UX (2026-05-07 → 2026-05-08)
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| EP-1 | `ONELENS_LOCAL_EMBED_PROFILE=balanced\|gemma\|tiny` shorthand | ✅ | `local_backend.py::PROFILE_MODELS`, `LocalEmbedder.__init__` |
+| EP-2 | `ONELENS_LOCAL_EMBED_QUANT=q4\|q8\|fp32` ONNX variant picker | ✅ | `local_backend.py::_resolve_onnx_filename` |
+| EP-3 | `model.onnx_data` external-weights sidecar in `allow_patterns` | ✅ | `local_backend.py::_download_model` |
+| EP-4 | Quant-variant-missing fallback to fp32 model.onnx | ✅ | `local_backend.py::LocalEmbedder.__init__` |
+| EP-5 | Re-run benchmark on `gemma` + `tiny` profiles, document recall delta | ⬜ | `python/benchmarks/` (gitignored) |
+| EP-6 | **Drawer version stamp** — write `onelens_embedder_model` + `onelens_embedder_dim` into ChromaDB collection metadata; raise `EmbedderMismatchError` on retrieve when current process's embedder ≠ what wrote the drawers. Stops silent corruption on profile flip. | ✅ | `chroma.py::ChromaBackend.get_collection`, `EmbedderMismatchError` |
+| EP-7 | **TRT engine cache slug includes quant variant** — `~/.onelens/trt-cache/<model-slug>-<quant>/` so flipping `q4 → q8` doesn't reuse a wrong-graph engine | ✅ | `local_backend.py::LocalEmbedder.__init__` (cache_slug arg to `_build_providers`) |
+| EP-8 | **Plugin cold-load progress message** — `OneLensMcpService.start()` publishes a status-panel event explaining the ~30 s embedder warmup before spawning, instead of a 30 s silent hang | ✅ | `OneLensMcpService.kt::start` |
+| EP-9 | **Delete legacy `embedder.py`** (Qwen3-0.6B Modal-internal path) — last user was a docstring; removes future risk of someone re-wiring it as default | ✅ | `python/src/onelens/context/embedder.py` deleted; chroma docstrings + Modal app comment + CLAUDE.md/architecture.md refreshed |
+| EP-10 | **Profile + quant pickers in plugin Settings** — Preferences → Tools → OneLens Semantic gains `Embedder profile` + `ONNX quant` ComboBoxes; values flow to `ONELENS_LOCAL_EMBED_PROFILE` / `_QUANT` env via `OneLensMcpService.buildEnv` (only when ≠ default to keep env clean) | ✅ | `OneLensSettings.kt`, `SemanticSettingsConfigurable.kt`, `OneLensMcpService.kt::buildEnv` |
+| EP-11 | TOML/JSON profile config so users can register custom profiles without editing `PROFILE_MODELS` | ⬜ | `local_backend.py` + `~/.onelens/profiles.toml` (deferred) |
+| EP-12 | Air-gap HF cache check — try local cache before `snapshot_download` to honour the air-gapped install promise | ⬜ | `local_backend.py::_download_model` (deferred) |
+| EP-13 | Periodic embedder health heartbeat (NaN check on dummy encode) | ⬜ | new `mcp_server.py` background task (deferred) |
+| EP-14 | Multi-graph FalkorDB port (Phase C alignment) | ⬜ | `graph/db.py` factory + plugin settings (deferred) |
+| EP-15 | MCP queue / per-client serialization for concurrent retrieve calls | ⬜ | `mcp_server.py` + ORT thread-safety check (deferred) |
+| EP-16 | **Warm-aware CLI routing** — `cli_generated.py` probes `~/.onelens/mcp.port` per invocation, hits warm daemon over HTTP when reachable, falls back to in-process FastMCP otherwise. Plugin's CLI shell-out fallback path inherits the same warmth automatically. `ONELENS_FORCE_LOCAL_CLIENT=1` opt-out for benchmarks. Patch survives `fastmcp generate-cli` regeneration via updated `regen_cli.sh`. Validated against FastMCP `StreamableHttpTransport` URL-inference (v2.3.0+). | ✅ | `cli_generated.py::_resolve_client_spec`, `python/scripts/regen_cli.sh` |
+| EP-17 | Idle-shutdown timer in MCP server (precondition for safe CLI auto-spawn). Track last-tool-call timestamp, exit cleanly after N min idle. Releases lock + port file. | ⬜ | `mcp_server.py` lifespan + signal handler |
+| EP-18 | **Annotation attribute values as flat edge properties.** Plugin `AnnotationCollector` emits `attrValues` map of primitive resolved values; loader promotes each to `attr_<key>` on the `ANNOTATED_WITH` edge via Cypher `SET r += $map`. Queries can now match exact attribute values without JSON substring traps (`WHERE r.attr_value = '/users'`). Arrays + nested annotations stay JSON-only in `attributes`. Same shape on full + delta loader paths. | ✅ | `AnnotationCollector.kt`, `ExportModels.kt::AnnotationUsage`, `loader.py::_batch_annotation_edges`, `delta_loader.py` annotation block |
+
+## Phase W — MCP-only runtime + EDT fix (2026-04-30)
+
+Collapse OneLens runtime to a single long-lived MCP server per user.
+Drop the per-IDE child-process model that caused 2× VRAM use and the
+port/venv/data-dir races. Plugin role narrows to "ensure MCP up + speak
+HTTP." Local embedder gets correctness fixes that were blocking Phase V
+headless installs.
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| W0 | Research + plan (FastMCP lifespan, claude mcp scopes, fcntl/msvcrt singleton, jina-v2 dim/maxlen) | ✅ | `docs/design/PLAN-mcp-only.md` |
+| W1 | EDT off-thread telemetry — `updateSemanticLine` runs on pooled thread; only `JBLabel.text` on EDT | ✅ | `plugin/.../ui/OneLensToolWindow.kt::updateSemanticLine` |
+| W1 | `nvidia-smi` 1 s `Process.waitFor(timeout)` + `destroyForcibly()` on overrun | ✅ | `plugin/.../ui/SystemMonitor.kt::gpuMemoryBytesForPid` |
+| W1 | `detectLocalProvider()` cached for IDE session | ✅ | `OneLensToolWindow.kt::cachedProvider` |
+| W2 | Singleton lock (`fcntl.lockf` POSIX / `msvcrt.locking` Windows) on `~/.onelens/mcp.lock` | ✅ | `python/src/onelens/mcp_server.py::_acquire_singleton_lock` |
+| W2 | Atomic `mcp.port` write via `os.replace` | ✅ | `mcp_server.py::_write_port_atomic` |
+| W2 | Second `onelens mcp serve --http` invocation reads existing port + exits 0 | ✅ | `mcp_server.py::__main__` |
+| W3 | `local_backend.py` honors `ONELENS_LOCAL_EMBED_MODEL` (was documented but ignored) | ✅ | `local_backend.py::LocalEmbedder.__init__` |
+| W3 | Embedding dim probed from `session.get_outputs()[0].shape` (was hard-coded 768) | ✅ | `local_backend.py::LocalEmbedder.__init__` |
+| W3 | `ONELENS_LOCAL_EMBED_MAXLEN` default 256 → 512 (matches Jina v2 training length) | ✅ | `local_backend.py` |
+| W3 | `embed_backends/__init__.py` defaults flipped to `local`; `RerankerBase` annotation fix | ✅ | `embed_backends/__init__.py` |
+| W4 | Plugin: MCP-first sync — auto-start singleton when not reachable + semantic on; CLI fallback only as cold-path safety net for users without a working venv yet (full CLI rip blocked on Phase V installer guarantee) | 🟡 partial | `plugin/.../export/ExportService.kt::syncToGraph` |
+| W5 | Plugin: read existing `mcp.port` before spawning; reuse if reachable (multi-IDE convergence on one MCP) | ✅ | `plugin/.../mcp/OneLensMcpService.kt::start` (`readExternalPort` + `probeReachable`) |
+| W2.5 | Plugin: don't kill MCP child on `dispose()` — singleton is meant to outlive its spawner so Claude Code keeps working when IDE closes + next IDE reuses warm model | ✅ | `OneLensMcpService::dispose` |
+| W6 | Per-node TRT placement verification (opt-in `ONELENS_LOCAL_LOG_PLACEMENT=1`) | ⬜ | follow-up |
+| W7 | DeltaTracker rename parser fix — parse `git diff --name-status` 3-col `R100\tfrom\tto` rows correctly, treat `from` as deleted + `to` as modified (was producing corrupt `"from\tto"` filePath, orphaning renamed classes) | ✅ | `plugin/.../export/delta/DeltaTracker.kt::getGitChanges` |
+| W7-ext | Extension whitelist (`.kt`/`.vue`/`.js`/`.ts`) in DeltaTracker — blocked on Phase B2.1–B2.7 (Vue delta export support) before widening filter is useful | 🟥 blocked | depends on B2 |
+| W8 | Inference-runtime research — runtime comparison matrix (TEI / Triton / Ollama / vLLM / Ray / Bento / FastAPI) | ✅ | `docs/design/PLAN-mcp-only.md` §9 |
+| W8 | TEI reranker backend (opt-in via `ONELENS_RERANK_BACKEND=tei`) | ✅ | `python/src/onelens/context/embed_backends/tei_backend.py` |
+| W8 | TEI embedding path documented — already supported via `openai_compat` pointed at TEI's `/v1/embeddings` | ✅ | `tei_backend.py` docstring |
+| W9 | Competitive landscape doc — Graphify + GitNexus capability matrix, what to copy vs not chase | ✅ | `docs/competitive-landscape.md` |
+
+---
+
+## Phase X — Multi-repo global registry (planned, design from GitNexus)
+
+Mirror GitNexus's `~/.gitnexus/registry.json` pattern so one MCP
+server can list + serve every indexed graph on the user's machine.
+Folds into the singleton MCP we just built (Phase W2): the lock owns
+the process, the registry owns the graph catalogue. Lazy graph-
+connection eviction after 5 min idle (max 5 concurrent) keeps the
+process light when many repos are indexed but only a few are hot.
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| X0 | Design — file format + concurrency rules + registry write atomicity (atomic rename, fcntl lock during write) | ⬜ | `docs/competitive-landscape.md` action #2 + Phase X spec doc TBD |
+| X1 | `~/.onelens/registry.json` — schema `{ "graphs": { "<graphId>": { "path": str, "lastSync": ts, "vueRoot": str?, "appCount": int } } }` | ⬜ | `python/src/onelens/registry.py` |
+| X2 | `onelens_list_graphs` MCP tool + auto-detect-`graph` when only one indexed | ⬜ | `mcp_server.py` |
+| X3 | Lazy graph connection + 5-min idle eviction (LRU cache, max 5 concurrent) | ⬜ | `python/src/onelens/graph/db.py::create_backend` wrapper |
+| X4 | Plugin: register on first sync; deregister on `Delete graph` action | ⬜ | `plugin/.../export/ExportService.kt` + `ui/GraphCleanupService.kt` |
+| X5 | CI guard — registry write race regression test (concurrent `onelens import-graph` from two terminals must not corrupt) | ⬜ | `python/tests/registry/` |
+| X6 | `onelens_route_map` MCP tool — joins Endpoint nodes with Vue ApiCall HITS edges (data already in graph) | ⬜ | `mcp_server.py` — see landscape doc §C |
+| X7 | `onelens_shape_check` MCP tool — Vue components accessing fields not in endpoint return type. Walks ApiCall.bindings + JPA entity columns + return-type chain | ⬜ | `mcp_server.py` |
+| X8 | `onelens_api_impact` MCP tool — pre-change risk (LOW/MEDIUM/HIGH) per GitNexus thresholds (0-3 / 4-9 / 10+ consumers) | ⬜ | `mcp_server.py` |
+| X9 | `confidence` + `reason` properties on edges — surface PSI-resolved (1.0) vs polymorphic-fanout (0.8) vs path-matched (0.6) per Graphify's tagging system | ⬜ | `loader.py` + `analysis.py` |
+| X10 | `onelens_processes` MCP tool — BFS forward from PageRank entry-point seeds, dedupe + heuristic naming. Persistent `Process` node + `STEP_IN_PROCESS` edges | ⬜ | `python/src/onelens/importer/processes.py` (new) — see landscape doc §H |
+| X11 | `RationaleCollector` (Java + Kotlin + Vue) — extract `// WHY:` / `// FIXME:` / `// HACK:` / javadoc as `Rationale` nodes with `RATIONALE_FOR` edges. Surface in `onelens_context` so agent sees *why* not just *what*. ~80 LOC | ⬜ | `plugin/.../export/collectors/RationaleCollector.kt` — see landscape doc §L |
+| X12 | Connection pool with LRU + idle TTL (5 min, max 5 concurrent) — direct port of GitNexus `pool-adapter.ts` pattern. Required by Phase X3 | ⬜ | `python/src/onelens/registry/pool.py` (new) — see landscape doc §K |
+| X13 | Optional `format="text"` parameter on heavy MCP tools (`onelens_retrieve`, `onelens_impact`) for token-tight contexts | ⬜ | `mcp_server.py` — see landscape doc §M |
+| X14 | Confidence-fusion when multiple sources agree (PSI=1.0 + Vue HITS=0.6 capped at 1.0; PSI=0.0 + SCIP=0.85 → 0.85). Extends X9 | ⬜ | `loader.py` — see landscape doc §F + §N |
+
+---
+
+## Phase Y — Cross-repo bridge graph (planned, design from GitNexus)
+
+Bridge multiple OneLens-indexed graphs via shared contract IDs (HTTP,
+gRPC, Kafka topics, shared libraries). Mirror's GitNexus's
+`group.yaml` + bridge-db pattern. Builds on Phase X registry.
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| Y0 | Design — `docs/design/PLAN-cross-repo-bridge.md`, group.yaml schema, bridge-db FalkorDB schema | ⬜ | TBD |
+| Y1 | `onelens.group.yaml` config (repos, links, detect toggles, matching thresholds) | ⬜ | `python/src/onelens/group/config.py` |
+| Y2 | `~/.onelens/bridges/<groupId>.rdb` separate FalkorDB instance for cross-repo contracts | ⬜ | `python/src/onelens/group/bridge_db.py` |
+| Y3 | `HttpRouteExtractor` — already done as `bridge_http.compute_hits` for in-graph; promote to cross-graph | 🟡 partial | `python/src/onelens/importer/bridge_http.py` |
+| Y4 | `GrpcExtractor` — parse `.proto` + scan `pb.RegisterXxxServer` (Go) / `XxxStub(channel)` (Python) / Java grpc-java patterns | ⬜ | `python/src/onelens/group/extractors/grpc.py` |
+| Y5 | `TopicExtractor` — Kafka `@KafkaListener` / `KafkaTemplate.send` / NATS / RabbitMQ | ⬜ | `python/src/onelens/group/extractors/topics.py` |
+| Y6 | `SharedLibsExtractor` — cross-repo Java import detection (we have App/Package primitives within a repo; extend) | ⬜ | `python/src/onelens/group/extractors/libs.py` |
+| Y7 | Exact-match cascade (`runGroupSync` — open each member graph, run extractors, normalize contractId, write contracts.json + bridge-db) | ⬜ | `python/src/onelens/group/sync.py` |
+| Y8 | `onelens_group_sync` MCP tool | ⬜ | `mcp_server.py` |
+| Y9 | `onelens_group_impact` MCP tool — local walk + bridge fan-out via Cypher (max depth 1 like GitNexus) | ⬜ | `mcp_server.py` + `group/impact.py` |
+| Y10 | `onelens_group_query` / `onelens_group_status` / `onelens_group_contracts` MCP tools | ⬜ | `mcp_server.py` |
+| Y4-SCIP | SCIP index ingestion when `scip-java` present — fuse with PSI graph, increase confidence on edges both agree (codemem-style additive). Solves the headless-CI story for free when scip-java is on PATH | ⬜ | `python/src/onelens/importer/scip_loader.py` (new) — see landscape doc §N |
+
+---
+
+## Phase Z — Skill multi-targeting (planned, design from Graphify)
+
+Port `skills/onelens/SKILL.md` to Codex / Cursor / Cline / Aider /
+Gemini CLI. Same MCP tool surface, different shell idioms.
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| Z0 | `skills/onelens/codex.md` — Codex flavor + `multi_agent = true` config note | ⬜ | new |
+| Z1 | `skills/onelens/cursor.md` — Cursor MDC rules format | ⬜ | new |
+| Z2 | `skills/onelens/cline.md` — Cline shell syntax | ⬜ | new |
+| Z3 | `skills/onelens/aider.md` — Aider shell syntax | ⬜ | new |
+| Z4 | `skills/onelens/gemini.md` — Gemini CLI syntax | ⬜ | new |
+| Z5 | Plugin `InstallSkillAction` detects installed agents (`~/.codex/`, `~/.cursor/`, `~/.claude/skills/`, `~/.aider/`) and drops matching manifest | ⬜ | `plugin/.../skill/InstallSkillAction.kt` |
+| Z6 | CI guard — `skills/onelens/*.md` all reference the same `onelens_*` MCP tool names (drift detection) | ⬜ | `.github/workflows/ci.yml` |
+
+ADR: `docs/DECISIONS.md` ADR-W01 (MCP-only runtime).
+
+---
+
+## Phase V — Onboard CLI + MCP decoupling (2026-04-26, design landed)
+
+Move bootstrap from plugin (`PythonEnvManager`, ~400 LOC) to global Python CLI. Per-project `onelens onboard` asks local-vs-cloud embedder, validates + stores keys (keyring → file fallback), registers MCP with Claude Code at project scope. Plugin shells out; MCP lifecycle independent of IDE.
+
+| # | Feature | Status | Where |
+|---|---|---|---|
+| V0 | Research + plan (uv tool install, voyage-code-3 default cloud, project-scope MCP, keyring fallback semantics, idempotency #8288) | ✅ | `docs/design/PLAN-onboard-cli.md` |
+| V1 | `cli_only/setup.py` — extract `installOneLens` + `installSemanticStack` + `installTensorrt` from PythonEnvManager | ⬜ | — |
+| V2 | `cli_only/installers/uv.py` — extract `autoInstallUv` | ⬜ | — |
+| V3 | `cli_only/secrets.py` — env > keyring > file (chmod 600) + `--insecure-storage` flag | ⬜ | — |
+| V4 | `cli_only/config.py` — `~/.onelens/config.toml` RW | ⬜ | — |
+| V5 | `cli_only/onboard.py` — interactive flow (Continue.dev pattern) | ⬜ | — |
+| V6 | `cli_only/installers/claude_mcp.py` — `claude mcp add --scope project` with idempotency parsing | ⬜ | — |
+| V7 | `cli_only/doctor.py` — preflight (python, uv, gpu/driver, falkor, keyring backend, claude CLI) | ⬜ | — |
+| V8 | Plugin slimdown — delete ~350 LOC from `PythonEnvManager` | ⬜ | `plugin/.../export/PythonEnvManager.kt` |
+| V9 | `scripts/install.sh` — uv bootstrap + `uv tool install onelens` | ⬜ | — |
+| V10 | PyPI publish — name reservation + first release | ⬜ | — |
+| V11 | CI guard: `grep -r "@mcp.tool" python/src/onelens/cli_only/` returns empty | ⬜ | `.github/workflows/ci.yml` |
+| V12 | CI guard: secrets never in MCP tool result / log / `idea.log` | ⬜ | tests |
+
+ADR: `docs/DECISIONS.md` ADR-V01 (CLI owns bootstrap, MCP independent of plugin).
+
+---
 
 ## Phase U.1 — Cancellable sync + cleanup guard (2026-04-24)
 
