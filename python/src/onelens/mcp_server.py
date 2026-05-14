@@ -748,6 +748,70 @@ def onelens_snapshot_promote(graph: str, tag: str, commit_sha: str | None = None
 # ── Entry point for `fastmcp run` and `python -m onelens.mcp_server` ─────────
 
 
+_ONELENS_HOME = Path(os.environ.get("ONELENS_HOME") or (Path.home() / ".onelens"))
+_LOCK_PATH = _ONELENS_HOME / "mcp.lock"
+_PORT_PATH = _ONELENS_HOME / "mcp.port"
+
+
+def _acquire_singleton_lock():
+    """Take an exclusive lock on `~/.onelens/mcp.lock`. Returns the held
+    file handle on success (caller must keep a reference for the process
+    lifetime — kernel auto-releases on exit, including SIGKILL). Returns
+    None if another `onelens mcp serve` already holds the lock.
+
+    Cross-platform: fcntl on POSIX, msvcrt.locking on Windows. Both are
+    kernel-enforced so a crashed prior instance can't leave a stale lock —
+    the OS releases the byte range when the file descriptor is closed.
+    """
+    _ONELENS_HOME.mkdir(parents=True, exist_ok=True)
+    fh = open(_LOCK_PATH, "w")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            # Lock the first byte; LK_NBLCK = non-blocking.
+            fh.write(" ")
+            fh.flush()
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.lockf(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    # Record PID for debuggers (`cat ~/.onelens/mcp.lock` shows owner).
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except OSError:
+        pass
+    return fh
+
+
+def _read_existing_port() -> int | None:
+    """Read the active port file written by the lock holder. Returns None
+    if the file is missing or unparseable — caller treats that as 'no
+    surviving instance to point at' and exits with an error."""
+    try:
+        text = _PORT_PATH.read_text().strip()
+        port = int(text)
+        return port if 1 <= port <= 65535 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_port_atomic(port: int) -> None:
+    """Atomic-replace `~/.onelens/mcp.port`. Concurrent reads either see
+    the old port or the new port, never a partial write."""
+    _PORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PORT_PATH.with_suffix(".port.tmp")
+    tmp.write_text(str(port))
+    os.replace(tmp, _PORT_PATH)
+
+
 if __name__ == "__main__":
     # Dual-mode entry. Default (no args): stdio — matches what `fastmcp run`
     # and `python -m onelens.mcp_server` have always done. `--http` flips to
@@ -760,9 +824,43 @@ if __name__ == "__main__":
     p.add_argument("--port", type=int, default=29170)
     ns, _ = p.parse_known_args()
     if ns.http:
-        # `ONELENS_WARM_ON_START` is already honored by the lifespan above —
-        # plugin sets it so the server primes embed + rerank engines before
-        # the first tool call lands.
-        mcp.run(transport="http", host=ns.host, port=ns.port, show_banner=False)
+        # Singleton guard — only one `onelens mcp serve --http` per user.
+        # Multi-IDE setups (two IntelliJ windows, plugin + Claude Code, …)
+        # converge on a single MCP child instead of each spawning their
+        # own and racing on VRAM, the port file, and the FalkorDB Lite
+        # data dir. fcntl/msvcrt locks are kernel-released on process
+        # death so we never have to clean up a stale lock manually.
+        _lock_fh = _acquire_singleton_lock()
+        if _lock_fh is None:
+            existing = _read_existing_port()
+            if existing is not None:
+                print(
+                    f"onelens mcp serve already running on http://127.0.0.1:{existing}/mcp",
+                    file=sys.stderr,
+                )
+                sys.exit(0)
+            print(
+                "onelens mcp serve: another instance holds ~/.onelens/mcp.lock "
+                "but no port file is readable — kill the holder or delete the lock.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Publish our port for plugin / Claude Code / external CLI discovery.
+        _write_port_atomic(ns.port)
+        try:
+            # `ONELENS_WARM_ON_START` is already honored by the lifespan above —
+            # plugin sets it so the server primes embed + rerank engines before
+            # the first tool call lands.
+            mcp.run(transport="http", host=ns.host, port=ns.port, show_banner=False)
+        finally:
+            # Best-effort cleanup. flock is auto-released when the process
+            # exits regardless, and the next instance overwrites the port
+            # file atomically — but tidying here keeps `ls ~/.onelens/`
+            # honest after a clean shutdown.
+            try:
+                if _PORT_PATH.is_file() and _PORT_PATH.read_text().strip() == str(ns.port):
+                    _PORT_PATH.unlink()
+            except OSError:
+                pass
     else:
         mcp.run(show_banner=False)

@@ -18,7 +18,7 @@ This document is an honest map of the landscape as of 2026.
 |---------|---------------|--------------|
 | **IntelliJ IDEA** | IDE + PSI | **Depends on.** We borrow the PSI engine; we do not replace IntelliJ. |
 | **FalkorDB / Neo4j** | Graph database | **Pluggable dependency.** |
-| **Qwen3-Embedding-0.6B** | Sentence embedding model | **Pluggable dependency.** |
+| **Jina-v2-base-code** (default), EmbeddingGemma-300m / BGE-small (opt-in) | Sentence embedding models | **Pluggable dependency.** Pick via `ONELENS_LOCAL_EMBED_PROFILE`. |
 | **mxbai-rerank-base** | Cross-encoder | **Pluggable dependency.** |
 | **Claude Code / Codex / Cursor** | AI coding agents | **Clients.** Skill + MCP surface targets them. |
 

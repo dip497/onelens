@@ -182,7 +182,7 @@ RETURN node.fqn, node.name, node.filePath LIMIT 20
 
 **PRIMARY TOOL for any "where is X", "how does Y work", "find code that does Z" question.** Returns top-K ranked hits **with actual source code snippets** — matches Augment Context Engine UX.
 
-Under the hood: parallel FalkorDB FTS + ChromaDB semantic (Qwen3), Reciprocal Rank Fusion (RRF k=60), then reads source from `filePath:lineStart-lineEnd`.
+Under the hood: parallel FalkorDB FTS + ChromaDB semantic (Jina-v2-base-code by default), Reciprocal Rank Fusion (RRF k=60), then reads source from `filePath:lineStart-lineEnd`.
 
 ```bash
 # Primary: natural language → top-K with code snippets
@@ -215,7 +215,7 @@ If `retrieve` returns empty, the concept isn't in the codebase — don't retry w
 | `VendorController` (exact PascalCase class) | Direct Cypher `MATCH (c:Class {name: ...})` — shortcircuit | ~50ms |
 | `com.foo.bar.Baz#method` (FQN fragment) | Direct Cypher `MATCH ... WHERE fqn CONTAINS ...` — shortcircuit | ~50ms |
 | `PATCH /users/{id}` (HTTP verb + path) | Graph-first on `Endpoint` nodes; merges into RRF if partial | ~100-300ms |
-| `how does authentication work` (natural language) | Full hybrid: parallel FTS + semantic (Qwen3) → RRF → cross-encoder rerank → threshold filter | ~500ms-2s |
+| `how does authentication work` (natural language) | Full hybrid: parallel FTS + semantic (Jina-v2 by default) → RRF → cross-encoder rerank → threshold filter | ~500ms-2s |
 | `UserService*` (FTS wildcard) | FTS path via `search` command | ~100ms |
 
 **You don't need to pick the path.** Always call `retrieve` — the router shortcircuits when it has an exact-match graph hit, falls through to hybrid otherwise. The only reason to call `search` instead is when you specifically need FTS wildcards (`User*`, `%auth%1`).

@@ -92,7 +92,7 @@ image = (
     # cold-start latency.
     .run_function(_prefetch_weights)
     # Ship the `onelens` package itself so the container can `import
-    # onelens.context.embedder` — the local ORT path this app wraps.
+    # onelens.context.embed_backends` — the local ORT path this app wraps.
     .add_local_python_source("onelens")
 )
 

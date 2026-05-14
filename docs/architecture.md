@@ -22,13 +22,13 @@ skill that bridges natural-language questions to both.
 │  onelens CLI (Python, cyclopts-generated)            │
 │  ├── import-graph — auto-detects full vs delta       │
 │  ├── retrieve / impact / trace / search / query      │
-│  ├── daemon — warm Qwen3 + mxbai                     │
+│  ├── daemon — warm embedder + mxbai                  │
 │  └── mcp-server — same ops via MCP stdio             │
 └───────────┬──────────────────────────┬───────────────┘
             │                          │
     ┌───────┴────────┐         ┌───────┴────────────┐
     │ FalkorDB       │         │ ChromaDB           │
-    │ Cypher + FTS   │         │ Qwen3 embeddings   │
+    │ Cypher + FTS   │         │ Jina-v2 embeddings │
     │ + browser UI   │         │ + mxbai rerank     │
     └────────────────┘         └────────────────────┘
 ```
@@ -49,10 +49,10 @@ skill that bridges natural-language questions to both.
 | `python/src/onelens/graph/backends/` | Pluggable `GraphDB` implementations (falkordb, falkordblite, neo4j) | Graph DB |
 | `python/src/onelens/graph/analysis.py` | Impact (polymorphic + bean-type filter), trace, endpoint flow, search | FalkorDB |
 | `python/src/onelens/context/retrieval.py` | Hybrid retrieve: router → FTS+semantic RRF → kind-boost → PageRank boost → cross-encoder rerank → threshold filter | ChromaDB + FalkorDB |
-| `python/src/onelens/context/embedder.py` | Qwen3-Embedding-0.6B wrapper | GPU/CPU |
+| `python/src/onelens/context/embed_backends/local_backend.py` | Default: Jina-v2-base-code (161M, ONNX, CPU/GPU). Profiles: `gemma`, `tiny`. | GPU/CPU |
 | `python/src/onelens/context/reranker.py` | mxbai-rerank-base cross-encoder | GPU/CPU |
 | `python/src/onelens/miners/code_miner.py` | Full mine + `mine_upserts` + `delete_by_ids` + `delete_methods_of_classes` | ChromaDB |
-| `python/src/onelens/daemon.py` | Warm-model daemon (Qwen3 + mxbai kept in memory across CLI calls) | IPC |
+| `python/src/onelens/daemon.py` | Warm-model daemon (local embedder + mxbai kept in memory across CLI calls) | IPC |
 | `skills/onelens/SKILL.md` | Claude Code skill — bundled into plugin JAR at build | Read by Claude Code |
 
 ## The seams

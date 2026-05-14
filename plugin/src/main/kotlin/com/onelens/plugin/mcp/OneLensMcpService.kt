@@ -99,6 +99,22 @@ class OneLensMcpService : Disposable {
             return port
         }
 
+        // Phase W5 — reuse an external MCP if one is already up. Another
+        // IntelliJ window or a `claude mcp serve` from a terminal may have
+        // booted the singleton (see Python `_acquire_singleton_lock` in
+        // mcp_server.py). If so, point at it instead of fighting the lock
+        // and burning a few seconds losing the race. Probe before spawn.
+        val externalPort = readExternalPort()
+        if (externalPort > 0 && probeReachable(externalPort)) {
+            port = externalPort
+            // Don't claim this process — it isn't ours. `pid()` returns -1,
+            // `isRunning` returns false, but `endpoint` is live. Telemetry
+            // (Status tab VRAM line) gracefully shows "MCP pid=-1" until
+            // we adopt the external pid in a follow-up commit.
+            LOG.info("Reusing external MCP server on port $externalPort (someone else's child)")
+            return externalPort
+        }
+
         val venvPython = PythonEnvManager.getVenvPython()
         if (!venvPython.canExecute()) {
             LOG.warn("Cannot start MCP server: venv python not found at $venvPython")
@@ -106,6 +122,20 @@ class OneLensMcpService : Disposable {
         }
 
         val env = buildEnv()
+        // Cold-load UX: surface the embedder warmup time before the user
+        // wonders why nothing is happening. `ONELENS_WARM_ON_START=1`
+        // (set in buildEnv) makes the Python lifespan prime the embedder
+        // + reranker before answering /mcp/, so the readiness probe wait
+        // is dominated by model load. First-ever load on CPU = ~30 s
+        // (Jina-v2 ONNX), GPU with TRT cache = ~22 s, GPU without cache =
+        // ~90 s for engine compile. Without this message the IDE just
+        // shows "OneLens: Syncing Graph" with no progress for 30 s.
+        com.onelens.plugin.ui.OneLensEvents.publish(
+            com.onelens.plugin.ui.OneLensEvent.Info(
+                "→ Starting OneLens MCP — first run loads embedder model (~30 s on CPU, ~22 s on GPU with cache). Subsequent runs reuse the warm process."
+            )
+        )
+
         // Try up to 5 ports. Health-probe each spawn; if it fails, move on.
         // The pickPort loop below returns a free candidate, but another
         // process can grab it between ServerSocket.close() and the Python
@@ -149,6 +179,37 @@ class OneLensMcpService : Disposable {
             }
         }
         return -1
+    }
+
+    /** Phase W5 helper — read `~/.onelens/mcp.port` if present. Returns
+     * the port value (1..65535) or -1 if missing/unparseable. */
+    private fun readExternalPort(): Int {
+        return try {
+            if (!PORT_FILE.toFile().isFile) return -1
+            val text = PORT_FILE.toFile().readText().trim()
+            val p = text.toIntOrNull() ?: return -1
+            if (p in 1..65535) p else -1
+        } catch (_: Throwable) {
+            -1
+        }
+    }
+
+    /** One-shot reachability probe — same shape as `waitUntilReachable`
+     * but without the polling deadline. Returns true if `GET /mcp` answers
+     * 2xx/4xx within 500 ms. Used to decide if an external MCP is alive
+     * before we spawn our own. */
+    private fun probeReachable(p: Int): Boolean {
+        return try {
+            val conn = URI("http://127.0.0.1:$p/mcp").toURL().openConnection() as HttpURLConnection
+            conn.connectTimeout = 500
+            conn.readTimeout = 500
+            conn.requestMethod = "GET"
+            val code = conn.responseCode
+            conn.disconnect()
+            code in 200..499
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Poll GET /mcp/ until 2xx/4xx (server listening) or timeout. */
@@ -213,7 +274,26 @@ class OneLensMcpService : Disposable {
     }
 
     override fun dispose() {
-        stop()
+        // Phase W2.5 — DON'T kill the child on IDE shutdown. Singleton MCP
+        // is meant to outlive its spawner so:
+        //   • Claude Code keeps working when the user closes IntelliJ.
+        //   • A second IDE window opening tomorrow reuses today's warm
+        //     model instead of paying ~30 s lifespan reload.
+        //   • The kernel-held flock at ~/.onelens/mcp.lock is the singleton
+        //     guarantee, not the JVM-side processRef.
+        // Drop only the in-process bookkeeping (HTTP client, refs). The
+        // OS process keeps running. To stop it explicitly, the user can
+        // `kill $(cat ~/.onelens/mcp.port.pid)` or use the Stop MCP
+        // toolbar action which calls stop() directly.
+        try {
+            OneLensMcpClient.reset()
+        } catch (_: Throwable) {
+        }
+        // Note: we deliberately do NOT call stop() here, do NOT
+        // destroyForcibly() the Process, do NOT clear mcp.port. The child
+        // is now orphaned to the OS init process. Standard Unix daemon
+        // behavior; on Windows the Process handle is closed but the
+        // executable keeps running because we never set a ChildProcessJob.
     }
 
     private fun buildEnv(): Map<String, String> {
@@ -226,6 +306,17 @@ class OneLensMcpService : Disposable {
             "local" -> {
                 env["ONELENS_EMBED_BACKEND"] = "local"
                 env["ONELENS_RERANK_BACKEND"] = "local"
+                // ALWAYS write profile + quant — even when set to defaults
+                // ("balanced" / "fp32"). `pb.environment().putAll(env)`
+                // overlays the IDE's inherited environment; if a user (or
+                // wrapper script) had `ONELENS_LOCAL_EMBED_PROFILE=gemma`
+                // exported in the parent shell and then flips Settings UI
+                // back to "balanced", omitting the key would leak the
+                // inherited value to the child. Writing the explicit
+                // current value makes the plugin Settings the
+                // authoritative source.
+                env["ONELENS_LOCAL_EMBED_PROFILE"] = s.localEmbedderProfile.lowercase().ifBlank { "balanced" }
+                env["ONELENS_LOCAL_EMBED_QUANT"] = s.localEmbedderQuant.lowercase().ifBlank { "fp32" }
             }
             "openai" -> {
                 env["ONELENS_EMBED_BACKEND"] = "openai"

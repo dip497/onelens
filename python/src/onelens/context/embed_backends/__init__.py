@@ -26,8 +26,12 @@ from .base import EmbedBackend, NoopReranker, RerankerBase
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMBED_BACKEND = "modal"
-DEFAULT_RERANK_BACKEND = "modal"
+# Default = local. Plugin's OneLensSettings.embedderBackend already
+# defaults to "local" on first run (Phase S); the CLI / standalone MCP
+# child should match so users without the IDE in the loop don't
+# accidentally hit Modal cloud (which needs auth + costs $).
+DEFAULT_EMBED_BACKEND = "local"
+DEFAULT_RERANK_BACKEND = "local"
 
 
 def get_embedder() -> EmbedBackend:
@@ -44,7 +48,7 @@ def get_embedder() -> EmbedBackend:
     raise ValueError(f"Unknown ONELENS_EMBED_BACKEND={name!r} (expected: modal | openai | local)")
 
 
-def get_reranker() -> RerankBackend:
+def get_reranker() -> RerankerBase:
     name = os.environ.get("ONELENS_RERANK_BACKEND", DEFAULT_RERANK_BACKEND).lower()
     if name == "modal":
         from .modal_backend import ModalReranker
@@ -52,10 +56,18 @@ def get_reranker() -> RerankBackend:
     if name in ("local", "onnx"):
         from .local_reranker import LocalReranker
         return LocalReranker()
+    if name == "tei":
+        # Opt-in HuggingFace Text Embeddings Inference. User runs TEI
+        # themselves (we don't bundle the rust install). Reranker URL
+        # via ONELENS_TEI_RERANK_URL (default http://127.0.0.1:8081).
+        # Embedding side already supported via ONELENS_EMBED_BACKEND=openai
+        # pointed at TEI's /v1/embeddings — TEI is OpenAI-compat there.
+        from .tei_backend import TEIReranker
+        return TEIReranker()
     if name in ("none", "noop", "disabled"):
         logger.info("Reranker disabled; falling back to embedding-score order.")
         return NoopReranker()
     raise ValueError(
-        f"Unknown ONELENS_RERANK_BACKEND={name!r} (expected: modal | local | none). "
+        f"Unknown ONELENS_RERANK_BACKEND={name!r} (expected: modal | local | tei | none). "
         "OpenAI has no rerank standard; set ONELENS_RERANK_BACKEND=none to skip."
     )

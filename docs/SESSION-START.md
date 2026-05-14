@@ -52,7 +52,7 @@ reasoning. Short version:
   anywhere)
 - Graph backend default: **FalkorDB** (pluggable to FalkorDBLite
   or Neo4j)
-- Embedder: **Qwen3-Embedding-0.6B**
+- Embedder default: **`jinaai/jina-embeddings-v2-base-code`** (161M, 768-d, ONNX, CPU/GPU). Profile env: `ONELENS_LOCAL_EMBED_PROFILE=gemma|tiny` for opt-in EmbeddingGemma-300m or BGE-small.
 - Reranker: **mxbai-rerank-base** (0.02 threshold)
 - MCP server = **source of truth for CLI**; don't hand-edit
   `cli_generated.py`

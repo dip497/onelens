@@ -350,12 +350,23 @@ class ExportService {
                 command += "--clear"
             }
 
-            // Fast path — if the MCP HTTP server is running (started by
-            // AutoSyncStartupActivity when semantic is on), invoke the tool
-            // directly over HTTP. Skips Python cold-start + TRT engine
-            // reload + onnxruntime re-init. Cold-path fallback to the CLI
-            // subprocess if the server is down or the call errors.
+            // Phase W4 — MCP-first sync path. Try the warm HTTP server
+            // before considering CLI shell-out. If it's not running, ask
+            // the singleton to start (covers the "fresh IDE open, MCP not
+            // yet booted" case + reuses an externally-started MCP via
+            // Phase W5's port-file probe). CLI subprocess is now only a
+            // last-resort cold-path for users without a working venv yet.
             val mcp = com.onelens.plugin.mcp.OneLensMcpService.getInstance()
+            if (!mcp.isReachable() && config.buildSemanticIndex) {
+                // Only auto-start when semantic is on. Structural-only
+                // syncs don't need the model-loaded MCP and shouldn't pay
+                // its 30 s lifespan warmup just to import the graph.
+                publish(OneLensEvent.Info("→ MCP not reachable — ensuring singleton is up"))
+                val p = mcp.start()
+                if (p > 0) {
+                    publish(OneLensEvent.Info("→ MCP singleton ready on port $p"))
+                }
+            }
             if (mcp.isReachable()) {
                 publish(OneLensEvent.Info("→ MCP call onelens_import (${mcp.endpoint})"))
                 val args = mutableMapOf<String, Any?>(

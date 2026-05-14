@@ -11,6 +11,7 @@ import com.onelens.plugin.framework.workspace.Workspace
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Collects all annotation usages across classes, methods, and fields.
@@ -70,16 +71,34 @@ object AnnotationCollector {
 
             val params = mutableMapOf<String, String>()
             val resolved = mutableMapOf<String, JsonElement>()
+            // `attrValues` mirrors `resolved` but only for primitive values —
+            // the loader promotes each key to an `attr_<key>` edge property
+            // for direct WHERE-clause queries (`WHERE r.attr_value = '/foo'`).
+            // Arrays, objects, nested annotations stay JSON-only in
+            // `attributes` since they don't fit in a scalar edge property.
+            val attrValues = mutableMapOf<String, String>()
             for (attr in annotation.parameterList.attributes) {
                 val name = attr.name ?: "value"
                 params[name] = attr.value?.text ?: ""
-                resolved[name] = ExpressionResolver.resolveAnnotationValue(attr.value)
+                val resolvedValue = ExpressionResolver.resolveAnnotationValue(attr.value)
+                resolved[name] = resolvedValue
+                if (resolvedValue is JsonPrimitive) {
+                    // `.content` strips JSON quotes for strings; is the canonical
+                    // literal for numbers/booleans (e.g. `42`, `true`).
+                    attrValues[name] = resolvedValue.content
+                }
+                // Arrays / objects intentionally not flattened — stay in JSON.
             }
             val attributes = try {
                 JSON.encodeToString(JsonObject.serializer(), JsonObject(resolved))
             } catch (_: Throwable) { "{}" }
 
-            result.add(AnnotationUsage(targetFqn, targetKind, annotationFqn, params, attributes))
+            result.add(
+                AnnotationUsage(
+                    targetFqn, targetKind, annotationFqn,
+                    params, attributes, attrValues,
+                )
+            )
         }
     }
 

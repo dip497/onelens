@@ -23,7 +23,7 @@ Included:
       narrowing.
 - [x] Execution trace (`onelens trace`).
 - [x] Delta export + delta import.
-- [x] Semantic search (Qwen3 + ChromaDB + mxbai rerank).
+- [x] Semantic search (Jina-v2-base-code default; EmbeddingGemma / BGE-small opt-in via `ONELENS_LOCAL_EMBED_PROFILE`; ChromaDB; mxbai rerank).
 - [x] Hybrid retrieve with query router + PageRank boost.
 - [x] MCP server as single source of truth for CLI.
 - [x] Plugin auto-installs Python venv via `uv`.

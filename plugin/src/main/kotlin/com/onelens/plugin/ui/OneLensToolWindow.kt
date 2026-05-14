@@ -80,6 +80,12 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
     private val syncRunning = java.util.concurrent.atomic.AtomicBoolean(false)
     private val setupRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // Cache localProvider() — venv layout doesn't change between Tools menu
+    // actions, so probing every 5 s is wasted Python subprocess overhead.
+    // Cleared on Settings → Apply via SemanticSettingsConfigurable when the
+    // user explicitly reinstalls the stack.
+    @Volatile private var cachedProvider: String? = null
+
     init {
         border = JBUI.Borders.empty(8)
 
@@ -120,6 +126,7 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
     }
 
     private fun updateSemanticLine() {
+        // EDT-safe portion: cheap reads only.
         val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
         if (!settings.buildSemanticIndex) {
             semanticLabel.text = "Semantic: off (click Enable Semantic in the toolbar)"
@@ -131,11 +138,23 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
             semanticLabel.text = "Semantic: on · MCP server not running (will start on next sync)"
             return
         }
-        val provider = SystemMonitor.localProvider()
         val pid = mcp.pid()
-        val vramBytes = SystemMonitor.gpuMemoryBytesForPid(pid)
-        val vramPart = if (vramBytes > 0) " · VRAM ${fmtBytes(vramBytes)}" else ""
-        semanticLabel.text = "Semantic: on · $provider · MCP pid=$pid$vramPart"
+        // Heavy I/O (nvidia-smi subprocess, possibly NVML-lock-blocked, +
+        // detectLocalProvider's `python -c …` probe) goes off-EDT. NVML
+        // contention here previously froze the EDT for 19 s. The pool
+        // thread still has a 1 s subprocess timeout inside SystemMonitor.
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val provider = cachedProvider ?: SystemMonitor.localProvider().also { cachedProvider = it }
+            val vramBytes = SystemMonitor.gpuMemoryBytesForPid(pid)
+            ApplicationManager.getApplication().invokeLater({
+                // Re-check guard — settings may have flipped while we were off-EDT.
+                val s2 = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+                if (!s2.buildSemanticIndex) return@invokeLater
+                if (!mcp.isRunning) return@invokeLater
+                val vramPart = if (vramBytes > 0) " · VRAM ${fmtBytes(vramBytes)}" else ""
+                semanticLabel.text = "Semantic: on · $provider · MCP pid=$pid$vramPart"
+            }, ModalityState.any())
+        }
     }
 
     private fun buildHeader(): JComponent {
