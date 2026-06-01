@@ -68,6 +68,10 @@ object DeltaTracker {
         if (lastGitHash.isNotEmpty()) {
             val gitResult = getGitChanges(basePath, lastGitHash)
             if (gitResult != null) {
+                // Diff base diverged (branch switch / rebase) → propagate the
+                // full-reexport signal instead of layering uncommitted changes
+                // on top of a meaningless empty diff.
+                if (gitResult.isFullReexport) return gitResult
                 // Also add uncommitted changes from ChangeListManager
                 val uncommitted = getUncommittedChanges(project, basePath)
                 val allModified = (gitResult.modified + uncommitted.modified).distinct()
@@ -160,6 +164,23 @@ object DeltaTracker {
      */
     private fun getGitChanges(basePath: String, sinceHash: String): ChangedFiles? {
         return try {
+            // Guard: only diff when `sinceHash` is an ancestor of HEAD. After a
+            // branch switch, rebase, or history rewrite the stored hash may be
+            // on an abandoned line — `git diff <oldHash> HEAD` then emits the
+            // entire branch divergence as a single "delta" (huge + semantically
+            // wrong) or fails outright. Force a full re-export instead.
+            val ancestorProc = ProcessBuilder(
+                "git", "merge-base", "--is-ancestor", sinceHash, "HEAD"
+            )
+                .directory(File(basePath))
+                .redirectErrorStream(true)
+                .start()
+            val ancestorExit = ancestorProc.waitFor()
+            if (ancestorExit != 0) {
+                LOG.info("Last export hash $sinceHash is not an ancestor of HEAD (branch switch / rebase?) — forcing full re-export")
+                return fullReexport("Diff base diverged from HEAD")
+            }
+
             // Get modified/added files
             val diffProcess = ProcessBuilder(
                 "git", "diff", "--name-status", sinceHash, "HEAD"
