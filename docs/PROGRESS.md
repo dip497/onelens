@@ -437,6 +437,21 @@ zero-setup onboarding. Spec: `docs/design/phase-r-release-snapshots.md`.
 | R5 | CI snapshot producer (GitHub Actions) | ⬜ | Phase R.1 — blocked on headless collector |
 | R6 | Self-host S3/MinIO backend | ⬜ | Phase R.2 |
 
+## Phase D — Delta correctness + graph enrichment (2026-06)
+
+Multi-reviewer audit (delta-correctness, delta-UX, graph-richness gap-finder). Findings: `docs/design/delta-and-enrichment-findings.md`.
+
+| ID | Item | Status | Pointer |
+|----|------|--------|---------|
+| D1 | Delta Spring `wing` stamp + full bean props + REGISTERED_AS + SpringAutoConfig + INJECTS qualifier — fixes zeroed Vue↔Spring HITS bridge after any delta | ✅ | `delta_loader.py::_replace_spring` |
+| D2 | Delta phantom-CALLS fix — clear outbound CALLS for every upserted method, not just `affected_callers` | ✅ | `delta_loader.py` step 6 |
+| D3 | Delta EnumConstant dual-label parity (`MERGE Field SET :EnumConstant`, REMOVE-label cleanup) + `enclosingClass` prop | ✅ | `delta_loader.py` step 4b |
+| D4 | Auto-sync data-loss fix — snapshot diff-base, gate advance on `isImportSuccess`, roll back + sticky stale error on failure; `lastSuccessfulImportTimestamp` | ✅ | `ExportState.kt`, `AutoSyncService.kt` |
+| D5 | Tier-0 graph enrichment — `RETURNS`/`THROWS`/`HAS_PARAMETER` edges + method props (visibility/static/abstract/deprecated/paramCount/transactional/async); full + delta parity, verified vs falkordblite | ✅ | `loader.py`, `delta_loader.py` `_enrich_method`/`_normalize_type` |
+| D6 | Delta JPA/Tests/Apps re-derivation — modified class DETACH-deletes strip dual-labels (`:JpaEntity`/`:TestCase`) + `CONTAINS`/`HAS_COLUMN`; needs plugin DeltaDocument fields | 🟡 | next — `DeltaExportService.kt` + `delta_loader.py` |
+| D7 | Tier-1 data-flow — `READS_FIELD`/`WRITES_FIELD`/`INSTANTIATES` via CallGraphCollector body walk | ⬜ | `CallGraphCollector.kt` |
+| D8 | Delta UX — merge-base ancestor guard before git diff; queue saves landing mid-sync; `.kt`/`.vue` triggers | ⬜ | `DeltaTracker.kt`, `AutoSyncFileListener.kt` |
+
 ## Open regression / verification items
 
 1. Phase A5 — sync the reference Java backend with the rebuilt plugin and diff counts against the captured baseline (`Class=11944, Method=81907, Field=58485, SpringBean=2335, Endpoint=2320, Module=26, Annotation=222`).

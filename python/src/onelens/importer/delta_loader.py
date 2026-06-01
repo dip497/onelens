@@ -72,6 +72,9 @@ class DeltaLoader:
                 "fqn": c["fqn"], "name": c.get("name", ""),
                 "kind": c.get("kind", "CLASS"), "filePath": c.get("filePath", ""),
                 "packageName": c.get("packageName", ""), "superClass": c.get("superClass", ""),
+                # enclosingClass parity with full loader (loader.py:87-90) — a
+                # modified inner class would otherwise lose this prop on delta.
+                "enclosingClass": c.get("enclosingClass", ""),
                 "lineStart": c.get("lineStart", 0), "lineEnd": c.get("lineEnd", 0),
             } for c in batch]
             self.db.execute("""
@@ -79,11 +82,18 @@ class DeltaLoader:
                 MERGE (c:Class {fqn: item.fqn})
                 SET c.name = item.name, c.kind = item.kind, c.filePath = item.filePath,
                     c.packageName = item.packageName, c.superClass = item.superClass,
+                    c.enclosingClass = item.enclosingClass,
                     c.lineStart = item.lineStart, c.lineEnd = item.lineEnd
             """, {"batch": items})
 
         # 3. Upsert methods (batched)
         methods = upserted.get("methods", [])
+        # Tier-0 enrichment parity with the full loader — derive
+        # visibility/static/abstract/deprecated/paramCount/transactional/async
+        # so delta-upserted methods carry the same props as a full import.
+        from onelens.importer.loader import _enrich_method
+        for _m in methods:
+            _enrich_method(_m)
         for batch in self._chunks(methods, BATCH_SIZE):
             items = [{
                 "fqn": m["fqn"], "name": m.get("name", ""),
@@ -92,6 +102,13 @@ class DeltaLoader:
                 "filePath": m.get("filePath", ""), "lineStart": m.get("lineStart", 0),
                 "lineEnd": m.get("lineEnd", 0),
                 "body": m.get("body") or "", "javadoc": m.get("javadoc") or "",
+                "visibility": m.get("visibility", "package"),
+                "isStatic": m.get("isStatic", False),
+                "isAbstract": m.get("isAbstract", False),
+                "isDeprecated": m.get("isDeprecated", False),
+                "paramCount": m.get("paramCount", 0),
+                "isTransactional": m.get("isTransactional", False),
+                "isAsync": m.get("isAsync", False),
             } for m in batch]
             self.db.execute("""
                 UNWIND $batch AS item
@@ -99,7 +116,11 @@ class DeltaLoader:
                 SET m.name = item.name, m.classFqn = item.classFqn, m.returnType = item.returnType,
                     m.isConstructor = item.isConstructor, m.filePath = item.filePath,
                     m.lineStart = item.lineStart, m.lineEnd = item.lineEnd,
-                    m.body = item.body, m.javadoc = item.javadoc
+                    m.body = item.body, m.javadoc = item.javadoc,
+                    m.visibility = item.visibility, m.isStatic = item.isStatic,
+                    m.isAbstract = item.isAbstract, m.isDeprecated = item.isDeprecated,
+                    m.paramCount = item.paramCount,
+                    m.isTransactional = item.isTransactional, m.isAsync = item.isAsync
             """, {"batch": items})
 
         # HAS_METHOD edges for upserted methods
@@ -141,10 +162,20 @@ class DeltaLoader:
         # if the class node hasn't been DETACH-deleted (e.g. modified, not
         # removed). Delete-then-insert beats MERGE here because `ordinal`
         # and `argList` can both mutate.
+        # Strip the :EnumConstant label (not DETACH DELETE) from constants
+        # under upserted classes. Full import models an enum constant as a
+        # DUAL-LABEL on the Field node (loader.py:104-121) — one node carrying
+        # :Field:EnumConstant. DETACH-deleting by enumFqn here would destroy
+        # the shared Field node (and its HAS_FIELD edge) that step 4 just
+        # re-created, then the re-insert below would split it into two nodes
+        # (bug #9). REMOVE clears stale enum-ness while preserving the Field.
         upserted_class_fqn_list = [c["fqn"] for c in classes]
         for batch in self._chunks(upserted_class_fqn_list, BATCH_SIZE):
             self.db.execute(
-                "UNWIND $batch AS fqn MATCH (e:EnumConstant {enumFqn: fqn}) DETACH DELETE e",
+                "UNWIND $batch AS fqn MATCH (e:EnumConstant {enumFqn: fqn}) "
+                "REMOVE e:EnumConstant "
+                "SET e.ordinal = null, e.enumFqn = null, e.args = null, "
+                "    e.argList = null, e.argTypes = null",
                 {"batch": batch}
             )
         enum_consts = upserted.get("enumConstants", [])
@@ -158,10 +189,15 @@ class DeltaLoader:
                 "filePath": e.get("filePath", ""),
                 "lineStart": e.get("lineStart", 0),
             } for e in batch]
+            # Dual-label on the existing Field node (created in step 4), NOT a
+            # standalone :EnumConstant node — matches full import's single
+            # :Field:EnumConstant node so `MATCH (:Field:EnumConstant)` and
+            # HAS_FIELD→constant queries work identically on full and delta.
             self.db.execute("""
                 UNWIND $batch AS item
-                MERGE (e:EnumConstant {fqn: item.fqn})
-                SET e.name = item.name, e.ordinal = item.ordinal,
+                MERGE (e:Field {fqn: item.fqn})
+                SET e:EnumConstant,
+                    e.name = item.name, e.ordinal = item.ordinal,
                     e.enumFqn = item.enumFqn, e.args = item.args,
                     e.argList = item.argList, e.argTypes = item.argTypes,
                     e.filePath = item.filePath, e.lineStart = item.lineStart
@@ -250,8 +286,18 @@ class DeltaLoader:
                 MERGE (c)-[:HAS_METHOD]->(m)
             """, {"batch": batch})
 
-        # 6. Upsert call edges (delete old calls from affected methods first)
-        affected_callers = list({call["callerFqn"] for call in upserted.get("callGraph", [])})
+        # 6. Upsert call edges (delete old outbound calls first).
+        # Delete from EVERY upserted method, not just those that appear as a
+        # callerFqn in the delta (bug #6). A method whose body changed so it
+        # no longer calls anything drops out of `callGraph` entirely — if we
+        # only cleared `affected_callers` its stale outbound CALLS would
+        # survive forever (phantom edges full-import never has). Union the
+        # upserted-method set with the delta's callers so a method that
+        # stopped calling still gets its old edges purged.
+        affected_callers = list(
+            {m["fqn"] for m in methods}
+            | {call["callerFqn"] for call in upserted.get("callGraph", [])}
+        )
         for batch in self._chunks(affected_callers, BATCH_SIZE):
             self.db.execute("""
                 UNWIND $batch AS fqn
@@ -266,6 +312,57 @@ class DeltaLoader:
                 UNWIND $batch AS edge
                 MATCH (a:Method {fqn: edge.src}), (b:Method {fqn: edge.dst})
                 MERGE (a)-[:CALLS {line: edge.line}]->(b)
+            """, {"batch": batch})
+
+        # 6b. Tier-0 type-flow edges (RETURNS / THROWS / HAS_PARAMETER) parity
+        # with the full loader. Delete old ones from every upserted method then
+        # re-create, MERGE-ing target Class stubs so external types (JDK,
+        # libraries) resolve without a separate stub pass.
+        from onelens.importer.loader import _normalize_type
+        upserted_method_fqn_list = [m["fqn"] for m in methods]
+        for batch in self._chunks(upserted_method_fqn_list, BATCH_SIZE):
+            self.db.execute(
+                "UNWIND $batch AS fqn MATCH (m:Method {fqn: fqn})"
+                "-[r:RETURNS|THROWS|HAS_PARAMETER]->() DELETE r",
+                {"batch": batch}
+            )
+        returns, throws, has_param = [], [], []
+        for m in methods:
+            rt = _normalize_type(m.get("returnType", ""))
+            if rt:
+                returns.append({"src": m["fqn"], "dst": rt})
+            for tt in m.get("throwsTypes", []) or []:
+                et = _normalize_type(tt)
+                if et:
+                    throws.append({"src": m["fqn"], "dst": et})
+            for i, p in enumerate(m.get("parameters", []) or []):
+                pt = _normalize_type(p.get("type", ""))
+                if pt:
+                    has_param.append({"src": m["fqn"], "dst": pt,
+                                      "position": i, "name": p.get("name", "")})
+        for batch in self._chunks(returns, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (m:Method {fqn: edge.src})
+                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
+                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
+                MERGE (m)-[:RETURNS]->(c)
+            """, {"batch": batch})
+        for batch in self._chunks(throws, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (m:Method {fqn: edge.src})
+                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
+                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
+                MERGE (m)-[:THROWS]->(c)
+            """, {"batch": batch})
+        for batch in self._chunks(has_param, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (m:Method {fqn: edge.src})
+                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
+                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
+                MERGE (m)-[:HAS_PARAMETER {position: edge.position, name: edge.name}]->(c)
             """, {"batch": batch})
 
         # 7. Upsert inheritance edges (batched per type)
@@ -364,9 +461,21 @@ class DeltaLoader:
         # and Modules. Spring wiring is cross-class — per-class diff would miss
         # new bean types referenced from unchanged callers. Re-scan cost is
         # bounded (indexed), re-insert is cheap (~few K rows).
+        # Resolve the wing the same way the full loader does (loader.py:146-151)
+        # so Spring nodes get the same `wing` stamp — the Vue↔Spring HTTP
+        # bridge filters `Endpoint.wing IS NOT NULL`, so an unstamped delta
+        # silently zeroes the cross-stack HITS edges (bug #5).
+        workspace_header = data.get("workspace") or {}
+        graph_wing = (
+            workspace_header.get("graphId")
+            or graph_name
+            or data.get("project", {}).get("name", "")
+            or "default"
+        )
+
         spring = data.get("spring")
         if spring is not None:
-            self._replace_spring(spring)
+            self._replace_spring(spring, wing=graph_wing)
 
         modules = data.get("modules")
         if modules is not None:
@@ -433,8 +542,9 @@ class DeltaLoader:
         logger.info(f"Delta applied: {stats}")
         return stats
 
-    def _replace_spring(self, spring: dict) -> None:
-        """Drop all SpringBean/Endpoint/HANDLES/INJECTS, then re-insert.
+    def _replace_spring(self, spring: dict, wing: str = "default") -> None:
+        """Drop all SpringBean/Endpoint/AutoConfig/HANDLES/INJECTS/REGISTERED_AS,
+        then re-insert with full-loader parity (props + wing + edges).
 
         Spring data is small (~2K beans on a 10K-class project) so a
         full replace is simpler and more correct than per-class diff —
@@ -442,22 +552,45 @@ class DeltaLoader:
         renamed, and annotations can be added/removed without the
         annotated file showing up as "changed" if only a supertype
         changed.
+
+        `wing` MUST match the full loader's stamp (loader.py:161-184): the
+        Vue↔Spring HTTP bridge filters `Endpoint.wing IS NOT NULL`, so an
+        unstamped Endpoint silently emits zero cross-stack HITS edges.
         """
         self.db.execute("MATCH (b:SpringBean) DETACH DELETE b")
         self.db.execute("MATCH (e:Endpoint) DETACH DELETE e")
+        self.db.execute("MATCH (a:SpringAutoConfig) DETACH DELETE a")
 
         beans = spring.get("beans", []) or []
         bean_items = [{
             "name": b.get("name", ""), "classFqn": b.get("classFqn", ""),
             "type": b.get("type", ""), "scope": b.get("scope", ""),
-            "profile": b.get("profile", ""),
+            "profile": b.get("profile", ""), "wing": wing,
+            "primary": bool(b.get("primary", False)),
+            "source": b.get("source") or "annotation",
+            "factoryMethodFqn": b.get("factoryMethodFqn") or "",
+            "activeProfiles": ",".join(b.get("activeProfiles") or []),
         } for b in beans if b.get("name")]
         for batch in self._chunks(bean_items, BATCH_SIZE):
             self.db.execute("""
                 UNWIND $batch AS item
                 CREATE (b:SpringBean {name: item.name})
                 SET b.classFqn = item.classFqn, b.type = item.type,
-                    b.scope = item.scope, b.profile = item.profile
+                    b.scope = item.scope, b.profile = item.profile,
+                    b.wing = item.wing, b.primary = item.primary,
+                    b.source = item.source,
+                    b.factoryMethodFqn = item.factoryMethodFqn,
+                    b.activeProfiles = item.activeProfiles
+            """, {"batch": batch})
+
+        # REGISTERED_AS (Class → SpringBean) — parity with loader.py:446-451.
+        reg_as = [{"src": b["classFqn"], "dst": b["name"]}
+                  for b in bean_items if b.get("classFqn") and b.get("name")]
+        for batch in self._chunks(reg_as, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (c:Class {fqn: edge.src}), (b:SpringBean {name: edge.dst})
+                MERGE (c)-[:REGISTERED_AS]->(b)
             """, {"batch": batch})
 
         endpoints = spring.get("endpoints", []) or []
@@ -471,6 +604,7 @@ class DeltaLoader:
                 "id": ep_id, "path": path, "httpMethod": method,
                 "controllerFqn": ep.get("controllerFqn", ""),
                 "handlerMethodFqn": ep.get("handlerMethodFqn", ""),
+                "wing": wing,
             })
             if ep.get("handlerMethodFqn"):
                 handles.append({"src": ep["handlerMethodFqn"], "dst": ep_id})
@@ -481,7 +615,8 @@ class DeltaLoader:
                 CREATE (e:Endpoint {id: item.id})
                 SET e.path = item.path, e.httpMethod = item.httpMethod,
                     e.controllerFqn = item.controllerFqn,
-                    e.handlerMethodFqn = item.handlerMethodFqn
+                    e.handlerMethodFqn = item.handlerMethodFqn,
+                    e.wing = item.wing
             """, {"batch": batch})
 
         for batch in self._chunks(handles, BATCH_SIZE):
@@ -491,26 +626,42 @@ class DeltaLoader:
                 MERGE (m)-[:HANDLES]->(e)
             """, {"batch": batch})
 
+        # SpringAutoConfig nodes — parity with loader.py:186-190.
+        autoconfigs = [{
+            "classFqn": ac.get("classFqn", ""), "source": ac.get("source", ""),
+            "sourceFile": ac.get("sourceFile", ""), "wing": wing,
+        } for ac in (spring.get("autoConfigs", []) or []) if ac.get("classFqn")]
+        for batch in self._chunks(autoconfigs, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                CREATE (a:SpringAutoConfig {classFqn: item.classFqn})
+                SET a.source = item.source, a.sourceFile = item.sourceFile,
+                    a.wing = item.wing
+            """, {"batch": batch})
+
         # INJECTS edges live between SpringBean nodes keyed by classFqn.
         # DETACH DELETE above already dropped them; re-insert from the delta.
+        # `qualifier` parity with loader.py:431-438.
         injections = spring.get("injections", []) or []
         inj_items = [{
             "src": inj.get("targetClassFqn", ""),
             "dst": inj.get("injectedClassFqn", ""),
             "field": inj.get("targetFieldOrParam", ""),
             "type": inj.get("injectionType", ""),
+            "qualifier": inj.get("qualifier") or "",
         } for inj in injections if inj.get("targetClassFqn") and inj.get("injectedClassFqn")]
         for batch in self._chunks(inj_items, BATCH_SIZE):
             self.db.execute("""
                 UNWIND $batch AS edge
                 MATCH (a:SpringBean {classFqn: edge.src}),
                       (b:SpringBean {classFqn: edge.dst})
-                MERGE (a)-[:INJECTS {field: edge.field, type: edge.type}]->(b)
+                MERGE (a)-[:INJECTS {field: edge.field, type: edge.type,
+                                     qualifier: edge.qualifier}]->(b)
             """, {"batch": batch})
 
         logger.info(
-            "Spring replaced: %d beans, %d endpoints, %d injections",
-            len(bean_items), len(ep_items), len(inj_items),
+            "Spring replaced: %d beans, %d endpoints, %d injections, %d autoconfigs (wing=%s)",
+            len(bean_items), len(ep_items), len(inj_items), len(autoconfigs), wing,
         )
 
     def _replace_modules(self, modules: list) -> None:

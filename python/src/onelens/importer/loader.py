@@ -22,6 +22,80 @@ logger = logging.getLogger(__name__)
 NODE_BATCH = 1000
 EDGE_BATCH = 500
 
+# Java primitives + void — never get a Class node (no FQN, not a reference type).
+_PRIMITIVES = frozenset({
+    "void", "boolean", "byte", "char", "short", "int", "long", "float", "double",
+})
+
+# Annotation simple-names that flip a Method boolean prop. Matched on the
+# trailing segment so `org.springframework.transaction.annotation.Transactional`
+# and a re-exported `Transactional` both hit.
+_TXN_ANNOS = frozenset({"Transactional"})
+_ASYNC_ANNOS = frozenset({"Async"})
+_DEPRECATED_ANNOS = frozenset({"Deprecated"})
+
+
+def _normalize_type(t: str) -> str:
+    """Reduce a Java type string to a Class FQN, or '' if it isn't one.
+
+    Strips generics (`List<Foo>` → `List`), array suffixes (`Foo[]` → `Foo`),
+    varargs (`Foo...` → `Foo`), and rejects primitives/void. Used to turn
+    declared return / param / throws types into edges to Class nodes.
+    """
+    if not t:
+        return ""
+    t = t.strip()
+    # Strip generic args first — the outermost <...> and everything after.
+    lt = t.find("<")
+    if lt != -1:
+        t = t[:lt]
+    t = t.replace("[]", "").replace("...", "").strip()
+    if not t or t in _PRIMITIVES:
+        return ""
+    # Bare type var (e.g. `T`, `E`) or unqualified name with no package — keep
+    # only fully-qualified reference types so edges resolve against real nodes.
+    if "." not in t:
+        return ""
+    return t
+
+
+def _anno_simple_names(method: dict) -> set[str]:
+    """Trailing-segment names of every annotation on a method dict."""
+    out: set[str] = set()
+    for a in method.get("annotations", []) or []:
+        fqn = a.get("fqn") or a.get("annotationFqn") or ""
+        if fqn:
+            out.add(fqn.rsplit(".", 1)[-1])
+    return out
+
+
+def _enrich_method(m: dict) -> None:
+    """Add derived structural props to a method dict in place (Tier-0 enrich).
+
+    All inputs already ship in the export (modifiers / parameters /
+    annotations) — the full loader previously dropped them. 100% PSI-accurate,
+    so these power exact queries: public dead code, deprecated-still-called,
+    non-transactional write paths, async boundaries.
+    """
+    mods = m.get("modifiers", []) or []
+    mods_set = set(mods)
+    if "public" in mods_set:
+        vis = "public"
+    elif "private" in mods_set:
+        vis = "private"
+    elif "protected" in mods_set:
+        vis = "protected"
+    else:
+        vis = "package"
+    m["visibility"] = vis
+    m["isStatic"] = "static" in mods_set
+    m["isAbstract"] = "abstract" in mods_set
+    m["paramCount"] = len(m.get("parameters", []) or [])
+    annos = _anno_simple_names(m)
+    m["isDeprecated"] = bool(annos & _DEPRECATED_ANNOS)
+    m["isTransactional"] = bool(annos & _TXN_ANNOS)
+    m["isAsync"] = bool(annos & _ASYNC_ANNOS)
+
 
 class GraphLoader:
     def __init__(self, db: GraphDB):
@@ -90,10 +164,17 @@ class GraphLoader:
             ])
 
             methods = data.get("methods", [])
+            # Tier-0 enrichment: derive visibility/static/abstract/deprecated/
+            # paramCount/transactional/async from already-exported modifiers +
+            # annotations. The full loader used to discard all of this.
+            for _m in methods:
+                _enrich_method(_m)
             self._batch_nodes(progress, "Methods", methods, "Method", "fqn", [
                 "name", "classFqn", "returnType", "isConstructor",
                 "filePath", "lineStart", "lineEnd",
                 "body", "javadoc",
+                "visibility", "isStatic", "isAbstract", "isDeprecated",
+                "paramCount", "isTransactional", "isAsync",
             ])
 
             fields = data.get("fields", [])
@@ -293,6 +374,22 @@ class GraphLoader:
                     if "#" in parent:
                         ext_class_fqns.add(parent.split("#")[0])
 
+            # Tier-0 type-flow: declared return / param / throws types become
+            # edges to Class nodes. Collect their FQNs so external types (JDK,
+            # libraries) get stubs and the edges below resolve via MATCH.
+            for m in methods:
+                rt = _normalize_type(m.get("returnType", ""))
+                if rt and rt not in project_class_fqns:
+                    ext_class_fqns.add(rt)
+                for p in m.get("parameters", []) or []:
+                    pt = _normalize_type(p.get("type", ""))
+                    if pt and pt not in project_class_fqns:
+                        ext_class_fqns.add(pt)
+                for tt in m.get("throwsTypes", []) or []:
+                    et = _normalize_type(tt)
+                    if et and et not in project_class_fqns:
+                        ext_class_fqns.add(et)
+
             # Remove any external classes that are actually project classes
             ext_class_fqns -= project_class_fqns
 
@@ -387,6 +484,38 @@ class GraphLoader:
             overrides = [{"src": o["methodFqn"], "dst": o["overridesFqn"]}
                          for o in data.get("methodOverrides", [])]
             self._batch_edges(progress, "OVERRIDES", overrides, "Method", "fqn", "Method", "fqn")
+
+            # Tier-0 type-flow edges (Method → Class). Powers "what produces a
+            # User" (RETURNS), "what consumes a UserDto" (HAS_PARAMETER), and
+            # "what can throw PaymentDeclined" (THROWS). Reference types only —
+            # primitives/void/type-vars filtered by _normalize_type.
+            returns = []
+            for m in methods:
+                rt = _normalize_type(m.get("returnType", ""))
+                if rt:
+                    returns.append({"src": m["fqn"], "dst": rt})
+            self._batch_edges(progress, "RETURNS", returns, "Method", "fqn", "Class", "fqn")
+
+            throws = []
+            for m in methods:
+                for tt in m.get("throwsTypes", []) or []:
+                    et = _normalize_type(tt)
+                    if et:
+                        throws.append({"src": m["fqn"], "dst": et})
+            self._batch_edges(progress, "THROWS", throws, "Method", "fqn", "Class", "fqn")
+
+            has_param = []
+            for m in methods:
+                for i, p in enumerate(m.get("parameters", []) or []):
+                    pt = _normalize_type(p.get("type", ""))
+                    if pt:
+                        has_param.append({
+                            "src": m["fqn"], "dst": pt,
+                            "position": i, "name": p.get("name", ""),
+                        })
+            self._batch_edges_with_props(progress, "HAS_PARAMETER", has_param,
+                                         "Method", "fqn", "Class", "fqn",
+                                         ["position", "name"])
 
             # ANNOTATED_WITH — edges carry both the `attributes` JSON blob
             # (resolved values; structure-preserving — arrays / nested

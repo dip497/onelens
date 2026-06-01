@@ -152,6 +152,11 @@ class AutoSyncService(private val project: Project) : Disposable {
                         buildSemanticIndex = settings.buildSemanticIndex,
                         graphBackend = settings.graphBackend,
                     )
+                    // Snapshot the delta diff-base BEFORE the export advances
+                    // it. If the import fails downstream we restore this so the
+                    // next delta re-covers the window instead of losing it.
+                    val exportState = com.onelens.plugin.export.ExportState.getInstance(project)
+                    val baseline = exportState.snapshotBaseline()
                     val result = DeltaExportService.exportDeltaForFiles(project, config, filesToSync, filesDeleted)
 
                     when (result) {
@@ -160,17 +165,32 @@ class AutoSyncService(private val project: Project) : Disposable {
                             val graphId = try {
                                 com.onelens.plugin.framework.workspace.WorkspaceLoader.load(project).graphId
                             } catch (_: Exception) { project.name }
-                            service.syncToGraph(result.path, graphId, config, isFull = false, projectBasePath = project.basePath)
-                            val dur = System.currentTimeMillis() - start
-                            LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
-                            OneLensEvents.syncComplete(
-                                graphName = graphId,
-                                classes = result.stats.upsertedClassCount,
-                                methods = result.stats.upsertedMethodCount,
-                                callEdges = result.stats.upsertedCallEdgeCount,
-                                isDelta = true,
-                                durationMs = dur,
-                            )
+                            val syncResult = service.syncToGraph(result.path, graphId, config, isFull = false, projectBasePath = project.basePath)
+                            if (!com.onelens.plugin.export.ExportState.isImportSuccess(syncResult)) {
+                                // Import did not land (FalkorDB down, Python
+                                // crash, MCP+CLI both failed). Roll the diff-base
+                                // back so these files re-export next delta —
+                                // otherwise the graph is silently, permanently
+                                // stale for this window.
+                                exportState.restoreBaseline(baseline)
+                                LOG.warn("Auto-sync import did not land — diff-base rolled back. result=$syncResult")
+                                OneLensEvents.error(
+                                    "Sync FAILED — graph is STALE for the last edit. " +
+                                    "Changes will retry on next save. (${syncResult ?: "import error"})"
+                                )
+                            } else {
+                                exportState.state.lastSuccessfulImportTimestamp = System.currentTimeMillis()
+                                val dur = System.currentTimeMillis() - start
+                                LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
+                                OneLensEvents.syncComplete(
+                                    graphName = graphId,
+                                    classes = result.stats.upsertedClassCount,
+                                    methods = result.stats.upsertedMethodCount,
+                                    callEdges = result.stats.upsertedCallEdgeCount,
+                                    isDelta = true,
+                                    durationMs = dur,
+                                )
+                            }
                         }
                         is DeltaExportService.DeltaResult.NeedFullExport -> {
                             LOG.info("Auto-sync: full export needed, skipping (use manual Sync Graph)")

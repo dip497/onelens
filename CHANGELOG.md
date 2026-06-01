@@ -7,6 +7,60 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Graph enrichment Tier 0: type-flow edges + method metadata (2026-06)
+
+- **`RETURNS` / `THROWS` / `HAS_PARAMETER` edges** (Method → Class). The full
+  loader already received `returnType` / `throwsTypes` / `parameters` in every
+  export but discarded all of it. Now promoted to type-flow edges so the graph
+  answers "what produces a `User`" (RETURNS), "what consumes a `UserDto`"
+  (HAS_PARAMETER `{position, name}`), and "what can throw `PaymentDeclined`"
+  (THROWS). Reference types only — primitives / void / unqualified type-vars
+  filtered by `_normalize_type` (strips generics + arrays + varargs). External
+  types (JDK, libraries) get auto-created `:Class {external:true}` stubs.
+- **Method props** derived from already-exported PSI modifiers + annotations:
+  `visibility`, `isStatic`, `isAbstract`, `isDeprecated`, `paramCount`,
+  `isTransactional`, `isAsync`. Unlocks exact queries: public-but-uncalled dead
+  code (vs internal), deprecated-still-called, write paths running outside a
+  transaction, async boundaries in a trace.
+- Both edges + props land identically on the full **and** delta paths
+  (`loader.py` + `delta_loader.py` share `_enrich_method` / `_normalize_type`),
+  verified end-to-end against falkordblite.
+
+### Fixed — Delta import correctness (delta(A→B) must equal full-import(B)) (2026-06)
+
+Multi-reviewer audit found the delta path silently diverged from a full import
+on several layers. Fixes:
+- **Spring `wing` stamp** — `_replace_spring` wrote beans/endpoints without
+  `wing`, so the Vue↔Spring HTTP bridge (`Endpoint.wing IS NOT NULL`) emitted
+  zero cross-stack HITS edges after any delta. Now stamps `wing` + the full
+  bean prop set (`primary`/`source`/`factoryMethodFqn`/`activeProfiles`),
+  recreates `REGISTERED_AS` (Class→SpringBean) + `SpringAutoConfig` nodes, and
+  carries `qualifier` on `INJECTS`.
+- **Phantom CALLS edges** — outbound CALLS were cleared only for methods
+  appearing as a `callerFqn` in the delta. A method whose body changed so it
+  stopped calling anything dropped out of `callGraph` and kept its stale CALLS
+  forever. Now clears outbound CALLS for every upserted method.
+- **EnumConstant node split** — delta created a standalone `:EnumConstant`
+  node while the full loader dual-labels the `:Field`. After a delta an enum
+  constant existed as two nodes. Now `MERGE (e:Field) SET e:EnumConstant`,
+  matching the full loader's single `:Field:EnumConstant` node; the cleanup
+  pass `REMOVE`s the label instead of `DETACH DELETE`-ing the shared node.
+- **`enclosingClass` dropped** — modified inner classes lost the prop on delta.
+
+### Fixed — Auto-sync data loss on import failure (2026-06)
+
+- **Diff-base no longer advances past a failed import.** `exportDeltaForFiles`
+  bumped `lastGitHash` / `fileHashes` to current HEAD at export time, before
+  `syncToGraph` ran — and `AutoSyncService` ignored `syncToGraph`'s result. If
+  the import failed (FalkorDB down, Python crash, MCP+CLI both fail) the diff
+  base advanced anyway, so the failed window's changes were never re-emitted —
+  silent, permanent staleness. `AutoSyncService` now snapshots the baseline,
+  checks `ExportState.isImportSuccess(result)`, and rolls the baseline back on
+  failure so the next save retries the window. Surfaces a sticky "graph STALE"
+  error instead of silently reverting to READY.
+- Added `ExportState.lastSuccessfulImportTimestamp` (set only after the import
+  lands) as the basis for a fresh-vs-stale indicator.
+
 ### Added — Flat annotation attribute properties (2026-05-08)
 
 - **`ANNOTATED_WITH.attr_<key>` edge properties.** Each primitive
