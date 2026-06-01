@@ -649,7 +649,7 @@ Edges: `CONTAINS` (App → Class / Method / Endpoint),
 filter on large graphs.
 
 **Context.** Real microservice monorepos have multiple entrypoints
-per repo (the reference motadata server has 18 `@SpringBootApplication`
+per repo (a reference enterprise Spring Boot server had 18 `@SpringBootApplication`
 classes across modules; same pattern appears in JHipster samples,
 Netflix OSS, and Spring Cloud demos). Today OneLens flattens them
 into one topology: PageRank blends endpoints across apps, impact

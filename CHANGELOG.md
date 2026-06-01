@@ -706,7 +706,7 @@ nodes. Same queries still work — both labels resolve to the same node.
 
 - `Field` ∪ `JpaColumn` → one node carrying both labels. Was emitting a
   `JpaColumn` node per entity field AND the `Field` node MemberCollector
-  already wrote (~5.8k duplicates on motadata).
+  already wrote (~5.8k duplicates on a large test project).
 - `Field` ∪ `EnumConstant` → one node. PSI returns enum constants as
   fields; MemberCollector already emitted them. Was ~10k duplicates.
 - `Class` ∪ `JpaEntity` → one node (~748 duplicates).
@@ -862,7 +862,7 @@ with FalkorDB loaded, talking over a Unix socket. No TCP port, no
   Never worked before this fix because Docker was the plugin default. Now
   properly persists via per-graph `<db_path>/<graph_name>.rdb` files and
   rebinds the graph handle after `clear()`.
-- **Benchmark** (motadata, 548 MB export, 10k classes, 80k methods, 630k call
+- **Benchmark** (real-world Spring Boot project, 548 MB export, 10k classes, 80k methods, 630k call
   edges): Docker 219.8 s vs Lite 279.7 s. ~27 % slower — acceptable for the
   zero-setup win. Slowest delta is small-batch edge writes (higher Unix-socket
   per-roundtrip latency).
@@ -882,7 +882,7 @@ classification. Detection is PSI-native via IntelliJ's `AnnotationUtil.CHECK_HIE
 flag — same annotation-resolution Spring itself uses, so:
 
 - Direct `@SpringBootTest` on a test class ✅
-- `@SpringBootTest` on a superclass up the chain (motadata's
+- `@SpringBootTest` on a superclass up the chain (e.g.
   `CommonTest → MockHelper → BaseTest → …` pattern) ✅
 - `@SpringBootTest` on a meta-annotation (`@MyIntegrationTest`) ✅
 - Slices (`@DataJpaTest`, `@WebMvcTest`, `@JsonTest`, `@RestClientTest`, other `@AutoConfigureXxx`) ✅
@@ -916,8 +916,8 @@ out of the box via CHECK_HIERARCHY.
 
 - `loader.py`, `delta_loader.py`, `code_miner.py` swap stdlib `json.load` →
   `orjson.loads` (falls back cleanly when orjson missing). Benchmarked 25%
-  faster on 120 MB synthetic exports; ~2-3 s saved per sync on motadata's
-  500 MB exports. Zero API change — same dicts out.
+  faster on 120 MB synthetic exports; ~2-3 s saved per sync on
+  500 MB real-world exports. Zero API change — same dicts out.
 - `pyproject.toml` adds `orjson>=3.9`.
 - `loader.load_full()` now logs JSON parse time so future perf regressions
   surface in the log.
@@ -939,7 +939,7 @@ Beyond table-level edges, each `:SqlStatement` now links to the specific
 - Enables precise impact queries: "rename `Request.priorityId` — what
   reports break?", "every query that reads FlotoBase.createdTime", column
   popularity rankings.
-- 77.9% alias-resolution rate on motadata's 201 customer queries (9807
+- 77.9% alias-resolution rate on 201 real-world queries (9807
   column refs, 7640 resolved). Remaining unresolved = unqualified columns
   in multi-FROM statements (kept honest rather than guessing).
 
@@ -954,7 +954,7 @@ so Cypher can pinpoint the exact `SELECT`/`ALTER` that touches an entity.
   across every workspace root and every nested Maven module. Falls back to the
   Flyway default (`classpath:db/migration`) when the dep is present but no
   explicit location. `extraLocations` knob for non-standard setups (e.g.
-  motadata's `classpath:db/migration/tenants` which uses a custom loader).
+  e.g. `classpath:db/migration/tenants` which uses a custom loader).
 - `miners/sql_miner.py` — sqlglot-based parser, Postgres dialect,
   `error_level=IGNORE`. Per-statement split (one `:SqlStatement` node per
   `;`-separated statement), `opKind` vocabulary (`SELECT` / `CREATE_TABLE` /
@@ -1086,8 +1086,8 @@ so Cypher can pinpoint the exact `SELECT`/`ALTER` that touches an entity.
   longer depend on `project.basePath` / `projectScope(project)`.
 - `plugin/.../framework/workspace/WorkspaceLoader.kt` — parses
   `onelens.workspace.yaml` (SnakeYAML) with relative `../sibling`
-  roots resolving against the config's directory, so the motadata
-  pattern (`- path: ../motadata_plugins`) just works. Absent config
+  roots resolving against the config's directory, so a multi-repo
+  pattern (`- path: ../sibling_plugin`) just works. Absent config
   falls back to an implicit single-root workspace → zero-config
   compatibility with every existing single-repo user.
 - `CollectContext.workspace` — new field plumbed through

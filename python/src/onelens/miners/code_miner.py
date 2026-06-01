@@ -60,8 +60,7 @@ _JS_SIDE_IMPORT_RE = _re_imports.compile(
 def _strip_js_imports(src: str) -> str:
     """Remove ES6 import statements from a Vue body before embedding.
 
-    Dogfood measurements (on the 2516-component motadata-itsm-frontend-vue3
-    corpus):
+    Dogfood measurements (on a 2516-component Vue3 frontend corpus):
       - raw body (no strip):   77% NaN rate from Qwen3 ONNX FP16
       - stripped:              40% NaN rate
     Both leak NaN due to the underlying Qwen3 ONNX CUDA FP16 precision

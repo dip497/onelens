@@ -56,7 +56,7 @@ Phase B collectors will use:
 
 ## Work queue that PoC unblocks
 
-Phase B Week 1 (per plan file `/home/dipendra-sharma/.claude/plans/ok-done-hai-kar-adaptive-zebra.md`):
+Phase B Week 1:
 1. `ViteAliasResolver` — investigate if the bundled JavaScript plugin exposes a resolved-alias API before writing config parsers.
 2. `SymlinkResolver` — straightforward, no PSI research required.
 3. Balloon notification for symlinks outside content roots.
