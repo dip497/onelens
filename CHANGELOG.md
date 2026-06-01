@@ -48,6 +48,15 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 Multi-reviewer audit found the delta path silently diverged from a full import
 on several layers. Fixes:
+- **JPA + test layers re-derived on every delta** (`_replace_jpa` /
+  `_replace_tests`). A modified `@Entity` / test class is DETACH-deleted then
+  re-MERGEd as a plain `:Class`/`:Method`, so it silently lost its `:JpaEntity`
+  / `:JpaColumn` / `:JpaRepository` / `:TestCase` dual-label and every JPA / test
+  edge (`HAS_COLUMN`, `RELATES_TO`, `REPOSITORY_FOR`, `QUERIES`, `MOCKS`,
+  `SPIES`, `TESTS`) on each save — and `_replace_spring`'s bean wipe destroyed
+  the MOCKS/SPIES targets. The delta now ships full `jpa` + `tests` (re-scan,
+  like Spring) and strips + re-applies all JPA/test labels and edges. Verified:
+  a modified entity stays `[:Class:JpaEntity]` with its columns intact.
 - **Spring `wing` stamp** — `_replace_spring` wrote beans/endpoints without
   `wing`, so the Vue↔Spring HTTP bridge (`Endpoint.wing IS NOT NULL`) emitted
   zero cross-stack HITS edges after any delta. Now stamps `wing` + the full

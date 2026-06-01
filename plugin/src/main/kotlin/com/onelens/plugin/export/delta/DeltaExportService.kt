@@ -53,6 +53,16 @@ object DeltaExportService {
         // is indexed. Modules are small + rarely change; same treatment.
         val spring: SpringData? = null,
         val modules: List<ModuleData> = emptyList(),
+        // JPA + tests are cross-class (RELATES_TO between entities, TESTS
+        // derived from CALLS, MOCKS→SpringBean) so they get the same full
+        // re-scan + replace-all treatment as Spring. Without this a modified
+        // @Entity / test class DETACH-deletes and re-MERGEs as a plain
+        // :Class/:Method, silently losing its :JpaEntity / :TestCase label
+        // and every JPA / test edge on each delta.
+        val jpa: JpaData? = null,
+        val tests: List<TestCaseData> = emptyList(),
+        val mockBeans: List<TestBeanBinding> = emptyList(),
+        val spyBeans: List<TestBeanBinding> = emptyList(),
         val stats: DeltaStats
     )
 
@@ -174,6 +184,16 @@ object DeltaExportService {
         val modules = try { ModuleCollector.collect(project, workspace) } catch (e: Throwable) {
             LOG.warn("Delta module collection failed: ${e.message}"); emptyList()
         }
+        // JPA + tests: full re-scan + replace-all (same rationale as Spring).
+        val jpa = if (config.includeSpring) {
+            try { JpaCollector.collect(project, workspace) } catch (e: Throwable) {
+                LOG.warn("Delta JPA collection failed: ${e.message}"); null
+            }
+        } else null
+        val testResult = try { TestCollector.collect(project, workspace) } catch (e: Throwable) {
+            LOG.warn("Delta test collection failed: ${e.message}")
+            TestCollector.Result(emptyList(), emptyList(), emptyList())
+        }
 
         // Also add modified files' old classes to deleted (they'll be replaced by upserted)
         for (modifiedFile in modifiedFiles) {
@@ -208,6 +228,10 @@ object DeltaExportService {
             ),
             spring = spring,
             modules = modules,
+            jpa = jpa,
+            tests = testResult.tests,
+            mockBeans = testResult.mockBeans,
+            spyBeans = testResult.spyBeans,
             stats = DeltaStats(
                 changedFileCount = modifiedFiles.size + deletedFiles.size,
                 deletedClassCount = deletedClasses.distinct().size,
