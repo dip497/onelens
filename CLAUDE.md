@@ -66,7 +66,15 @@ pip install -e ".[context]"
 ## Graph schema
 
 Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`, `EnumConstant`
-Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`
+Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`, `RETURNS`, `THROWS`, `HAS_PARAMETER`
+
+Type-flow edges (Tier-0 enrichment, v1.2+) — Method → Class, reference types only (primitives/void/type-vars filtered):
+- `RETURNS` — "what produces a `User`". `MATCH (m:Method)-[:RETURNS]->(:Class {name:'User'})`.
+- `THROWS` — declared `throws` clause. "what can throw `PaymentDeclined`" / which endpoints surface a checked exception.
+- `HAS_PARAMETER {position, name}` — "what consumes a `UserDto`" / DTO blast radius.
+
+Method props (Tier-0 enrichment, derived from PSI modifiers + annotations):
+- `visibility` (`public`/`private`/`protected`/`package`), `isStatic`, `isAbstract`, `isDeprecated`, `paramCount`, `isTransactional`, `isAsync`. Enables exact queries: public-but-uncalled dead code, deprecated-still-called, non-transactional write paths, async boundaries in a trace.
 
 Semantic payload (v1.1+):
 - `EnumConstant.args` / `EnumConstant.argList` — resolved enum constructor args. Enables `WHERE 'REQUEST' IN ec.argList`-style module/feature filters on enum-as-config registries.
