@@ -66,7 +66,11 @@ pip install -e ".[context]"
 ## Graph schema
 
 Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`, `EnumConstant`
-Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`, `RETURNS`, `THROWS`, `HAS_PARAMETER`
+Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`, `RETURNS`, `THROWS`, `HAS_PARAMETER`, `READS_FIELD`, `WRITES_FIELD`, `INSTANTIATES`
+
+Data-flow edges (Tier-1 enrichment, v1.2+) — from `DataFlowCollector`'s method-body PSI walk (`plugin/.../collectors/DataFlowCollector.kt`), 100% type-accurate (resolves `this.x` vs shadowing locals vs inherited fields):
+- `READS_FIELD` / `WRITES_FIELD {line}` (Method → Field) — "who reads `cache`", "who mutates `order.status`". Project fields only (external field access drops). Read/write split via PSI `isAccessedForWriting`.
+- `INSTANTIATES {line}` (Method → Class) — "who `new`s a `RestTemplate`" — the non-DI object-creation graph (complements `INJECTS`). Anonymous classes resolve to their named base.
 
 Type-flow edges (Tier-0 enrichment, v1.2+) — Method → Class, reference types only (primitives/void/type-vars filtered):
 - `RETURNS` — "what produces a `User`". `MATCH (m:Method)-[:RETURNS]->(:Class {name:'User'})`.

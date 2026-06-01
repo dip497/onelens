@@ -73,6 +73,7 @@ object DeltaExportService {
         val methodOverrides: List<OverrideEdge> = emptyList(),
         val annotations: List<AnnotationUsage> = emptyList(),
         val enumConstants: List<EnumConstantData> = emptyList(),
+        val dataFlow: DataFlowData? = null,
     )
 
     @Serializable
@@ -159,6 +160,8 @@ object DeltaExportService {
         val callGraph = CallGraphCollector.collect(project, affectedClasses, workspace)
         val inheritance = InheritanceCollector.collect(project, affectedClasses, workspace)
         val annotations = AnnotationCollector.collect(project, affectedClasses, workspace)
+        val dataFlow = try { DataFlowCollector.collect(project, affectedClasses, workspace) }
+            catch (e: Throwable) { LOG.warn("Delta data-flow collection failed: ${e.message}"); null }
 
         // 4b. Spring + modules: full re-scan (indexed, cheap). Per-class
         // filtering would miss cross-class injection edges and newly-added
@@ -201,6 +204,7 @@ object DeltaExportService {
                 methodOverrides = inheritance.overrides,
                 annotations = annotations,
                 enumConstants = members.enumConstants,
+                dataFlow = dataFlow,
             ),
             spring = spring,
             modules = modules,

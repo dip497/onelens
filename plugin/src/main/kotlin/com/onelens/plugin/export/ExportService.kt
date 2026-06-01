@@ -136,6 +136,7 @@ class ExportService {
         val tests = springResult?.tests ?: emptyList()
         val mockBeans = springResult?.mockBeans ?: emptyList()
         val spyBeans = springResult?.spyBeans ?: emptyList()
+        val dataFlow = springResult?.dataFlow
         val diagnostics = if (config.includeDiagnostics) {
             springResult?.diagnostics ?: emptyList()
         } else emptyList()
@@ -209,6 +210,7 @@ class ExportService {
             annotations = annotations,
             enumConstants = enumConstants,
             jpa = jpa,
+            dataFlow = dataFlow,
             apps = apps,
             packages = packages,
             tests = tests,

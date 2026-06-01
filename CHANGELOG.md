@@ -7,6 +7,24 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Graph enrichment Tier 1: data-flow edges (2026-06)
+
+- **`READS_FIELD` / `WRITES_FIELD` (Method → Field) + `INSTANTIATES`
+  (Method → Class)**, both `{line}`-tagged. New `DataFlowCollector` walks each
+  method body via PSI (parallel per-class ReadAction chunks, same freeze-safe
+  pattern as `CallGraphCollector`) and resolves field references + `new`
+  expressions. 100% type-accurate — `resolve()` separates `this.x` from a
+  shadowing local, maps inherited fields to their declaring class, and skips
+  locals/params. Read vs write split via `PsiUtil.isAccessedForWriting`.
+  Anonymous-class `new` resolves to the named base.
+- Unlocks data-flow questions impossible before: "who mutates `order.status`",
+  "who reads the cache field", "who `new`s a `RestTemplate`" (DI-bypass smell),
+  "where are `Foo` objects created vs injected".
+- Wired through full (`SpringBootAdapter` → `ExportDocument.dataFlow`) and delta
+  (`DeltaExportService` → `UpsertedSection.dataFlow`) paths; loaders re-derive
+  on every upsert (delete-then-recreate so a method that stops writing a field
+  loses the stale `WRITES_FIELD`). Verified end-to-end against falkordblite.
+
 ### Added — Graph enrichment Tier 0: type-flow edges + method metadata (2026-06)
 
 - **`RETURNS` / `THROWS` / `HAS_PARAMETER` edges** (Method → Class). The full

@@ -449,7 +449,7 @@ Multi-reviewer audit (delta-correctness, delta-UX, graph-richness gap-finder). F
 | D4 | Auto-sync data-loss fix — snapshot diff-base, gate advance on `isImportSuccess`, roll back + sticky stale error on failure; `lastSuccessfulImportTimestamp` | ✅ | `ExportState.kt`, `AutoSyncService.kt` |
 | D5 | Tier-0 graph enrichment — `RETURNS`/`THROWS`/`HAS_PARAMETER` edges + method props (visibility/static/abstract/deprecated/paramCount/transactional/async); full + delta parity, verified vs falkordblite | ✅ | `loader.py`, `delta_loader.py` `_enrich_method`/`_normalize_type` |
 | D6 | Delta JPA/Tests/Apps re-derivation — modified class DETACH-deletes strip dual-labels (`:JpaEntity`/`:TestCase`) + `CONTAINS`/`HAS_COLUMN`; needs plugin DeltaDocument fields | 🟡 | next — `DeltaExportService.kt` + `delta_loader.py` |
-| D7 | Tier-1 data-flow — `READS_FIELD`/`WRITES_FIELD`/`INSTANTIATES` via CallGraphCollector body walk | ⬜ | `CallGraphCollector.kt` |
+| D7 | Tier-1 data-flow — `READS_FIELD`/`WRITES_FIELD`/`INSTANTIATES` via new `DataFlowCollector` body walk; full + delta parity (delete-then-recreate on upsert), verified vs falkordblite | ✅ | `DataFlowCollector.kt`, `ExportModels.kt`, `SpringBootAdapter.kt`, `DeltaExportService.kt`, `loader.py`, `delta_loader.py` |
 | D8 | Delta UX — merge-base ancestor guard before git diff; queue saves landing mid-sync; `.kt`/`.vue` triggers | ⬜ | `DeltaTracker.kt`, `AutoSyncFileListener.kt` |
 
 ## Open regression / verification items
