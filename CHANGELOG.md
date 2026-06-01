@@ -65,6 +65,15 @@ on several layers. Fixes:
   pass `REMOVE`s the label instead of `DETACH DELETE`-ing the shared node.
 - **`enclosingClass` dropped** — modified inner classes lost the prop on delta.
 
+### Fixed — Auto-sync branch-switch garbage delta (2026-06)
+
+- **Merge-base ancestor guard before git diff.** `getGitChanges` now runs
+  `git merge-base --is-ancestor <lastHash> HEAD` first. After a branch switch,
+  rebase, or history rewrite the stored hash is no longer an ancestor of HEAD,
+  so `git diff <oldHash> HEAD` would emit the entire branch divergence as one
+  giant (and semantically wrong) "delta". When the base has diverged we force a
+  full re-export (`NeedFullExport`) instead.
+
 ### Fixed — Auto-sync data loss on import failure (2026-06)
 
 - **Diff-base no longer advances past a failed import.** `exportDeltaForFiles`
