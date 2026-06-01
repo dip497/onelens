@@ -390,6 +390,15 @@ class GraphLoader:
                     if et and et not in project_class_fqns:
                         ext_class_fqns.add(et)
 
+            # INSTANTIATES targets (Tier-1) — `new ArrayList()` etc. need a Class
+            # stub so the edge resolves. Most already arrive via constructor
+            # CALLS, but collect defensively.
+            _dataflow = data.get("dataFlow") or {}
+            for inst in _dataflow.get("instantiations", []) or []:
+                ic = inst.get("classFqn", "")
+                if ic and ic not in project_class_fqns:
+                    ext_class_fqns.add(ic)
+
             # Remove any external classes that are actually project classes
             ext_class_fqns -= project_class_fqns
 
@@ -516,6 +525,34 @@ class GraphLoader:
             self._batch_edges_with_props(progress, "HAS_PARAMETER", has_param,
                                          "Method", "fqn", "Class", "fqn",
                                          ["position", "name"])
+
+            # Tier-1 data-flow edges: READS_FIELD / WRITES_FIELD (Method→Field)
+            # + INSTANTIATES (Method→Class). Field targets resolve against
+            # existing Field nodes (external/library field access silently
+            # drops — we only model project data-flow). The read/write split
+            # answers "who mutates order.status" vs "who reads the cache".
+            dataflow = data.get("dataFlow") or {}
+            reads, writes = [], []
+            for fa in dataflow.get("fieldAccesses", []) or []:
+                edge = {"src": fa.get("accessorFqn", ""), "dst": fa.get("fieldFqn", ""),
+                        "line": fa.get("line", 0)}
+                if not edge["src"] or not edge["dst"]:
+                    continue
+                if fa.get("mode") == "write":
+                    writes.append(edge)
+                else:
+                    reads.append(edge)
+            self._batch_edges_with_props(progress, "READS_FIELD", reads,
+                                         "Method", "fqn", "Field", "fqn", ["line"])
+            self._batch_edges_with_props(progress, "WRITES_FIELD", writes,
+                                         "Method", "fqn", "Field", "fqn", ["line"])
+
+            instantiates = [{"src": i.get("methodFqn", ""), "dst": i.get("classFqn", ""),
+                             "line": i.get("line", 0)}
+                            for i in dataflow.get("instantiations", []) or []
+                            if i.get("methodFqn") and i.get("classFqn")]
+            self._batch_edges_with_props(progress, "INSTANTIATES", instantiates,
+                                         "Method", "fqn", "Class", "fqn", ["line"])
 
             # ANNOTATED_WITH — edges carry both the `attributes` JSON blob
             # (resolved values; structure-preserving — arrays / nested

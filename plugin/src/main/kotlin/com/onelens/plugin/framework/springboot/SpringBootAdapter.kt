@@ -5,6 +5,7 @@ import com.intellij.openapi.project.Project
 import com.onelens.plugin.export.AnnotationUsage
 import com.onelens.plugin.export.CallEdge
 import com.onelens.plugin.export.ClassData
+import com.onelens.plugin.export.DataFlowData
 import com.onelens.plugin.export.DiagnosticEntry
 import com.onelens.plugin.export.EnumConstantData
 import com.onelens.plugin.export.FieldData
@@ -23,6 +24,7 @@ import com.onelens.plugin.export.collectors.AppCollector
 import com.onelens.plugin.export.collectors.AutoConfigCollector
 import com.onelens.plugin.export.collectors.TestCollector
 import com.onelens.plugin.export.collectors.CallGraphCollector
+import com.onelens.plugin.export.collectors.DataFlowCollector
 import com.onelens.plugin.export.collectors.ClassCollector
 import com.onelens.plugin.export.collectors.DiagnosticsCollector
 import com.onelens.plugin.export.collectors.InheritanceCollector
@@ -96,6 +98,7 @@ data class SpringBootCollectionResult(
     val tests: List<TestCaseData> = emptyList(),
     val mockBeans: List<TestBeanBinding> = emptyList(),
     val spyBeans: List<TestBeanBinding> = emptyList(),
+    val dataFlow: DataFlowData? = null,
 )
 
 /**
@@ -133,6 +136,11 @@ class SpringBootCollector : Collector {
         indicator?.fraction = base + 0.05
         val callGraph = CallGraphCollector.collect(project, classes, workspace)
         LOG.info("Collected ${callGraph.size} call edges")
+
+        indicator?.text = "Java: data-flow (field access, instantiation)…"
+        indicator?.fraction = base + 0.23
+        val dataFlow = try { DataFlowCollector.collect(project, classes, workspace) }
+            catch (t: Throwable) { LOG.warn("DataFlowCollector failed", t); null }
 
         indicator?.text = "Java: inheritance & overrides…"
         indicator?.fraction = base + 0.25
@@ -218,6 +226,7 @@ class SpringBootCollector : Collector {
             tests = testResult.tests,
             mockBeans = testResult.mockBeans,
             spyBeans = testResult.spyBeans,
+            dataFlow = dataFlow,
         )
         lastResult = result
 

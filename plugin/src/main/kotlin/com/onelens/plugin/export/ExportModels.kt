@@ -30,6 +30,8 @@ data class ExportDocument(
     val vue3: Vue3Data? = null,
     /** JPA / Spring Data payload (Phase C3c). Null when no @Entity types found. */
     val jpa: JpaData? = null,
+    /** Tier-1 data-flow (Phase D): field reads/writes + instantiations. */
+    val dataFlow: DataFlowData? = null,
     /**
      * Tests payload (Phase Q.code). List of test methods with classification
      * (unit / integration / slice-*). Empty when no JUnit/TestNG annotations
@@ -404,6 +406,36 @@ data class CallEdge(
     val line: Int = 0,
     val filePath: String = "",
     val receiverType: String? = null  // Declared type of the object being called on (e.g., "Child" even if method resolves to "Parent")
+)
+
+/**
+ * Tier-1 data-flow: a method reading or writing a field. `fieldFqn` is the
+ * resolved Field node key (`<classFqn>#<fieldName>`) — 100% PSI-accurate, so
+ * `this.x`, shadowed locals, and inherited fields are disambiguated correctly
+ * (the moat vs tree-sitter). `mode` is "read" or "write".
+ */
+@Serializable
+data class FieldAccessEdge(
+    val accessorFqn: String,
+    val fieldFqn: String,
+    val mode: String,
+    val line: Int = 0,
+)
+
+/** Tier-1 data-flow: a method that `new`s a class. Complements INJECTS by
+ * exposing the non-DI object-creation graph ("who instantiates RestTemplate"). */
+@Serializable
+data class InstantiationEdge(
+    val methodFqn: String,
+    val classFqn: String,
+    val line: Int = 0,
+)
+
+/** Data-flow sub-document (Tier-1 enrichment). Null/empty on pre-1.2 exports. */
+@Serializable
+data class DataFlowData(
+    val fieldAccesses: List<FieldAccessEdge> = emptyList(),
+    val instantiations: List<InstantiationEdge> = emptyList(),
 )
 
 @Serializable
