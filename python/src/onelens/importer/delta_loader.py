@@ -521,6 +521,16 @@ class DeltaLoader:
         if modules is not None:
             self._replace_modules(modules)
 
+        # JPA + tests: full re-scan + replace-all (same rationale as Spring).
+        # MUST run after _replace_spring (MOCKS/SPIES target SpringBean) and
+        # after the CALLS upsert above (TESTS derives from direct CALLS).
+        jpa = data.get("jpa")
+        if jpa is not None:
+            self._replace_jpa(jpa, wing=graph_wing)
+
+        if "tests" in data or "mockBeans" in data or "spyBeans" in data:
+            self._replace_tests(data, wing=graph_wing)
+
         stats = data.get("stats", {})
 
         # 10. Optional: propagate the delta into the ChromaDB semantic layer.
@@ -715,6 +725,178 @@ class DeltaLoader:
                 CREATE (m:Module {name: item.name}) SET m.type = item.type
             """, {"batch": batch})
         logger.info("Modules replaced: %d", len(items))
+
+    def _replace_jpa(self, jpa: dict, wing: str = "default") -> None:
+        """Strip + re-apply JPA dual-labels and edges (parity with loader.py).
+
+        A modified @Entity is DETACH-deleted then re-MERGEd as a plain :Class,
+        losing its :JpaEntity label + tableName/schema. The whole JPA layer is
+        cross-class (RELATES_TO between entities, REPOSITORY_FOR), so we strip
+        every JPA label + edge globally and re-derive from the full re-scan —
+        cheap (JPA layer is small) and guarantees parity.
+        """
+        # 1. Strip labels + JPA edges. REMOVE keeps the underlying Class/Field
+        # node (and its structural edges); only the JPA overlay is rebuilt.
+        self.db.execute("MATCH (n:JpaEntity) REMOVE n:JpaEntity")
+        self.db.execute("MATCH (n:JpaColumn) REMOVE n:JpaColumn")
+        self.db.execute("MATCH (n:JpaRepository) REMOVE n:JpaRepository")
+        self.db.execute("MATCH ()-[r:HAS_COLUMN|RELATES_TO|REPOSITORY_FOR|QUERIES]->() DELETE r")
+
+        entities = jpa.get("entities", []) or []
+        # JpaEntity dual-label on the existing Class node.
+        ent_items = [{
+            "fqn": e["classFqn"], "tableName": e.get("tableName", ""),
+            "schema": e.get("schema", ""), "wing": wing,
+        } for e in entities if e.get("classFqn")]
+        for batch in self._chunks(ent_items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                MATCH (c:Class {fqn: item.fqn})
+                SET c:JpaEntity, c.tableName = item.tableName,
+                    c.schema = item.schema, c.wing = item.wing
+            """, {"batch": batch})
+
+        # JpaColumn dual-label on the existing Field node + HAS_COLUMN edge.
+        col_items, has_col, relates = [], [], []
+        seen_col = set()
+        for e in entities:
+            for col in e.get("columns", []):
+                key = col.get("fieldFqn", "")
+                if key and key not in seen_col:
+                    seen_col.add(key)
+                    col_items.append({
+                        "fqn": key, "columnName": col.get("columnName", ""),
+                        "nullable": bool(col.get("nullable", True)),
+                        "unique": bool(col.get("unique", False)),
+                        "relation": col.get("relation") or "",
+                        "targetEntityFqn": col.get("targetEntityFqn") or "",
+                        "wing": wing,
+                    })
+                    has_col.append({"src": e["classFqn"], "dst": key})
+                tgt, rel = col.get("targetEntityFqn"), col.get("relation")
+                if tgt and rel:
+                    relates.append({
+                        "src": e["classFqn"], "dst": tgt, "relation": rel,
+                        "field": col["fieldFqn"].split("#", 1)[-1] if "#" in col.get("fieldFqn", "") else "",
+                    })
+        for batch in self._chunks(col_items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                MATCH (f:Field {fqn: item.fqn})
+                SET f:JpaColumn, f.columnName = item.columnName,
+                    f.nullable = item.nullable, f.unique = item.unique,
+                    f.relation = item.relation,
+                    f.targetEntityFqn = item.targetEntityFqn, f.wing = item.wing
+            """, {"batch": batch})
+        for batch in self._chunks(has_col, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (c:JpaEntity {fqn: edge.src}), (f:JpaColumn {fqn: edge.dst})
+                MERGE (c)-[:HAS_COLUMN]->(f)
+            """, {"batch": batch})
+        for batch in self._chunks(relates, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (a:JpaEntity {fqn: edge.src}), (b:JpaEntity {fqn: edge.dst})
+                MERGE (a)-[:RELATES_TO {relation: edge.relation, field: edge.field}]->(b)
+            """, {"batch": batch})
+
+        # JpaRepository dual-label + REPOSITORY_FOR + QUERIES.
+        repos = jpa.get("repositories", []) or []
+        repo_items = [{"fqn": r["classFqn"], "entityFqn": r.get("entityFqn", ""), "wing": wing}
+                      for r in repos if r.get("classFqn")]
+        for batch in self._chunks(repo_items, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS item
+                MATCH (c:Class {fqn: item.fqn})
+                SET c:JpaRepository, c.entityFqn = item.entityFqn, c.wing = item.wing
+            """, {"batch": batch})
+        repo_for = [{"src": r["classFqn"], "dst": r["entityFqn"]}
+                    for r in repos if r.get("entityFqn") and r.get("classFqn")]
+        for batch in self._chunks(repo_for, BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (r:JpaRepository {fqn: edge.src}), (e:JpaEntity {fqn: edge.dst})
+                MERGE (r)-[:REPOSITORY_FOR]->(e)
+            """, {"batch": batch})
+        queries = []
+        for r in repos:
+            for q in r.get("derivedQueries", []):
+                queries.append({"src": r["classFqn"], "dst": q.get("methodFqn", ""),
+                                "methodName": q.get("methodName", ""), "kind": q.get("kind", "derived")})
+        for batch in self._chunks([q for q in queries if q["dst"]], BATCH_SIZE):
+            self.db.execute("""
+                UNWIND $batch AS edge
+                MATCH (r:JpaRepository {fqn: edge.src}), (m:Method {fqn: edge.dst})
+                MERGE (r)-[:QUERIES {methodName: edge.methodName, kind: edge.kind}]->(m)
+            """, {"batch": batch})
+        logger.info("JPA replaced: %d entities, %d repos (wing=%s)",
+                    len(ent_items), len(repo_items), wing)
+
+    def _replace_tests(self, data: dict, wing: str = "default") -> None:
+        """Strip + re-apply :TestCase dual-label + MOCKS/SPIES/TESTS edges.
+
+        Parity with loader.py::_load_tests. A modified test class DETACH-deletes
+        and re-MERGEs as a plain :Method, losing :TestCase + every test edge;
+        and _replace_spring wipes SpringBeans, destroying MOCKS/SPIES targets.
+        Full strip + re-derive guarantees parity. Must run after Spring replace
+        (MOCKS→SpringBean) and the CALLS upsert (TESTS derives from CALLS).
+        """
+        tests = data.get("tests", []) or []
+        mock_beans = data.get("mockBeans", []) or []
+        spy_beans = data.get("spyBeans", []) or []
+
+        self.db.execute("MATCH (m:TestCase) REMOVE m:TestCase")
+        self.db.execute("MATCH ()-[r:MOCKS|SPIES|TESTS]->() DELETE r")
+
+        if tests:
+            prepped = [{
+                "methodFqn": t.get("methodFqn", ""), "testClass": t.get("testClass", ""),
+                "testKind": t.get("testKind", "unknown"),
+                "testFramework": t.get("testFramework", "unknown"),
+                "tags": ",".join(t.get("tags") or []),
+                "disabled": bool(t.get("disabled", False)),
+                "activeProfiles": ",".join(t.get("activeProfiles") or []),
+                "springBootApp": t.get("springBootApp") or "",
+                "usesMockito": bool(t.get("usesMockito", False)),
+                "usesTestcontainers": bool(t.get("usesTestcontainers", False)),
+                "displayName": t.get("displayName") or "", "wing": wing,
+            } for t in tests if t.get("methodFqn")]
+            for batch in self._chunks(prepped, BATCH_SIZE):
+                self.db.execute("""
+                    UNWIND $batch AS item
+                    MATCH (m:Method {fqn: item.methodFqn})
+                    SET m:TestCase, m.testClass = item.testClass,
+                        m.testKind = item.testKind, m.testFramework = item.testFramework,
+                        m.tags = item.tags, m.disabled = item.disabled,
+                        m.activeProfiles = item.activeProfiles,
+                        m.springBootApp = item.springBootApp,
+                        m.usesMockito = item.usesMockito,
+                        m.usesTestcontainers = item.usesTestcontainers,
+                        m.displayName = item.displayName, m.wing = item.wing
+                """, {"batch": batch})
+
+        for rel, bindings in (("MOCKS", mock_beans), ("SPIES", spy_beans)):
+            items = [{"src": b["testClassFqn"], "dst": b["beanClassFqn"],
+                      "field": b.get("fieldName", "")}
+                     for b in bindings if b.get("testClassFqn") and b.get("beanClassFqn")]
+            for batch in self._chunks(items, BATCH_SIZE):
+                self.db.execute(
+                    f"UNWIND $batch AS edge "
+                    f"MATCH (c:Class {{fqn: edge.src}}), (b:SpringBean {{classFqn: edge.dst}}) "
+                    f"MERGE (c)-[:{rel} {{field: edge.field}}]->(b)",
+                    {"batch": batch}
+                )
+
+        if tests:
+            try:
+                self.db.execute(
+                    "MATCH (t:TestCase)-[:CALLS]->(m:Method) "
+                    "WHERE NOT m:TestCase MERGE (t)-[:TESTS]->(m)"
+                )
+            except Exception as e:
+                logger.warning("Delta derived :TESTS pass failed: %s", e)
+        logger.info("Tests replaced: %d test methods (wing=%s)", len(tests), wing)
 
     @staticmethod
     def _chunks(lst: list, size: int):
