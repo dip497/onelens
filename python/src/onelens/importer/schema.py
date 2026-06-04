@@ -12,6 +12,10 @@ NODE_SCHEMA = {
     "Endpoint": "CREATE INDEX FOR (n:Endpoint) ON (n.id)",
     "Module": "CREATE INDEX FOR (n:Module) ON (n.name)",
     "Annotation": "CREATE INDEX FOR (n:Annotation) ON (n.fqn)",
+    # Cross-stack (frontend) nodes — a Component is one SFC; an HttpCall is one
+    # outbound axios/fetch call site that may resolve to a backend Endpoint.
+    "Component": "CREATE INDEX FOR (n:Component) ON (n.fqn)",
+    "HttpCall": "CREATE INDEX FOR (n:HttpCall) ON (n.id)",
 }
 
 # Full-text search indexes — FalkorDB CALL procedure syntax.
@@ -57,4 +61,8 @@ REL_SCHEMA = {
     "HANDLES": "// Method -[:HANDLES]-> Endpoint",
     # Modules
     "MODULE_DEPENDS": "// Module -[:MODULE_DEPENDS]-> Module (scope)",
+    # Cross-stack (full-stack trace)
+    "CALLS_ENDPOINT": "// HttpCall -[:CALLS_ENDPOINT]-> Endpoint (confidence)",
+    "USES_COMPONENT": "// Component -[:USES_COMPONENT]-> Component",
+    "MAKES_CALL": "// Component -[:MAKES_CALL]-> HttpCall",
 }

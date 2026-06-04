@@ -20,6 +20,8 @@ import logging
 import time
 from typing import Any
 
+from onelens.lang import all_entry_point_annotations
+
 try:
     import networkx as nx
 except ImportError:  # soft dep — importer still works without it
@@ -71,15 +73,21 @@ def compute_method_pagerank(db, graph_name: str | None = None) -> dict[str, floa
         if src and dst:
             G.add_edge(src, dst)
 
-    # Entry points: REST endpoint handlers + @Scheduled + main(). These seed
-    # the personalization vector so importance "flows down" from traffic.
+    # Entry points: REST endpoint handlers + language-specific lifecycle markers
+    # (@Scheduled, @PostConstruct, Android @AndroidEntryPoint, C# [HttpGet], ...).
+    # These seed the personalization vector so importance "flows down" from
+    # traffic. The marker set is the union across all language profiles, so a
+    # mixed-language graph is handled and a pure-Java graph is unchanged (the
+    # extra names simply never match a node).
     ep_rows = db.query(
         "MATCH (m:Method)-[:HANDLES]->(e:Endpoint) RETURN DISTINCT m.fqn AS fqn"
     )
+    entry_annotations = sorted(all_entry_point_annotations())
     scheduled_rows = db.query(
         "MATCH (m:Method)-[:ANNOTATED_WITH]->(a:Annotation) "
-        "WHERE a.name IN ['Scheduled', 'PostConstruct', 'EventListener', 'KafkaListener'] "
-        "RETURN DISTINCT m.fqn AS fqn"
+        "WHERE a.name IN $names "
+        "RETURN DISTINCT m.fqn AS fqn",
+        {"names": entry_annotations},
     )
     entry_points = {r["fqn"] for r in (ep_rows + scheduled_rows) if r.get("fqn")}
 

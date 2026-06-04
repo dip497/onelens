@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from onelens.graph.db import GraphDB
+from onelens.lang import identity
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,9 @@ class DeltaLoader:
             callee = call.get("calleeFqn", "")
             if callee and callee not in upserted_method_fqns:
                 ext_method_fqns.add(callee)
-                if "#" in callee:
-                    ext_class_fqns.add(callee.split("#")[0])
+                cont = identity.container_fqn(callee)
+                if cont and cont != callee:
+                    ext_class_fqns.add(cont)
 
         for edge in upserted.get("inheritance", []):
             parent = edge.get("parentFqn", "")
@@ -143,8 +145,9 @@ class DeltaLoader:
             parent = ov.get("overridesFqn", "")
             if parent and parent not in upserted_method_fqns:
                 ext_method_fqns.add(parent)
-                if "#" in parent:
-                    ext_class_fqns.add(parent.split("#")[0])
+                cont = identity.container_fqn(parent)
+                if cont and cont != parent:
+                    ext_class_fqns.add(cont)
 
         # Batch create external class stubs
         ext_class_items = []
@@ -166,12 +169,11 @@ class DeltaLoader:
         ext_method_items = []
         ext_has_method = []
         for fqn in ext_method_fqns:
-            class_fqn = fqn.split("#")[0] if "#" in fqn else ""
-            name = fqn.split("#")[1].split("(")[0] if "#" in fqn else fqn
-            class_simple = class_fqn.split(".")[-1] if class_fqn else ""
-            if "$" in class_simple:
-                class_simple = class_simple.split("$")[-1]
-            is_constructor = (name == class_simple) if class_fqn else False
+            cont = identity.container_fqn(fqn)
+            has_container = bool(cont) and cont != fqn
+            class_fqn = cont if has_container else ""
+            name = identity.simple_name(fqn) if has_container else fqn
+            is_constructor = identity.is_constructor(fqn) if class_fqn else False
             ext_method_items.append({
                 "fqn": fqn, "name": name, "classFqn": class_fqn,
                 "isCtor": is_constructor,

@@ -22,6 +22,8 @@ from pathlib import Path
 
 from onelens.context.config import OneLensContextConfig, HALL_CODE
 from onelens.context.palace import get_collection
+from onelens.lang import get_profile
+from onelens.lang import identity
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +33,6 @@ BATCH_SIZE = 500  # ChromaDB write batch (embedding is the bottleneck; batch sta
 # Qwen3 max_seq=512 tokens ≈ 2000 chars; leave headroom for the metadata line.
 MAX_BODY_CHARS = 2000
 MAX_JAVADOC_CHARS = 500
-
-# Trivial method patterns — skip these (no semantic value, ~45% of codebase)
-_TRIVIAL_PREFIXES = ("get", "set", "is", "has", "can")
-_TRIVIAL_NAMES = {"toString", "hashCode", "equals", "clone", "finalize"}
 
 
 def _clean_javadoc(raw: str | None) -> str:
@@ -57,26 +55,27 @@ def _clean_javadoc(raw: str | None) -> str:
     return cleaned[:MAX_JAVADOC_CHARS]
 
 
+def _apply_importance(anns: list[str], groups) -> float:
+    """Sum importance-group boosts. Each group adds its score once if ANY of its
+    substrings appears in the node's annotations (see LanguageProfile groups)."""
+    total = 0.0
+    for substrings, boost in groups:
+        if any(sub in a for a in anns for sub in substrings):
+            total += boost
+    return total
+
+
 def _is_trivial_method(method: dict) -> bool:
     """True if method is a getter/setter/toString/hashCode/equals.
 
     These add no semantic value to embeddings but make up ~45% of Java codebases.
-    Skipping them halves indexing time without hurting search quality.
+    Skipping them halves indexing time without hurting search quality. The exact
+    name set and accessor prefixes come from the method's language profile
+    (`method["lang"]`, defaulting to Java).
     """
-    fqn = method.get("fqn", "")
-    # Method name between '#' and '('
-    name = fqn.split("#", 1)[1].split("(", 1)[0] if "#" in fqn else ""
-    if not name:
-        return False
-    if name in _TRIVIAL_NAMES:
-        return True
-    # Small body heuristic: simple getters/setters are usually <= 3 lines
+    name = identity.simple_name(method)
     body_size = method.get("lineEnd", 0) - method.get("lineStart", 0)
-    if body_size <= 3:
-        for prefix in _TRIVIAL_PREFIXES:
-            if name.startswith(prefix) and len(name) > len(prefix) and name[len(prefix)].isupper():
-                return True
-    return False
+    return identity.is_trivial_member(name, body_size, method.get("lang"))
 
 
 class CodeMiner:
@@ -99,6 +98,7 @@ class CodeMiner:
         self._class_annotations = defaultdict(list)
         self._injections = defaultdict(list)  # targetClassFqn -> [injectedClassFqn, ...]
         self._class_info = {}                 # classFqn -> dict
+        self._fqn_lang = {}                   # fqn -> language id (for profile lookup)
 
     def mine(self, export_path: Path) -> dict:
         """Mine the export JSON into ChromaDB. Returns stats dict."""
@@ -150,12 +150,14 @@ class CodeMiner:
             self._call_out[caller].append(callee)
             self._call_in[callee].append(caller)
 
-        # Method → class mapping
+        # Method → class mapping (+ per-node language for profile lookup)
         for method in data.get("methods", []):
             fqn = method["fqn"]
             cls_fqn = method.get("classFqn", "")
             self._method_to_class[fqn] = cls_fqn
             self._class_methods[cls_fqn].append(fqn)
+            if method.get("lang"):
+                self._fqn_lang[fqn] = method["lang"]
 
         # Endpoints
         spring = data.get("spring", {})
@@ -184,15 +186,23 @@ class CodeMiner:
             if target and injected:
                 self._injections[target].append(injected)
 
-        # Class info
+        # Class info (+ per-node language for profile lookup)
         for cls in data.get("classes", []):
             self._class_info[cls["fqn"]] = cls
+            if cls.get("lang"):
+                self._fqn_lang[cls["fqn"]] = cls["lang"]
 
     # ── Importance scoring ────────────────────────────────────────────────
 
     def _compute_importance(self, fqn: str, entity_type: str) -> float:
-        """Score 0.0-1.0 based on fan-in, endpoint exposure, annotations."""
+        """Score 0.0-1.0 based on fan-in, endpoint exposure, annotations.
+
+        Annotation boosts come from the node's language profile (Spring
+        stereotypes for Java, [HttpGet]/Controller for C#, route decorators for
+        Python, ...), so the heuristic travels across languages.
+        """
         score = 0.0
+        profile = get_profile(self._fqn_lang.get(fqn))
 
         if entity_type == "method":
             fan_in = len(self._call_in.get(fqn, []))
@@ -200,12 +210,7 @@ class CodeMiner:
             if fqn in self._handler_to_endpoint:
                 score += 0.3
             anns = self._method_annotations.get(fqn, [])
-            if any("Transactional" in a for a in anns):
-                score += 0.15
-            if any("Scheduled" in a for a in anns):
-                score += 0.1
-            if any("Async" in a for a in anns):
-                score += 0.05
+            score += _apply_importance(anns, profile.importance_method_annotations)
 
         elif entity_type == "class":
             methods = self._class_methods.get(fqn, [])
@@ -215,8 +220,7 @@ class CodeMiner:
             injectors = len(self._injections.get(fqn, []))
             score += min(injectors / 10.0, 0.2)
             anns = self._class_annotations.get(fqn, [])
-            if any("Service" in a or "Controller" in a or "Repository" in a for a in anns):
-                score += 0.1
+            score += _apply_importance(anns, profile.importance_class_annotations)
 
         elif entity_type == "endpoint":
             score += 0.5
@@ -229,30 +233,22 @@ class CodeMiner:
 
     # ── Document formatting ───────────────────────────────────────────────
 
+    # Identity parsing is centralized in onelens.lang.identity. These thin
+    # wrappers preserve the call sites; lang defaults to Java for bare FQNs.
     @staticmethod
     def _short_name(fqn: str) -> str:
         """Extract short class or method name from FQN."""
-        if "#" in fqn:
-            return fqn.split("#")[1].split("(")[0]
-        return fqn.split(".")[-1]
+        return identity.simple_name(fqn)
 
     @staticmethod
     def _short_class(fqn: str) -> str:
         """Extract short class name from FQN."""
-        if "#" in fqn:
-            fqn = fqn.split("#")[0]
-        return fqn.split(".")[-1]
+        return identity.short_class(fqn)
 
     @staticmethod
     def _short_params(fqn: str) -> str:
         """Extract shortened parameter list from method FQN."""
-        if "(" not in fqn:
-            return ""
-        params = fqn.split("(", 1)[1].rstrip(")")
-        if not params:
-            return "()"
-        short = ", ".join(p.split(".")[-1] for p in params.split(","))
-        return f"({short})"
+        return identity.short_params(fqn)
 
     def _format_method_document(self, method: dict) -> str:
         """Build embedding text for a method drawer.
