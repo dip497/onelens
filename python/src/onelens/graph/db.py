@@ -11,7 +11,11 @@ from rich.console import Console
 from rich.table import Table
 
 # Node types used across all backends
-NODE_TYPES = ["Class", "Method", "Field", "SpringBean", "Endpoint", "Module", "Annotation"]
+NODE_TYPES = [
+    "Class", "Method", "Field", "SpringBean", "Endpoint", "Module", "Annotation",
+    # Cross-stack (frontend) node types
+    "Component", "HttpCall",
+]
 
 
 class GraphDB(ABC):

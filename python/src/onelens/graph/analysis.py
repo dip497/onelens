@@ -136,6 +136,65 @@ def get_reverse_trace(db: GraphDB, method_fqn: str, depth: int = 5,
     return _compact_trace(results, include_external)
 
 
+# ── Cross-stack (full-stack trace) ────────────────────────────────────────────
+
+
+def get_endpoint_consumers(db: GraphDB, endpoint_id: str) -> list[dict]:
+    """Frontend components that call a backend endpoint (via CALLS_ENDPOINT).
+
+    `endpoint_id` is the canonical `<METHOD>:<path>` id (e.g. `PATCH:/users/{id}`).
+    Answers "which Vue components break if I change this endpoint?".
+    """
+    return db.query(
+        """
+        MATCH (h:HttpCall)-[r:CALLS_ENDPOINT]->(e:Endpoint {id: $id})
+        OPTIONAL MATCH (c:Component)-[:MAKES_CALL]->(h)
+        RETURN DISTINCT c.fqn AS component, c.name AS componentName,
+               h.httpMethod AS httpMethod, h.path AS path,
+               h.filePath AS file, h.lineStart AS line,
+               r.confidence AS confidence, r.match AS match
+        ORDER BY component, line
+        """,
+        {"id": endpoint_id},
+    )
+
+
+def get_fullstack_trace(db: GraphDB, component_fqn: str, depth: int = 5,
+                        include_external: bool = False) -> dict:
+    """Full-stack trace from a Vue component down into backend code.
+
+    Component →(MAKES_CALL)→ HttpCall →(CALLS_ENDPOINT)→ Endpoint
+              →(HANDLES⁻¹)→ handler Method →(CALLS*)→ downstream backend flow.
+
+    Returns one entry per resolved endpoint with its backend execution trace.
+    """
+    links = db.query(
+        """
+        MATCH (c:Component {fqn: $fqn})-[:MAKES_CALL]->(h:HttpCall)
+        OPTIONAL MATCH (h)-[r:CALLS_ENDPOINT]->(e:Endpoint)
+        OPTIONAL MATCH (handler:Method)-[:HANDLES]->(e)
+        RETURN h.httpMethod AS httpMethod, h.path AS path, h.lineStart AS line,
+               e.id AS endpoint, handler.fqn AS handlerFqn
+        ORDER BY line
+        """,
+        {"fqn": component_fqn},
+    )
+    calls = []
+    for ln in links:
+        entry = {
+            "call": f"{ln.get('httpMethod', '')} {ln.get('path', '')}".strip(),
+            "line": ln.get("line", 0),
+            "endpoint": ln.get("endpoint"),
+            "handler": ln.get("handlerFqn"),
+            "backend_trace": [],
+        }
+        handler = ln.get("handlerFqn")
+        if handler:
+            entry["backend_trace"] = get_flow_trace(db, handler, depth, include_external)
+        calls.append(entry)
+    return {"component": component_fqn, "calls": calls}
+
+
 def _expand_with_overrides(db: GraphDB, fqns: set[str]) -> set[str]:
     """Given a set of method FQNs, return FQNs UNION the interface/abstract methods
     they override (and transitively — override chains can be multi-level).

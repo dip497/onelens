@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from onelens.graph.db import GraphDB
 from onelens.importer.schema import NODE_SCHEMA, FULLTEXT_SCHEMA
+from onelens.lang import identity
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +66,14 @@ class GraphLoader:
             classes = data.get("classes", [])
             self._batch_nodes(progress, "Classes", classes, "Class", "fqn", [
                 "name", "kind", "filePath", "lineStart", "lineEnd",
-                "packageName", "enclosingClass", "superClass",
+                "packageName", "enclosingClass", "superClass", "lang",
             ])
 
             methods = data.get("methods", [])
             self._batch_nodes(progress, "Methods", methods, "Method", "fqn", [
                 "name", "classFqn", "returnType", "isConstructor",
                 "filePath", "lineStart", "lineEnd",
-                "body", "javadoc",
+                "body", "javadoc", "lang",
             ])
 
             fields = data.get("fields", [])
@@ -101,7 +102,13 @@ class GraphLoader:
                 self._batch_nodes(progress, "Spring Beans", beans, "SpringBean", "name", [
                     "classFqn", "scope", "profile", "type",
                 ])
-                endpoints = spring.get("endpoints", [])
+
+            # Endpoints — language-neutral. Spring emits them under `spring.endpoints`;
+            # other backends (Go/Python/.NET/Ktor extractors) emit a top-level
+            # `endpoints` list of the same shape. Both feed the same Endpoint nodes
+            # so cross-stack linking works regardless of backend framework.
+            endpoints = list((spring or {}).get("endpoints", [])) + list(data.get("endpoints", []))
+            if endpoints:
                 for ep in endpoints:
                     if "id" not in ep:
                         ep["id"] = f"{ep.get('httpMethod', 'GET')}:{ep.get('path', '/')}"
@@ -118,14 +125,16 @@ class GraphLoader:
             ext_class_fqns = set()
             ext_method_fqns = set()
 
-            # From call graph: callee methods not in project
+            # From call graph: callee methods not in project. The owning
+            # container comes from identity (Java: text before '#'), so the
+            # parsing rule is language-driven, not hardcoded here.
             for c in data.get("callGraph", []):
                 callee = c.get("calleeFqn", "")
                 if callee and callee not in project_method_fqns:
                     ext_method_fqns.add(callee)
-                    # Extract class FQN from method FQN (before #)
-                    if "#" in callee:
-                        ext_class_fqns.add(callee.split("#")[0])
+                    cont = identity.container_fqn(callee)
+                    if cont and cont != callee:
+                        ext_class_fqns.add(cont)
 
             # From inheritance: parent classes not in project
             for e in data.get("inheritance", []):
@@ -138,8 +147,9 @@ class GraphLoader:
                 parent = o.get("overridesFqn", "")
                 if parent and parent not in project_method_fqns:
                     ext_method_fqns.add(parent)
-                    if "#" in parent:
-                        ext_class_fqns.add(parent.split("#")[0])
+                    cont = identity.container_fqn(parent)
+                    if cont and cont != parent:
+                        ext_class_fqns.add(cont)
 
             # Remove any external classes that are actually project classes
             ext_class_fqns -= project_class_fqns
@@ -166,13 +176,13 @@ class GraphLoader:
             ext_method_nodes = []
             implicit_method_nodes = []
             for fqn in ext_method_fqns:
-                class_fqn = fqn.split("#")[0] if "#" in fqn else ""
-                name = fqn.split("#")[1].split("(")[0] if "#" in fqn else fqn
-                # Handle inner classes: com.example.Outer$Inner → constructor name is "Inner"
-                class_simple = class_fqn.split(".")[-1] if class_fqn else ""
-                if "$" in class_simple:
-                    class_simple = class_simple.split("$")[-1]
-                is_constructor = (name == class_simple) if class_fqn else False
+                cont = identity.container_fqn(fqn)
+                has_container = bool(cont) and cont != fqn
+                class_fqn = cont if has_container else ""
+                name = identity.simple_name(fqn) if has_container else fqn
+                # Constructor detection (incl. Java inner-class `Outer$Inner`) is
+                # centralized in identity and driven by the language profile.
+                is_constructor = identity.is_constructor(fqn) if class_fqn else False
                 is_project_class = class_fqn in project_class_fqns
                 node = {
                     "fqn": fqn, "name": name, "classFqn": class_fqn,
@@ -241,19 +251,46 @@ class GraphLoader:
                     self._batch_edges(progress, f"ANNOTATED_WITH ({label})", edges, label, "fqn", "Annotation", "fqn",
                                       rel_type="ANNOTATED_WITH")
 
-            # Spring edges
-            if spring:
-                handles = [{"src": ep["handlerMethodFqn"],
-                            "dst": f"{ep.get('httpMethod', 'GET')}:{ep.get('path', '/')}"}
-                           for ep in spring.get("endpoints", [])]
-                self._batch_edges(progress, "HANDLES", handles, "Method", "fqn", "Endpoint", "id")
+            # HANDLES (Method → Endpoint) — language-neutral, from every endpoint
+            # that names a handler method (Spring or any other backend extractor).
+            handles = [{"src": ep["handlerMethodFqn"],
+                        "dst": ep.get("id") or f"{ep.get('httpMethod', 'GET')}:{ep.get('path', '/')}"}
+                       for ep in endpoints if ep.get("handlerMethodFqn")]
+            self._batch_edges(progress, "HANDLES", handles, "Method", "fqn", "Endpoint", "id")
 
+            # Spring-only edges
+            if spring:
                 injects = [{"src": inj["targetClassFqn"], "dst": inj["injectedClassFqn"],
                             "field": inj.get("targetFieldOrParam", ""), "type": inj.get("injectionType", "")}
                            for inj in spring.get("injections", [])]
                 self._batch_edges_with_props(progress, "INJECTS", injects,
                                              "SpringBean", "classFqn", "SpringBean", "classFqn",
                                              ["field", "type"])
+
+            # --- CROSS-STACK (frontend) NODES + EDGES ---
+            # Vue/TS extractors contribute Component + HttpCall nodes. These can
+            # arrive in the same import (full multi-stack export) or be merged in
+            # from a separate frontend extractor run sharing the graph name.
+            components = data.get("components", [])
+            self._batch_nodes(progress, "Components", components, "Component", "fqn", [
+                "name", "filePath", "lineStart", "lineEnd", "lang",
+            ])
+
+            http_calls = data.get("httpCalls", [])
+            self._batch_nodes(progress, "HTTP Calls", http_calls, "HttpCall", "id", [
+                "componentFqn", "httpMethod", "path", "filePath", "lineStart", "lang",
+            ])
+
+            # MAKES_CALL (Component → HttpCall) — derived from each call's owner.
+            makes_call = [{"src": h["componentFqn"], "dst": h["id"]}
+                          for h in http_calls if h.get("componentFqn")]
+            self._batch_edges(progress, "MAKES_CALL", makes_call,
+                              "Component", "fqn", "HttpCall", "id", rel_type="MAKES_CALL")
+
+            # USES_COMPONENT (Component → Component)
+            uses = data.get("componentEdges", [])
+            self._batch_edges(progress, "USES_COMPONENT", uses,
+                              "Component", "fqn", "Component", "fqn", rel_type="USES_COMPONENT")
 
         # Post-import phase: compute PageRank on the call graph and write
         # it back as Method.pagerank + Class.pagerank. One-time cost (~5-15s
@@ -274,6 +311,23 @@ class GraphLoader:
         except Exception as e:
             logger.warning("PageRank computation failed: %s", e)
             stats["pagerank"] = {"error": str(e)}
+
+        # Cross-stack phase: link frontend HttpCall sites to backend Endpoints
+        # via CALLS_ENDPOINT. No-op (cheap) when the graph has no HttpCall nodes.
+        try:
+            from onelens.importer import cross_stack as _cs
+
+            cs_stats = _cs.apply_cross_stack_links(self.db)
+            stats.update(cs_stats)
+            cs = cs_stats.get("cross_stack")
+            if isinstance(cs, dict) and cs.get("linked"):
+                print(
+                    f"Cross-stack: {cs['linked']} frontend→endpoint links "
+                    f"({cs['exact']} exact, {cs['fuzzy']} fuzzy, {cs['unmatched']} unmatched)"
+                )
+        except Exception as e:
+            logger.warning("Cross-stack linking failed: %s", e)
+            stats["cross_stack"] = {"error": str(e)}
 
         elapsed = time.time() - start
         stats["importDurationSec"] = round(elapsed, 1)
