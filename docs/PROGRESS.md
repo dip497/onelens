@@ -464,7 +464,9 @@ Multi-reviewer audit (delta-correctness, delta-UX, graph-richness gap-finder). F
 | E2 | Standalone Python extractor (stdlib `ast`) — emits universal JSON; existing `GraphLoader` imports it; verified on OneLens's own source (104 cls / 370 mth / 312 calls, GraphDB subclasses + PageRank correct) | ✅ | `tools/extractors/python_ast_extractor.py` |
 | E3 | Go reference extractor (`go/ast`) against the same contract | ✅ (reference; needs go/types for FQN call resolution) | `tools/extractors/go/main.go` |
 | E4 | Plugin two-SPI split — `LanguageExtractor` ⊗ `FrameworkAdapter`; honor opaque `CollectorOutput` (kill `ExportService` downcast); relocate Spring/JPA collectors under `framework/` | ⬜ | design §3 step 2-3 |
-| E5 | Importer `SubdocLoader` registry — extract spring/jpa/tests/vue3/core into loaders shared by full + delta; kills the drift-bug class | ⬜ | design §3 step 1 (highest value) |
+| E5 | Importer `SubdocLoader` registry — extract spring/jpa/tests/vue3/core into loaders shared by full + delta; kills the drift-bug class | 🟡 | staged; gate `python/scripts/parity_check.py` (19 checks) |
+| E5.0 | Parity gate — synthetic all-subsystem full+delta import, 19 invariants | ✅ | `python/scripts/parity_check.py` |
+| E5.1 | Stage 1 — `graph_writer.py`: shared batch primitives (`GraphWriter`) + `_enrich_method`/`_normalize_type` helpers out of loader; delta re-points off loader. Behavior-preserving, 19/19 green. Implemented by delegated Sonnet agent against `docs/design/E5-stage1-graph-writer.md`. | ✅ | `importer/graph_writer.py` |
 
 ## Open regression / verification items
 
