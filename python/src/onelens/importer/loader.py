@@ -33,6 +33,7 @@ from onelens.importer.graph_writer import (
 )
 from onelens.importer.loaders.annotations import AnnotationLoader
 from onelens.importer.loaders.jpa import JpaLoader
+from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
 
 
@@ -171,36 +172,7 @@ class GraphLoader:
                     f" enforced — falling back to MERGE (duplicates upsert silently).",
                     flush=True,
                 )
-            spring = data.get("spring")
-            if spring:
-                beans = []
-                for b in spring.get("beans", []):
-                    b2 = dict(b, wing=graph_wing)
-                    # Stringify activeProfiles so FalkorDB stores it as a scalar;
-                    # arrays are supported but inconsistent across client drivers.
-                    b2["activeProfiles"] = ",".join(b.get("activeProfiles") or [])
-                    b2["primary"] = bool(b.get("primary", False))
-                    b2["source"] = b.get("source") or "annotation"
-                    b2["factoryMethodFqn"] = b.get("factoryMethodFqn") or ""
-                    beans.append(b2)
-                self._batch_nodes(progress, "Spring Beans", beans, "SpringBean", "name", [
-                    "classFqn", "scope", "profile", "type", "wing",
-                    "primary", "source", "factoryMethodFqn", "activeProfiles",
-                ])
-                endpoints = spring.get("endpoints", [])
-                for ep in endpoints:
-                    if "id" not in ep:
-                        ep["id"] = f"{ep.get('httpMethod', 'GET')}:{ep.get('path', '/')}"
-                    ep["wing"] = graph_wing
-                self._batch_nodes(progress, "Endpoints", endpoints, "Endpoint", "id", [
-                    "path", "httpMethod", "controllerFqn", "handlerMethodFqn", "wing",
-                ])
-
-                autoconfigs = [dict(ac, wing=graph_wing) for ac in spring.get("autoConfigs", [])]
-                if autoconfigs:
-                    self._batch_nodes(progress, "Auto-Configs", autoconfigs,
-                                      "SpringAutoConfig", "classFqn",
-                                      ["source", "sourceFile", "wing"])
+            SpringLoader().load_full(self.writer, progress, data, graph_wing)
 
             # --- APPS + PACKAGES (Phase C2) ---
             # Apps = one per @SpringBootApplication / Vue root. Packages mirror the
@@ -437,35 +409,6 @@ class GraphLoader:
             # in one call so nodes exist before edges). Runs here, after base
             # Class/Method/Field nodes exist, to preserve edge-resolution ordering.
             AnnotationLoader().load_full(self.writer, progress, data, graph_wing)
-
-            # Spring edges
-            if spring:
-                handles = [{"src": ep["handlerMethodFqn"],
-                            "dst": f"{ep.get('httpMethod', 'GET')}:{ep.get('path', '/')}"}
-                           for ep in spring.get("endpoints", [])]
-                self._batch_edges(progress, "HANDLES", handles, "Method", "fqn", "Endpoint", "id")
-
-                injects = [{"src": inj["targetClassFqn"], "dst": inj["injectedClassFqn"],
-                            "field": inj.get("targetFieldOrParam", ""),
-                            "type": inj.get("injectionType", ""),
-                            "qualifier": inj.get("qualifier") or ""}
-                           for inj in spring.get("injections", [])]
-                self._batch_edges_with_props(progress, "INJECTS", injects,
-                                             "SpringBean", "classFqn", "SpringBean", "classFqn",
-                                             ["field", "type", "qualifier"])
-
-                # Class ↔ SpringBean bridge. We can't dual-label here — @Bean
-                # factory methods produce beans without a 1:1 class identity (the
-                # class is the bean's return type, not a registration marker on
-                # itself). An explicit edge keeps the two concepts separate while
-                # still letting `MATCH (c:Class {fqn:$x})-[:REGISTERED_AS]->(:SpringBean)`
-                # answer "is this class exposed as a bean?" in one hop.
-                reg_as = [{"src": b["classFqn"], "dst": b["name"]}
-                          for b in spring.get("beans", [])
-                          if b.get("classFqn") and b.get("name")]
-                if reg_as:
-                    self._batch_edges(progress, "REGISTERED_AS", reg_as,
-                                      "Class", "fqn", "SpringBean", "name")
 
             # --- APP / PACKAGE EDGES (Phase C2) ---
             if packages:
