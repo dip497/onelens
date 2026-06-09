@@ -46,7 +46,13 @@ class OneLensToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val cm = toolWindow.contentManager
-        val status = cm.factory.createContent(OneLensMainPanel(project), "Status", false)
+        val mainPanel = OneLensMainPanel(project)
+        val status = cm.factory.createContent(mainPanel, "Status", false)
+        // Tie the panel's lifecycle to the Content so its repeating Swing timers
+        // (and the ConsoleView) are torn down when the tool window closes.
+        // Without this each open leaks a 5 s timer that keeps spawning
+        // nvidia-smi subprocesses against a detached panel forever.
+        status.setDisposer(mainPanel)
         val snapshots = cm.factory.createContent(OneLensSnapshotsPanel(project), "Snapshots", false)
         cm.addContent(status)
         cm.addContent(snapshots)
@@ -54,7 +60,8 @@ class OneLensToolWindowFactory : ToolWindowFactory, DumbAware {
     }
 }
 
-private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMainPanel>(BorderLayout()) {
+private class OneLensMainPanel(private val project: Project) :
+    JBPanel<OneLensMainPanel>(BorderLayout()), com.intellij.openapi.Disposable {
 
     private val statusLabel = JBLabel("OneLens: initializing…")
     private val falkordbLabel = JBLabel(" ")
@@ -68,6 +75,8 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
     private val resourcesLabel = JBLabel(" ")
     private val lastSyncLabel = JBLabel(" ")
     @Volatile private var lastSyncTs: Long? = null
+    private var tickTimer: javax.swing.Timer? = null
+    private var pollTimer: javax.swing.Timer? = null
     private val console: ConsoleView = TextConsoleBuilderFactory.getInstance()
         .createBuilder(project)
         .console
@@ -107,8 +116,9 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
 
         // Tick the "Last sync: … ago" label every 30 s so it doesn't stay
         // stale at "18h ago" for a day. Only re-formats the cached timestamp —
-        // no status poll, no git shell-out.
-        javax.swing.Timer(30_000) {
+        // no status poll, no git shell-out. Held as a field so dispose() can
+        // stop it (see leak note in createToolWindowContent).
+        tickTimer = javax.swing.Timer(30_000) {
             val ts = lastSyncTs ?: return@Timer
             lastSyncLabel.text = if (lastSyncInfo.isNotEmpty())
                 "$lastSyncInfo   (file ${fmtAgo(ts)})"
@@ -119,10 +129,16 @@ private class OneLensMainPanel(private val project: Project) : JBPanel<OneLensMa
         // Semantic line refresh: every 5 s read MCP state + shell `nvidia-smi`
         // (if available) to show live VRAM. Coalesces when MCP is down so the
         // poller does no work on structural-only projects.
-        javax.swing.Timer(5_000) {
+        pollTimer = javax.swing.Timer(5_000) {
             updateSemanticLine()
         }.apply { isRepeats = true; start() }
         updateSemanticLine()
+    }
+
+    override fun dispose() {
+        tickTimer?.stop()
+        pollTimer?.stop()
+        com.intellij.openapi.util.Disposer.dispose(console)
     }
 
     private fun updateSemanticLine() {
