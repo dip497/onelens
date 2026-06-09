@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
 from onelens.graph.db import GraphDB
 from onelens.importer.graph_writer import GraphWriter
 from onelens.importer.loaders.annotations import AnnotationLoader
+from onelens.importer.loaders.tests import TestLoader
 
 logger = logging.getLogger(__name__)
 
@@ -474,7 +475,7 @@ class DeltaLoader:
             self._replace_jpa(jpa, wing=graph_wing)
 
         if "tests" in data or "mockBeans" in data or "spyBeans" in data:
-            self._replace_tests(data, wing=graph_wing)
+            TestLoader().apply_delta(self.writer, data, graph_wing)
 
         stats = data.get("stats", {})
 
@@ -777,71 +778,6 @@ class DeltaLoader:
             """, {"batch": batch})
         logger.info("JPA replaced: %d entities, %d repos (wing=%s)",
                     len(ent_items), len(repo_items), wing)
-
-    def _replace_tests(self, data: dict, wing: str = "default") -> None:
-        """Strip + re-apply :TestCase dual-label + MOCKS/SPIES/TESTS edges.
-
-        Parity with loader.py::_load_tests. A modified test class DETACH-deletes
-        and re-MERGEs as a plain :Method, losing :TestCase + every test edge;
-        and _replace_spring wipes SpringBeans, destroying MOCKS/SPIES targets.
-        Full strip + re-derive guarantees parity. Must run after Spring replace
-        (MOCKS→SpringBean) and the CALLS upsert (TESTS derives from CALLS).
-        """
-        tests = data.get("tests", []) or []
-        mock_beans = data.get("mockBeans", []) or []
-        spy_beans = data.get("spyBeans", []) or []
-
-        self.db.execute("MATCH (m:TestCase) REMOVE m:TestCase")
-        self.db.execute("MATCH ()-[r:MOCKS|SPIES|TESTS]->() DELETE r")
-
-        if tests:
-            prepped = [{
-                "methodFqn": t.get("methodFqn", ""), "testClass": t.get("testClass", ""),
-                "testKind": t.get("testKind", "unknown"),
-                "testFramework": t.get("testFramework", "unknown"),
-                "tags": ",".join(t.get("tags") or []),
-                "disabled": bool(t.get("disabled", False)),
-                "activeProfiles": ",".join(t.get("activeProfiles") or []),
-                "springBootApp": t.get("springBootApp") or "",
-                "usesMockito": bool(t.get("usesMockito", False)),
-                "usesTestcontainers": bool(t.get("usesTestcontainers", False)),
-                "displayName": t.get("displayName") or "", "wing": wing,
-            } for t in tests if t.get("methodFqn")]
-            for batch in self._chunks(prepped, BATCH_SIZE):
-                self.db.execute("""
-                    UNWIND $batch AS item
-                    MATCH (m:Method {fqn: item.methodFqn})
-                    SET m:TestCase, m.testClass = item.testClass,
-                        m.testKind = item.testKind, m.testFramework = item.testFramework,
-                        m.tags = item.tags, m.disabled = item.disabled,
-                        m.activeProfiles = item.activeProfiles,
-                        m.springBootApp = item.springBootApp,
-                        m.usesMockito = item.usesMockito,
-                        m.usesTestcontainers = item.usesTestcontainers,
-                        m.displayName = item.displayName, m.wing = item.wing
-                """, {"batch": batch})
-
-        for rel, bindings in (("MOCKS", mock_beans), ("SPIES", spy_beans)):
-            items = [{"src": b["testClassFqn"], "dst": b["beanClassFqn"],
-                      "field": b.get("fieldName", "")}
-                     for b in bindings if b.get("testClassFqn") and b.get("beanClassFqn")]
-            for batch in self._chunks(items, BATCH_SIZE):
-                self.db.execute(
-                    f"UNWIND $batch AS edge "
-                    f"MATCH (c:Class {{fqn: edge.src}}), (b:SpringBean {{classFqn: edge.dst}}) "
-                    f"MERGE (c)-[:{rel} {{field: edge.field}}]->(b)",
-                    {"batch": batch}
-                )
-
-        if tests:
-            try:
-                self.db.execute(
-                    "MATCH (t:TestCase)-[:CALLS]->(m:Method) "
-                    "WHERE NOT m:TestCase MERGE (t)-[:TESTS]->(m)"
-                )
-            except Exception as e:
-                logger.warning("Delta derived :TESTS pass failed: %s", e)
-        logger.info("Tests replaced: %d test methods (wing=%s)", len(tests), wing)
 
     @staticmethod
     def _chunks(lst: list, size: int):

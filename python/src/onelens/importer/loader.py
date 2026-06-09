@@ -32,6 +32,7 @@ from onelens.importer.graph_writer import (
     _enrich_method,
 )
 from onelens.importer.loaders.annotations import AnnotationLoader
+from onelens.importer.loaders.tests import TestLoader
 
 
 class GraphLoader:
@@ -618,7 +619,7 @@ class GraphLoader:
             # pass through unchanged: `data.get("vue3")` is None.
             # Tests (Phase Q.code) — dual-label :Method:TestCase + MOCKS/SPIES
             # edges + derived :TESTS edges from direct CALLS.
-            self._load_tests(progress, data, graph_wing)
+            TestLoader().load_full(self.writer, progress, data, graph_wing)
 
             # SQL surface (Phase C6) — migrations + custom queries. Opt-in via
             # `sql:` section of onelens.workspace.yaml (auto-detected Flyway is
@@ -1065,102 +1066,6 @@ class GraphLoader:
             logger.info("Vue 3 bridge pass: %s", bridge_stats)
         except Exception as e:
             logger.warning("Vue 3 bridge pass failed: %s", e)
-
-    def _load_tests(self, progress, data: dict, graph_wing: str):
-        """
-        Phase Q.code — tests as dual-label :Method:TestCase.
-
-        Three things in order:
-          1. Dual-label each test method by methodFqn and set its test-specific
-             props (testKind, tags, disabled, …).
-          2. Emit `(TestCase)-[:MOCKS]->(SpringBean)` / `-[:SPIES]->` edges from
-             `@MockBean` / `@SpyBean` field bindings. Match SpringBean by
-             classFqn (the target type).
-          3. Derive `(TestCase)-[:TESTS]->(Method)` edges from direct CALLS
-             where the target is NOT itself a TestCase. Depth-1 only — gets
-             the production method the test directly invokes.
-
-        If the export carries no tests, this is a no-op. Safe to call
-        unconditionally.
-        """
-        tests = data.get("tests", []) or []
-        mock_beans = data.get("mockBeans", []) or []
-        spy_beans = data.get("spyBeans", []) or []
-
-        if not tests and not mock_beans and not spy_beans:
-            return
-
-        if tests:
-            # Stringify list props — FalkorDB stores them fine, but comma-joined
-            # stays queryable via CONTAINS for skill-style patterns.
-            prepped = []
-            for t in tests:
-                prepped.append({
-                    "methodFqn": t.get("methodFqn", ""),
-                    "testClass": t.get("testClass", ""),
-                    "testKind": t.get("testKind", "unknown"),
-                    "testFramework": t.get("testFramework", "unknown"),
-                    "tags": ",".join(t.get("tags") or []),
-                    "disabled": bool(t.get("disabled", False)),
-                    "activeProfiles": ",".join(t.get("activeProfiles") or []),
-                    "springBootApp": t.get("springBootApp") or "",
-                    "usesMockito": bool(t.get("usesMockito", False)),
-                    "usesTestcontainers": bool(t.get("usesTestcontainers", False)),
-                    "displayName": t.get("displayName") or "",
-                    "wing": graph_wing,
-                })
-            self._batch_add_label(
-                progress, "Tests", prepped,
-                base_label="Method", base_pk="fqn", pk_field="methodFqn",
-                add_label="TestCase",
-                props=["testClass", "testKind", "testFramework", "tags",
-                       "disabled", "activeProfiles", "springBootApp",
-                       "usesMockito", "usesTestcontainers", "displayName",
-                       "wing"],
-            )
-
-        # MOCKS / SPIES: testClassFqn → beanClassFqn. Source is any method on
-        # the test class that we labelled as :TestCase above; match by its
-        # enclosing class. Easier: emit edge from the test CLASS → bean CLASS
-        # via a lifted pattern — every TestCase on that class gets reach via
-        # 1-hop pattern `(t:TestCase)<-[:HAS_METHOD]-(c:Class)-[:MOCKS]->(bean)`.
-        # But skill ergonomics want `(t:TestCase)-[:MOCKS]->`. So lift:
-        # emit `(testMethod)-[:MOCKS]->(bean)` for every test method in the class.
-        # That blows up edges × methods. Pragmatic: emit on Class →
-        # `MATCH (c:Class)-[:MOCKS]->(b:SpringBean)` — cheap, class-scoped.
-        if mock_beans:
-            mocks = [{"src": b["testClassFqn"], "dst": b["beanClassFqn"],
-                      "field": b.get("fieldName", "")}
-                     for b in mock_beans if b.get("testClassFqn") and b.get("beanClassFqn")]
-            self._batch_edges_with_props(
-                progress, "MOCKS", mocks,
-                "Class", "fqn", "SpringBean", "classFqn",
-                ["field"],
-            )
-
-        if spy_beans:
-            spies = [{"src": b["testClassFqn"], "dst": b["beanClassFqn"],
-                      "field": b.get("fieldName", "")}
-                     for b in spy_beans if b.get("testClassFqn") and b.get("beanClassFqn")]
-            self._batch_edges_with_props(
-                progress, "SPIES", spies,
-                "Class", "fqn", "SpringBean", "classFqn",
-                ["field"],
-            )
-
-        # Derived :TESTS edge — single Cypher pass. Direct CALLS where target
-        # isn't itself a test. Matches how users ask "what does this test
-        # exercise" without forcing a transitive traversal at query time.
-        if tests:
-            try:
-                self.db.execute(
-                    "MATCH (t:TestCase)-[:CALLS]->(m:Method) "
-                    "WHERE NOT m:TestCase "
-                    "MERGE (t)-[:TESTS]->(m)"
-                )
-                logger.info("Derived :TESTS edges from direct CALLS")
-            except Exception as e:
-                logger.warning("Derived :TESTS pass failed: %s", e)
 
     def _load_sql(self, progress, workspace_header: dict, graph_wing: str):
         """
