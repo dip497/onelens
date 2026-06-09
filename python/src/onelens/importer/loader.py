@@ -32,6 +32,7 @@ from onelens.importer.graph_writer import (
     _enrich_method,
 )
 from onelens.importer.loaders.annotations import AnnotationLoader
+from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.tests import TestLoader
 
 
@@ -218,60 +219,7 @@ class GraphLoader:
                     "name", "parentId", "appId", "wing",
                 ])
 
-            jpa = data.get("jpa")
-            if jpa:
-                entities = [dict(e, wing=graph_wing) for e in jpa.get("entities", [])]
-                if entities:
-                    # Dual-label: a JpaEntity IS a Class. Tag the existing Class
-                    # node with :JpaEntity + the JPA-specific props. Avoids a
-                    # duplicate node per @Entity class (was 748 extra nodes on
-                    # myapp) and lets queries use either label.
-                    self._batch_add_label(progress, "JPA Entities", entities,
-                                      base_label="Class", base_pk="fqn",
-                                      pk_field="classFqn",
-                                      add_label="JpaEntity",
-                                      props=["tableName", "schema", "wing"])
-                    # Flatten columns into their own nodes so Cypher can query by
-                    # column name / nullability / relation. ID format:
-                    #   column:<entity-fqn>#<field-name>
-                    # Dedupe on fieldFqn in case the collector ever re-emits a
-                    # parent's column via inheritance (belt-and-suspenders — the
-                    # JpaCollector now uses `psiClass.fields` not `allFields`).
-                    columns = []
-                    seen_cols = set()
-                    for e in entities:
-                        for col in e.get("columns", []):
-                            key = col.get("fieldFqn", "")
-                            if not key or key in seen_cols:
-                                continue
-                            seen_cols.add(key)
-                            columns.append({
-                                "fieldFqn": col["fieldFqn"],
-                                "columnName": col.get("columnName", ""),
-                                "nullable": bool(col.get("nullable", True)),
-                                "unique": bool(col.get("unique", False)),
-                                "relation": col.get("relation") or "",
-                                "targetEntityFqn": col.get("targetEntityFqn") or "",
-                                "wing": graph_wing,
-                            })
-                    if columns:
-                        # Dual-label: a JpaColumn IS a Field. MemberCollector
-                        # already emits the Field node with the same fqn.
-                        self._batch_add_label(progress, "JPA Columns", columns,
-                                          base_label="Field", base_pk="fqn",
-                                          pk_field="fieldFqn",
-                                          add_label="JpaColumn",
-                                          props=["columnName", "nullable", "unique",
-                                                 "relation", "targetEntityFqn", "wing"])
-
-                repos = [dict(r, wing=graph_wing) for r in jpa.get("repositories", [])]
-                if repos:
-                    # Dual-label: a JpaRepository IS a Class (interface).
-                    self._batch_add_label(progress, "JPA Repositories", repos,
-                                      base_label="Class", base_pk="fqn",
-                                      pk_field="classFqn",
-                                      add_label="JpaRepository",
-                                      props=["entityFqn", "wing"])
+            JpaLoader().load_full(self.writer, progress, data, graph_wing)
 
             # --- EXTERNAL STUB NODES ---
             # Create stub nodes for external (library) classes/methods referenced in edges.
@@ -518,67 +466,6 @@ class GraphLoader:
                 if reg_as:
                     self._batch_edges(progress, "REGISTERED_AS", reg_as,
                                       "Class", "fqn", "SpringBean", "name")
-
-            if jpa:
-                # HAS_COLUMN: JpaEntity → JpaColumn. Edge source = entity classFqn,
-                # target = column fieldFqn (already unique by entity + field).
-                has_column = []
-                seen_hc = set()
-                for e in jpa.get("entities", []):
-                    for col in e.get("columns", []):
-                        key = (e["classFqn"], col.get("fieldFqn", ""))
-                        if not key[1] or key in seen_hc:
-                            continue
-                        seen_hc.add(key)
-                        has_column.append({"src": e["classFqn"], "dst": col["fieldFqn"]})
-                if has_column:
-                    # After dual-labeling, JpaEntity nodes are Class nodes keyed by
-                    # `fqn` and JpaColumn nodes are Field nodes keyed by `fqn`.
-                    self._batch_edges(progress, "HAS_COLUMN", has_column,
-                                      "JpaEntity", "fqn", "JpaColumn", "fqn")
-
-                # RELATES_TO: JpaEntity → JpaEntity with relation type on the edge.
-                relates = []
-                for e in jpa.get("entities", []):
-                    for col in e.get("columns", []):
-                        target = col.get("targetEntityFqn")
-                        rel = col.get("relation")
-                        if target and rel:
-                            relates.append({
-                                "src": e["classFqn"], "dst": target,
-                                "relation": rel,
-                                "field": col["fieldFqn"].split("#", 1)[-1] if "#" in col["fieldFqn"] else "",
-                            })
-                if relates:
-                    self._batch_edges_with_props(progress, "RELATES_TO", relates,
-                                                 "JpaEntity", "fqn",
-                                                 "JpaEntity", "fqn",
-                                                 ["relation", "field"])
-
-                # REPOSITORY_FOR: JpaRepository → JpaEntity
-                repo_for = [{"src": r["classFqn"], "dst": r["entityFqn"]}
-                            for r in jpa.get("repositories", [])
-                            if r.get("entityFqn")]
-                if repo_for:
-                    self._batch_edges(progress, "REPOSITORY_FOR", repo_for,
-                                      "JpaRepository", "fqn",
-                                      "JpaEntity", "fqn")
-
-                # QUERIES: JpaRepository → Method (derived-query methods). The Method
-                # node already exists from MemberCollector — we just wire the edge.
-                queries = []
-                for r in jpa.get("repositories", []):
-                    for q in r.get("derivedQueries", []):
-                        queries.append({
-                            "src": r["classFqn"], "dst": q["methodFqn"],
-                            "methodName": q.get("methodName", ""),
-                            "kind": q.get("kind", "derived"),
-                        })
-                if queries:
-                    self._batch_edges_with_props(progress, "QUERIES", queries,
-                                                 "JpaRepository", "fqn",
-                                                 "Method", "fqn",
-                                                 ["methodName", "kind"])
 
             # --- APP / PACKAGE EDGES (Phase C2) ---
             if packages:
