@@ -165,13 +165,27 @@ object DeltaExportService {
             collectClassesFromFiles(project, modifiedFiles, workspace)
         }
 
-        // 4. Collect members, calls, inheritance for affected classes
-        val members = MemberCollector.collect(project, affectedClasses, workspace)
-        val callGraph = CallGraphCollector.collect(project, affectedClasses, workspace)
-        val inheritance = InheritanceCollector.collect(project, affectedClasses, workspace)
-        val annotations = AnnotationCollector.collect(project, affectedClasses, workspace)
-        val dataFlow = try { DataFlowCollector.collect(project, affectedClasses, workspace) }
-            catch (e: Throwable) { LOG.warn("Delta data-flow collection failed: ${e.message}"); null }
+        // 4. Collect members, calls, inheritance for affected classes.
+        // Each collector is guarded independently — parity with the full path
+        // (SpringBootAdapter). This is the 5-s auto-sync hot path; a single PSI
+        // hiccup in one collector must degrade that collector's output, not
+        // abort the whole delta. ProcessCanceledException is a control-flow
+        // signal and MUST propagate, so it is rethrown before the catch.
+        val members = guardCollect("members") {
+            MemberCollector.collect(project, affectedClasses, workspace)
+        } ?: MemberResult(emptyList(), emptyList(), emptyList())
+        val callGraph = guardCollect("callGraph") {
+            CallGraphCollector.collect(project, affectedClasses, workspace)
+        } ?: emptyList()
+        val inheritance = guardCollect("inheritance") {
+            InheritanceCollector.collect(project, affectedClasses, workspace)
+        } ?: InheritanceResult(emptyList(), emptyList())
+        val annotations = guardCollect("annotations") {
+            AnnotationCollector.collect(project, affectedClasses, workspace)
+        } ?: emptyList()
+        val dataFlow = guardCollect("data-flow") {
+            DataFlowCollector.collect(project, affectedClasses, workspace)
+        }
 
         // 4b. Spring + modules: full re-scan (indexed, cheap). Per-class
         // filtering would miss cross-class injection edges and newly-added
@@ -275,6 +289,22 @@ object DeltaExportService {
         LOG.info("Delta export complete: $outputFile (${durationMs}ms)")
         return DeltaResult.Success(outputFile, delta.stats)
     }
+
+    /**
+     * Run one collector, degrading to null on failure instead of aborting the
+     * whole delta. ProcessCanceledException (and other ControlFlowException)
+     * MUST propagate — swallowing it breaks IntelliJ cancellation — so it is
+     * rethrown before the generic catch.
+     */
+    private inline fun <T> guardCollect(name: String, block: () -> T): T? =
+        try {
+            block()
+        } catch (ce: com.intellij.openapi.progress.ProcessCanceledException) {
+            throw ce
+        } catch (e: Throwable) {
+            LOG.warn("Delta $name collection failed: ${e.message}")
+            null
+        }
 
     /**
      * Collect ClassData for classes found in specific files. Relative paths are
