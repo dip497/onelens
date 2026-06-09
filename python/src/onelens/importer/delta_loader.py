@@ -91,7 +91,7 @@ class DeltaLoader:
         # Tier-0 enrichment parity with the full loader — derive
         # visibility/static/abstract/deprecated/paramCount/transactional/async
         # so delta-upserted methods carry the same props as a full import.
-        from onelens.importer.loader import _enrich_method
+        from onelens.importer.graph_writer import _enrich_method
         for _m in methods:
             _enrich_method(_m)
         for batch in self._chunks(methods, BATCH_SIZE):
@@ -318,7 +318,7 @@ class DeltaLoader:
         # with the full loader. Delete old ones from every upserted method then
         # re-create, MERGE-ing target Class stubs so external types (JDK,
         # libraries) resolve without a separate stub pass.
-        from onelens.importer.loader import _normalize_type
+        from onelens.importer.graph_writer import _normalize_type
         upserted_method_fqn_list = [m["fqn"] for m in methods]
         for batch in self._chunks(upserted_method_fqn_list, BATCH_SIZE):
             self.db.execute(

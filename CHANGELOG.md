@@ -7,6 +7,16 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed — Importer refactor toward SubdocLoader registry (E5, staged) (2026-06)
+
+- **Stage 1: `graph_writer.py`.** The five/six batch-write primitives and the
+  `_enrich_method` / `_normalize_type` / `_anno_simple_names` helpers moved out of
+  the 1763-line `loader.py` into a shared `GraphWriter` module. `GraphLoader`
+  delegates; `delta_loader.py` now imports the helpers from `graph_writer` instead
+  of reaching into `loader.py` (removes the layering smell). Behavior-preserving —
+  guarded by `python/scripts/parity_check.py` (19 invariants across every subsystem,
+  full + delta). Foundation for collapsing the full/delta fork (ADR-034).
+
 ### Added — Multi-language architecture: design + standalone extractors (2026-06)
 
 - **Proof that the graph is language-neutral.** `tools/extractors/python_ast_extractor.py`
