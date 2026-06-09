@@ -18,6 +18,7 @@ from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
 from onelens.importer.loaders.type_flow import TypeFlowLoader
+from onelens.importer.loaders.data_flow import DataFlowLoader
 
 logger = logging.getLogger(__name__)
 
@@ -281,40 +282,7 @@ class DeltaLoader:
         # re-create. Field targets MATCH existing Field nodes (external field
         # access drops — project data-flow only). INSTANTIATES MERGEs the
         # target Class stub like the type-flow edges above.
-        for batch in self._chunks(upserted_method_fqn_list, BATCH_SIZE):
-            self.db.execute(
-                "UNWIND $batch AS fqn MATCH (m:Method {fqn: fqn})"
-                "-[r:READS_FIELD|WRITES_FIELD|INSTANTIATES]->() DELETE r",
-                {"batch": batch}
-            )
-        dataflow = upserted.get("dataFlow") or {}
-        df_reads, df_writes = [], []
-        for fa in dataflow.get("fieldAccesses", []) or []:
-            e = {"src": fa.get("accessorFqn", ""), "dst": fa.get("fieldFqn", ""),
-                 "line": fa.get("line", 0)}
-            if not e["src"] or not e["dst"]:
-                continue
-            (df_writes if fa.get("mode") == "write" else df_reads).append(e)
-        for rel, edges in (("READS_FIELD", df_reads), ("WRITES_FIELD", df_writes)):
-            for batch in self._chunks(edges, BATCH_SIZE):
-                self.db.execute(
-                    f"UNWIND $batch AS edge "
-                    f"MATCH (m:Method {{fqn: edge.src}}), (f:Field {{fqn: edge.dst}}) "
-                    f"MERGE (m)-[:{rel} {{line: edge.line}}]->(f)",
-                    {"batch": batch}
-                )
-        df_inst = [{"src": i.get("methodFqn", ""), "dst": i.get("classFqn", ""),
-                    "line": i.get("line", 0)}
-                   for i in dataflow.get("instantiations", []) or []
-                   if i.get("methodFqn") and i.get("classFqn")]
-        for batch in self._chunks(df_inst, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (m:Method {fqn: edge.src})
-                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
-                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
-                MERGE (m)-[:INSTANTIATES {line: edge.line}]->(c)
-            """, {"batch": batch})
+        DataFlowLoader().apply_delta(self.writer, upserted)
 
         # 7. Upsert inheritance edges (batched per type)
         for rel_type in ("EXTENDS", "IMPLEMENTS"):

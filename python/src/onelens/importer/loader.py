@@ -37,6 +37,7 @@ from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
 from onelens.importer.loaders.type_flow import TypeFlowLoader
+from onelens.importer.loaders.data_flow import DataFlowLoader
 
 
 class GraphLoader:
@@ -340,28 +341,7 @@ class GraphLoader:
             # existing Field nodes (external/library field access silently
             # drops — we only model project data-flow). The read/write split
             # answers "who mutates order.status" vs "who reads the cache".
-            dataflow = data.get("dataFlow") or {}
-            reads, writes = [], []
-            for fa in dataflow.get("fieldAccesses", []) or []:
-                edge = {"src": fa.get("accessorFqn", ""), "dst": fa.get("fieldFqn", ""),
-                        "line": fa.get("line", 0)}
-                if not edge["src"] or not edge["dst"]:
-                    continue
-                if fa.get("mode") == "write":
-                    writes.append(edge)
-                else:
-                    reads.append(edge)
-            self._batch_edges_with_props(progress, "READS_FIELD", reads,
-                                         "Method", "fqn", "Field", "fqn", ["line"])
-            self._batch_edges_with_props(progress, "WRITES_FIELD", writes,
-                                         "Method", "fqn", "Field", "fqn", ["line"])
-
-            instantiates = [{"src": i.get("methodFqn", ""), "dst": i.get("classFqn", ""),
-                             "line": i.get("line", 0)}
-                            for i in dataflow.get("instantiations", []) or []
-                            if i.get("methodFqn") and i.get("classFqn")]
-            self._batch_edges_with_props(progress, "INSTANTIATES", instantiates,
-                                         "Method", "fqn", "Class", "fqn", ["line"])
+            DataFlowLoader().load_full(self.writer, progress, data)
 
             # ANNOTATED_WITH — Annotation nodes + ANNOTATED_WITH edges (nodes + edges
             # in one call so nodes exist before edges). Runs here, after base
