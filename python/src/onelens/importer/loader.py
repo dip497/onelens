@@ -32,6 +32,7 @@ from onelens.importer.graph_writer import (
     _enrich_method,
 )
 from onelens.importer.loaders.annotations import AnnotationLoader
+from onelens.importer.loaders.enums import EnumLoader
 from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
@@ -123,25 +124,6 @@ class GraphLoader:
                 "name", "classFqn", "type", "filePath", "lineStart",
             ])
 
-            # EnumConstant nodes — semantic payload for enum-as-config registries.
-            # `args` is a JSON-serialized blob kept for forensic inspection; `argList`
-            # is a flat string array usable in `IN` predicates. Both ship because
-            # FalkorDB stores arrays natively — no per-token explosion needed. Absent
-            # in pre-1.1 exports; `data.get` returns [] so older graphs no-op.
-            enum_constants = data.get("enumConstants", [])
-            # Dual-label: an EnumConstant IS a Field. MemberCollector already
-            # emits a Field with matching fqn for each enum constant; rather than
-            # duplicating the node, tag the existing Field with :EnumConstant +
-            # the enum-only props (args / argList).
-            self._batch_add_label(progress, "Enum Constants", enum_constants,
-                              base_label="Field", base_pk="fqn", pk_field="fqn",
-                              add_label="EnumConstant",
-                              props=[
-                                  "name", "ordinal", "enumFqn",
-                                  "args", "argList", "argTypes",
-                                  "filePath", "lineStart",
-                              ])
-
             modules = data.get("modules", [])
             self._batch_nodes(progress, "Modules", modules, "Module", "name", ["type"])
 
@@ -190,6 +172,13 @@ class GraphLoader:
                 self._batch_nodes(progress, "Packages", packages, "Package", "id", [
                     "name", "parentId", "appId", "wing",
                 ])
+
+            # EnumConstant nodes + HAS_ENUM_CONSTANT edges — semantic payload for
+            # enum-as-config registries. Absent in pre-1.1 exports; no-ops safely.
+            # Runs after Field nodes (which back the dual-label) and after graph_wing
+            # is resolved. Combines the former dual-label block (~131) and edge block
+            # (~322) into a single call.
+            EnumLoader().load_full(self.writer, progress, data, graph_wing)
 
             JpaLoader().load_full(self.writer, progress, data, graph_wing)
 
@@ -318,12 +307,6 @@ class GraphLoader:
             # HAS_FIELD (Class → Field)
             has_field = [{"src": f["classFqn"], "dst": f["fqn"]} for f in fields]
             self._batch_edges(progress, "HAS_FIELD", has_field, "Class", "fqn", "Field", "fqn")
-
-            # HAS_ENUM_CONSTANT (Class → EnumConstant). Skipped when `enumConstants`
-            # is empty (pre-1.1 exports / non-Java adapters).
-            has_enum_const = [{"src": e["enumFqn"], "dst": e["fqn"]} for e in enum_constants]
-            self._batch_edges(progress, "HAS_ENUM_CONSTANT", has_enum_const,
-                              "Class", "fqn", "EnumConstant", "fqn")
 
             # EXTENDS
             extends = [{"src": e["childFqn"], "dst": e["parentFqn"]}
