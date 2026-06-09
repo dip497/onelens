@@ -31,6 +31,7 @@ from onelens.importer.graph_writer import (
     _anno_simple_names,
     _enrich_method,
 )
+from onelens.importer.loaders.annotations import AnnotationLoader
 
 
 class GraphLoader:
@@ -141,16 +142,8 @@ class GraphLoader:
             modules = data.get("modules", [])
             self._batch_nodes(progress, "Modules", modules, "Module", "name", ["type"])
 
-            # Deduplicate annotations
-            ann_fqns = set()
-            for a in data.get("annotations", []):
-                ann_fqns.add(a.get("annotationFqn", ""))
-            for cls in classes:
-                for a in cls.get("annotations", []):
-                    ann_fqns.add(a.get("fqn", ""))
-            ann_fqns.discard("")
-            ann_nodes = [{"fqn": fqn, "name": fqn.split(".")[-1]} for fqn in ann_fqns]
-            self._batch_nodes(progress, "Annotations", ann_nodes, "Annotation", "fqn", ["name"])
+            # Annotation nodes + ANNOTATED_WITH edges are written by AnnotationLoader.load_full
+            # (called below at the edge-block site, after base Class/Method/Field nodes exist).
 
             # Spring nodes. Every node is stamped with `wing = graph_name` so the
             # cross-wing bridge pass (bridge_http.compute_hits) can filter Spring
@@ -491,38 +484,10 @@ class GraphLoader:
             self._batch_edges_with_props(progress, "INSTANTIATES", instantiates,
                                          "Method", "fqn", "Class", "fqn", ["line"])
 
-            # ANNOTATED_WITH — edges carry both the `attributes` JSON blob
-            # (resolved values; structure-preserving — arrays / nested
-            # annotations live here) and a flat set of `attr_<key>` properties
-            # promoted from the export's `attrValues` map (primitive values
-            # only). The flat properties make queries like
-            #   MATCH (m:Method)-[r:ANNOTATED_WITH]->(:Annotation {fqn:'org.springframework.web.bind.annotation.RequestMapping'})
-            #   WHERE r.attr_value = '/users'
-            # trivial — no JSON substring traps.
-            #
-            # Group by target label since each label has its own primary-key
-            # column for the MATCH.
-            ann_groups = {"Class": [], "Method": [], "Field": []}
-            for a in data.get("annotations", []):
-                kind = a.get("targetKind", "CLASS")
-                label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
-                # Promote attrValues → attr_<key> property keys. Skip empty
-                # / dynamic markers so we don't pollute the edge schema with
-                # `attr_value="<dynamic>"` rows that defeat exact-match queries.
-                attr_props: dict[str, str] = {}
-                for k, v in (a.get("attrValues") or {}).items():
-                    if not v or v == "<dynamic>":
-                        continue
-                    attr_props[f"attr_{k}"] = v
-                ann_groups[label].append({
-                    "src": a["targetFqn"],
-                    "dst": a["annotationFqn"],
-                    "attributes": a.get("attributes", "{}"),
-                    "attr_props": attr_props,
-                })
-            for label, edges in ann_groups.items():
-                if edges:
-                    self._batch_annotation_edges(progress, label, edges)
+            # ANNOTATED_WITH — Annotation nodes + ANNOTATED_WITH edges (nodes + edges
+            # in one call so nodes exist before edges). Runs here, after base
+            # Class/Method/Field nodes exist, to preserve edge-resolution ordering.
+            AnnotationLoader().load_full(self.writer, progress, data, graph_wing)
 
             # Spring edges
             if spring:

@@ -467,6 +467,7 @@ Multi-reviewer audit (delta-correctness, delta-UX, graph-richness gap-finder). F
 | E5 | Importer `SubdocLoader` registry — extract spring/jpa/tests/vue3/core into loaders shared by full + delta; kills the drift-bug class | 🟡 | staged; gate `python/scripts/parity_check.py` (19 checks) |
 | E5.0 | Parity gate — synthetic all-subsystem full+delta import, 19 invariants | ✅ | `python/scripts/parity_check.py` |
 | E5.1 | Stage 1 — `graph_writer.py`: shared batch primitives (`GraphWriter`) + `_enrich_method`/`_normalize_type` helpers out of loader; delta re-points off loader. Behavior-preserving, 19/19 green. Implemented by delegated Sonnet agent against `docs/design/E5-stage1-graph-writer.md`. | ✅ | `importer/graph_writer.py` |
+| E5.2a | Stage 2a — first `SubdocLoader`: `AnnotationLoader` owns BOTH full + delta annotation paths (was verbatim-duplicated `attr_props` logic). `GraphWriter` primitives now tolerate `progress=None`. Delegated Sonnet agent; 19/19 green, extractor smoke unchanged. | ✅ | `importer/loaders/{base,annotations}.py` |
 
 ## Open regression / verification items
 
