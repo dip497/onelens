@@ -36,6 +36,7 @@ from onelens.importer.loaders.enums import EnumLoader
 from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
+from onelens.importer.loaders.type_flow import TypeFlowLoader
 
 
 class GraphLoader:
@@ -332,33 +333,7 @@ class GraphLoader:
             # User" (RETURNS), "what consumes a UserDto" (HAS_PARAMETER), and
             # "what can throw PaymentDeclined" (THROWS). Reference types only —
             # primitives/void/type-vars filtered by _normalize_type.
-            returns = []
-            for m in methods:
-                rt = _normalize_type(m.get("returnType", ""))
-                if rt:
-                    returns.append({"src": m["fqn"], "dst": rt})
-            self._batch_edges(progress, "RETURNS", returns, "Method", "fqn", "Class", "fqn")
-
-            throws = []
-            for m in methods:
-                for tt in m.get("throwsTypes", []) or []:
-                    et = _normalize_type(tt)
-                    if et:
-                        throws.append({"src": m["fqn"], "dst": et})
-            self._batch_edges(progress, "THROWS", throws, "Method", "fqn", "Class", "fqn")
-
-            has_param = []
-            for m in methods:
-                for i, p in enumerate(m.get("parameters", []) or []):
-                    pt = _normalize_type(p.get("type", ""))
-                    if pt:
-                        has_param.append({
-                            "src": m["fqn"], "dst": pt,
-                            "position": i, "name": p.get("name", ""),
-                        })
-            self._batch_edges_with_props(progress, "HAS_PARAMETER", has_param,
-                                         "Method", "fqn", "Class", "fqn",
-                                         ["position", "name"])
+            TypeFlowLoader().load_full(self.writer, progress, methods)
 
             # Tier-1 data-flow edges: READS_FIELD / WRITES_FIELD (Method→Field)
             # + INSTANTIATES (Method→Class). Field targets resolve against

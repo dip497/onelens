@@ -17,6 +17,7 @@ from onelens.importer.loaders.enums import EnumLoader
 from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
+from onelens.importer.loaders.type_flow import TypeFlowLoader
 
 logger = logging.getLogger(__name__)
 
@@ -272,52 +273,8 @@ class DeltaLoader:
         # with the full loader. Delete old ones from every upserted method then
         # re-create, MERGE-ing target Class stubs so external types (JDK,
         # libraries) resolve without a separate stub pass.
-        from onelens.importer.graph_writer import _normalize_type
         upserted_method_fqn_list = [m["fqn"] for m in methods]
-        for batch in self._chunks(upserted_method_fqn_list, BATCH_SIZE):
-            self.db.execute(
-                "UNWIND $batch AS fqn MATCH (m:Method {fqn: fqn})"
-                "-[r:RETURNS|THROWS|HAS_PARAMETER]->() DELETE r",
-                {"batch": batch}
-            )
-        returns, throws, has_param = [], [], []
-        for m in methods:
-            rt = _normalize_type(m.get("returnType", ""))
-            if rt:
-                returns.append({"src": m["fqn"], "dst": rt})
-            for tt in m.get("throwsTypes", []) or []:
-                et = _normalize_type(tt)
-                if et:
-                    throws.append({"src": m["fqn"], "dst": et})
-            for i, p in enumerate(m.get("parameters", []) or []):
-                pt = _normalize_type(p.get("type", ""))
-                if pt:
-                    has_param.append({"src": m["fqn"], "dst": pt,
-                                      "position": i, "name": p.get("name", "")})
-        for batch in self._chunks(returns, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (m:Method {fqn: edge.src})
-                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
-                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
-                MERGE (m)-[:RETURNS]->(c)
-            """, {"batch": batch})
-        for batch in self._chunks(throws, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (m:Method {fqn: edge.src})
-                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
-                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
-                MERGE (m)-[:THROWS]->(c)
-            """, {"batch": batch})
-        for batch in self._chunks(has_param, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (m:Method {fqn: edge.src})
-                MERGE (c:Class {fqn: edge.dst}) ON CREATE SET c.external = true,
-                    c.name = split(edge.dst, '.')[-1], c.kind = 'CLASS'
-                MERGE (m)-[:HAS_PARAMETER {position: edge.position, name: edge.name}]->(c)
-            """, {"batch": batch})
+        TypeFlowLoader().apply_delta(self.writer, methods)
 
         # 6c. Tier-1 data-flow edges (READS_FIELD / WRITES_FIELD / INSTANTIATES)
         # parity with the full loader. Delete from every upserted method, then
