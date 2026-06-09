@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
 from onelens.graph.db import GraphDB
 from onelens.importer.graph_writer import GraphWriter
 from onelens.importer.loaders.annotations import AnnotationLoader
+from onelens.importer.loaders.enums import EnumLoader
 from onelens.importer.loaders.jpa import JpaLoader
 from onelens.importer.loaders.spring import SpringLoader
 from onelens.importer.loaders.tests import TestLoader
@@ -161,61 +162,8 @@ class DeltaLoader:
                 MERGE (c)-[:HAS_FIELD]->(f)
             """, {"batch": batch})
 
-        # 4b. Upsert enum constants. Classes that changed may have added,
-        # removed, or reordered constants — drop all EnumConstant nodes
-        # under each upserted class first, then re-insert from the delta.
-        # Keyed by enumFqn (not the enum class's node) so cascade works even
-        # if the class node hasn't been DETACH-deleted (e.g. modified, not
-        # removed). Delete-then-insert beats MERGE here because `ordinal`
-        # and `argList` can both mutate.
-        # Strip the :EnumConstant label (not DETACH DELETE) from constants
-        # under upserted classes. Full import models an enum constant as a
-        # DUAL-LABEL on the Field node (loader.py:104-121) — one node carrying
-        # :Field:EnumConstant. DETACH-deleting by enumFqn here would destroy
-        # the shared Field node (and its HAS_FIELD edge) that step 4 just
-        # re-created, then the re-insert below would split it into two nodes
-        # (bug #9). REMOVE clears stale enum-ness while preserving the Field.
-        upserted_class_fqn_list = [c["fqn"] for c in classes]
-        for batch in self._chunks(upserted_class_fqn_list, BATCH_SIZE):
-            self.db.execute(
-                "UNWIND $batch AS fqn MATCH (e:EnumConstant {enumFqn: fqn}) "
-                "REMOVE e:EnumConstant "
-                "SET e.ordinal = null, e.enumFqn = null, e.args = null, "
-                "    e.argList = null, e.argTypes = null",
-                {"batch": batch}
-            )
-        enum_consts = upserted.get("enumConstants", [])
-        for batch in self._chunks(enum_consts, BATCH_SIZE):
-            items = [{
-                "fqn": e["fqn"], "name": e.get("name", ""),
-                "ordinal": e.get("ordinal", 0), "enumFqn": e.get("enumFqn", ""),
-                "args": e.get("args", "[]"),
-                "argList": e.get("argList", []) or [],
-                "argTypes": e.get("argTypes", []) or [],
-                "filePath": e.get("filePath", ""),
-                "lineStart": e.get("lineStart", 0),
-            } for e in batch]
-            # Dual-label on the existing Field node (created in step 4), NOT a
-            # standalone :EnumConstant node — matches full import's single
-            # :Field:EnumConstant node so `MATCH (:Field:EnumConstant)` and
-            # HAS_FIELD→constant queries work identically on full and delta.
-            self.db.execute("""
-                UNWIND $batch AS item
-                MERGE (e:Field {fqn: item.fqn})
-                SET e:EnumConstant,
-                    e.name = item.name, e.ordinal = item.ordinal,
-                    e.enumFqn = item.enumFqn, e.args = item.args,
-                    e.argList = item.argList, e.argTypes = item.argTypes,
-                    e.filePath = item.filePath, e.lineStart = item.lineStart
-            """, {"batch": items})
-        has_enum_const = [{"src": e.get("enumFqn", ""), "dst": e["fqn"]}
-                          for e in enum_consts if e.get("enumFqn")]
-        for batch in self._chunks(has_enum_const, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (c:Class {fqn: edge.src}), (e:EnumConstant {fqn: edge.dst})
-                MERGE (c)-[:HAS_ENUM_CONSTANT]->(e)
-            """, {"batch": batch})
+        # 4b. Upsert enum constants (delegated to EnumLoader).
+        EnumLoader().apply_delta(self.writer, data, "")
 
         # 5. Create external stub nodes for call targets not in graph
         upserted_class_fqns = {c["fqn"] for c in classes}
