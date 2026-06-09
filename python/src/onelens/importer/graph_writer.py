@@ -117,14 +117,15 @@ class GraphWriter:
             f"{dst_match} "
             f"{tail}"
         )
-        task = progress.add_task(f"{desc}...", total=len(edges))
+        task = progress.add_task(f"{desc}...", total=len(edges)) if progress is not None else None
         for i in range(0, len(edges), self.edge_batch):
             batch = edges[i:i + self.edge_batch]
             try:
                 self.db.execute(query, {"batch": batch, "wing": wing})
             except Exception as e:
                 logger.warning("Edge batch %s failed: %s", desc, e)
-            progress.update(task, advance=len(batch))
+            if progress is not None:
+                progress.update(task, advance=len(batch))
 
     def batch_add_label(self, progress, desc: str, items: list,
                         base_label: str, base_pk: str, pk_field: str,
@@ -157,7 +158,7 @@ class GraphWriter:
         if set_clause:
             query += f", {set_clause}"
 
-        task = progress.add_task(f"{desc}...", total=len(items))
+        task = progress.add_task(f"{desc}...", total=len(items)) if progress is not None else None
         for i in range(0, len(items), self.node_batch):
             batch = items[i:i + self.node_batch]
             clean = []
@@ -174,7 +175,8 @@ class GraphWriter:
                 self.db.execute(query, {"batch": clean})
             except Exception as e:
                 logger.warning(f"Dual-label {add_label} batch failed: {e}")
-            progress.update(task, advance=len(batch))
+            if progress is not None:
+                progress.update(task, advance=len(batch))
 
     def batch_nodes(self, progress, desc: str, items: list, label: str, pk: str, props: list[str]):
         """Create nodes using UNWIND in batches."""
@@ -189,7 +191,7 @@ class GraphWriter:
         # (plugin-style forks of `Constants`, shared common classes, etc.).
         query = f"UNWIND $batch AS item MERGE (n:{label} {{{pk}: item.{pk}}}) SET {set_clause}"
 
-        task = progress.add_task(f"{desc}...", total=len(items))
+        task = progress.add_task(f"{desc}...", total=len(items)) if progress is not None else None
         for i in range(0, len(items), self.node_batch):
             batch = items[i:i + self.node_batch]
             # Sanitize: ensure all props exist in each item
@@ -218,7 +220,8 @@ class GraphWriter:
                     except Exception:
                         pass
 
-            progress.update(task, advance=len(batch))
+            if progress is not None:
+                progress.update(task, advance=len(batch))
 
     def batch_edges(self, progress, desc: str, edges: list,
                     src_label: str, src_key: str, dst_label: str, dst_key: str,
@@ -236,7 +239,7 @@ class GraphWriter:
         """
 
         failed_count = 0
-        task = progress.add_task(f"{desc}...", total=len(edges))
+        task = progress.add_task(f"{desc}...", total=len(edges)) if progress is not None else None
         for i in range(0, len(edges), self.edge_batch):
             batch = edges[i:i + self.edge_batch]
             try:
@@ -253,7 +256,8 @@ class GraphWriter:
                         self.db.execute(single_q, {"src": edge["src"], "dst": edge["dst"]})
                     except Exception:
                         failed_count += 1
-            progress.update(task, advance=len(batch))
+            if progress is not None:
+                progress.update(task, advance=len(batch))
         if failed_count > 0:
             logger.warning(f"{desc}: {failed_count} edges failed (missing nodes)")
 
@@ -274,7 +278,7 @@ class GraphWriter:
         """
 
         failed_count = 0
-        task = progress.add_task(f"{desc}...", total=len(edges))
+        task = progress.add_task(f"{desc}...", total=len(edges)) if progress is not None else None
         for i in range(0, len(edges), self.edge_batch):
             batch = edges[i:i + self.edge_batch]
             try:
@@ -293,7 +297,8 @@ class GraphWriter:
                                                     **{p: edge.get(p, "") for p in prop_names}})
                     except Exception:
                         failed_count += 1
-            progress.update(task, advance=len(batch))
+            if progress is not None:
+                progress.update(task, advance=len(batch))
         if failed_count > 0:
             logger.warning(f"{desc}: {failed_count} edges failed (missing nodes)")
 
@@ -324,7 +329,7 @@ class GraphWriter:
 
         failed_count = 0
         desc = f"ANNOTATED_WITH ({label})"
-        task = progress.add_task(f"{desc}...", total=len(edges))
+        task = progress.add_task(f"{desc}...", total=len(edges)) if progress is not None else None
         for i in range(0, len(edges), self.edge_batch):
             batch = edges[i:i + self.edge_batch]
             try:
@@ -346,6 +351,7 @@ class GraphWriter:
                         })
                     except Exception:
                         failed_count += 1
-            progress.update(task, advance=len(batch))
+            if progress is not None:
+                progress.update(task, advance=len(batch))
         if failed_count > 0:
             logger.warning(f"{desc}: {failed_count} edges failed (missing nodes)")

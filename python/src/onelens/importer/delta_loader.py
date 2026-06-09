@@ -11,6 +11,8 @@ except ImportError:  # pragma: no cover
     _USE_ORJSON = False
 
 from onelens.graph.db import GraphDB
+from onelens.importer.graph_writer import GraphWriter
+from onelens.importer.loaders.annotations import AnnotationLoader
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,7 @@ BATCH_SIZE = 500
 class DeltaLoader:
     def __init__(self, db: GraphDB):
         self.db = db
+        self.writer = GraphWriter(db)
 
     def apply_delta(self, delta_path: Path, graph_name: str | None = None,
                     context: bool = False) -> dict:
@@ -426,68 +429,10 @@ class DeltaLoader:
                 MERGE (a)-[:OVERRIDES]->(b)
             """, {"batch": batch})
 
-        # 8b. Replace ANNOTATED_WITH edges on upserted targets. Pre-1.1 delta
-        # flow skipped this — annotations added / removed on a modified class
-        # never propagated to the graph (silent drift). Fix: for every target
-        # in the delta's annotations block, drop its existing ANNOTATED_WITH
-        # edges, then create fresh ones carrying the resolved `attributes`
-        # JSON. Annotation nodes are MERGEd first so new FQNs auto-exist.
-        annotations = upserted.get("annotations", [])
-        if annotations:
-            # MERGE target Annotation nodes (dedup on fqn).
-            ann_fqns = sorted({a["annotationFqn"] for a in annotations if a.get("annotationFqn")})
-            for batch in self._chunks(ann_fqns, BATCH_SIZE):
-                self.db.execute(
-                    "UNWIND $batch AS fqn MERGE (a:Annotation {fqn: fqn}) "
-                    "ON CREATE SET a.name = split(fqn, '.')[-1]",
-                    {"batch": batch}
-                )
-
-            # Drop old edges per target label. Use per-label batches keyed on
-            # the label's primary-key column so we don't have to MATCH across
-            # three labels in one query.
-            by_label: dict[str, list[str]] = {"Class": [], "Method": [], "Field": []}
-            for a in annotations:
-                kind = a.get("targetKind", "CLASS")
-                label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
-                by_label[label].append(a["targetFqn"])
-            for label, fqns in by_label.items():
-                unique = sorted(set(fqns))
-                for batch in self._chunks(unique, BATCH_SIZE):
-                    self.db.execute(
-                        f"UNWIND $batch AS fqn "
-                        f"MATCH (n:{label} {{fqn: fqn}})-[r:ANNOTATED_WITH]->() DELETE r",
-                        {"batch": batch}
-                    )
-
-            # Create fresh edges. Mirror the full loader's flat
-            # `attr_<key>` property promotion (see `loader.py::_batch_annotation_edges`)
-            # — same shape so retrieval queries that use `r.attr_value`
-            # work identically on full and delta paths.
-            edges_by_label: dict[str, list[dict]] = {"Class": [], "Method": [], "Field": []}
-            for a in annotations:
-                kind = a.get("targetKind", "CLASS")
-                label = "Class" if kind == "CLASS" else "Method" if kind == "METHOD" else "Field"
-                attr_props: dict[str, str] = {}
-                for k, v in (a.get("attrValues") or {}).items():
-                    if not v or v == "<dynamic>":
-                        continue
-                    attr_props[f"attr_{k}"] = v
-                edges_by_label[label].append({
-                    "src": a["targetFqn"],
-                    "dst": a["annotationFqn"],
-                    "attributes": a.get("attributes", "{}"),
-                    "attr_props": attr_props,
-                })
-            for label, edges in edges_by_label.items():
-                for batch in self._chunks(edges, BATCH_SIZE):
-                    self.db.execute(
-                        f"UNWIND $batch AS edge "
-                        f"MATCH (n:{label} {{fqn: edge.src}}), (a:Annotation {{fqn: edge.dst}}) "
-                        f"CREATE (n)-[r:ANNOTATED_WITH {{attributes: edge.attributes}}]->(a) "
-                        f"SET r += edge.attr_props",
-                        {"batch": batch}
-                    )
+        # 8b. Replace ANNOTATED_WITH edges on upserted targets (delegated to AnnotationLoader).
+        # graph_wing is derived below at step 9b; pass graph_name here since the
+        # AnnotationLoader only needs upserted, not the wing value.
+        AnnotationLoader().apply_delta(self.writer, upserted, graph_name or "")
 
         # 9. Ensure full-text search indexes exist (idempotent)
         from onelens.importer.schema import FULLTEXT_SCHEMA
