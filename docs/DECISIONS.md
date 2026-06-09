@@ -1522,3 +1522,76 @@ daemon (EP-17) and want CLI auto-spawn for zero-config UX.
 - Industry CLI-vs-MCP analyses (Feb-Apr 2026): HuggingFace blog,
   ddewhurst.com, clifor.ai, addyosmani/agent-engineer
 
+## ADR-032 · 2026-06 · Two orthogonal SPIs — LanguageExtractor ⊗ FrameworkAdapter
+
+**Decision.** Split extraction into *how to parse* (`LanguageExtractor`,
+keyed by `languageId`) and *what framework concepts to derive*
+(`FrameworkAdapter`, keyed by `id` + `languageId`). A framework adapter
+consumes the already-extracted universal `SymbolGraph` instead of
+re-walking files. The orchestrator runs detected extractors to fill the
+language-neutral core, then runs framework adapters whose `languageId`
+matched, merging overlays by `jsonKey`.
+
+**Context.** Today `FrameworkAdapter` conflates the two — `SpringBootAdapter`
+bundles Java-PSI extraction with Spring derivation. There is no seam to add
+a *language* (only a framework). The plugin EP (`framework/FrameworkAdapter.kt`)
+is otherwise sound (dynamic, gated behind `<depends>` config-files — Vue3
+proves it). The orchestrator also leaks: `ExportService` downcasts
+`when (collector) { is SpringBootCollector -> lastResult }` instead of
+consuming the opaque `CollectorOutput` (ADR-010 debt).
+
+**Alternatives.** (a) Keep one adapter type and add languages as "frameworks"
+— conflates the axes, every language re-implements the core. (b) One mega
+extractor with a language switch — unbounded god object. Rejected.
+
+**Revisit when.** A second backend language ships and the `SymbolGraph` shape
+proves too Java-centric (e.g. needs union types / structural typing fields).
+
+## ADR-033 · 2026-06 · Tiered extraction backends with an accuracy tag
+
+**Decision.** The 100%-type-accuracy moat is IntelliJ-PSI-and-per-language;
+it does not port to a single backend. Support a tiered model — PSI (IDE,
+100%) → LSP (standalone, type-resolved) → tree-sitter (structural floor) —
+and stamp every emitted node `source = PSI|TYPES|LSP|AST|TREE_SITTER` so
+retrieval and the skill express confidence honestly instead of claiming
+100% everywhere.
+
+**Context.** Go/C# realistically need Ultimate-tier IDEs for PSI; standalone
+Python/Go is better served by LSP or the language's own parser. The
+JSON-export → importer boundary is the right seam: a non-IntelliJ extractor
+emits the same JSON with no plugin. **Proven empirically** — a standalone
+`python_ast_extractor.py` (Python `ast`, no plugin) imported OneLens's own
+104 classes / 370 methods / 312 calls through the unmodified `GraphLoader`;
+`GraphDB` subclasses and PageRank came out correct (`tools/extractors/`).
+
+**Alternatives.** (a) tree-sitter only — loses cross-file resolution, breaks
+the moat. (b) PSI only — caps reach at JetBrains-supported langs in an IDE.
+Rejected in favor of tiered + honest tagging.
+
+**Revisit when.** A universal type-resolution layer (e.g. SCIP indexes) makes
+the per-backend distinction unnecessary.
+
+## ADR-034 · 2026-06 · Importer SubdocLoader registry kills the full/delta fork
+
+**Decision.** Replace the `load_full()` god-method's hardcoded
+`if spring / if jpa / if vue3` chain with a `LOADERS` registry of
+`SubdocLoader` objects, each owning one subsystem and implementing BOTH
+`load_full` and `apply_delta`. `loader.py` and `delta_loader.py` iterate the
+same registry; the shared `_batch_nodes`/`_batch_edges` primitives move to a
+neutral `graph_writer.py`.
+
+**Context.** `loader.py` (1763 LOC) and `delta_loader.py` (905 LOC) write the
+same graph shape through two separately-maintained bodies of Cypher. That
+duplication — not the individual symptoms — is the root cause of the entire
+"delta diverges from full import" bug class (Spring wing, phantom CALLS, enum
+split, JPA/test demotion — all patched in 2026-06). One subsystem = one class
+implementing both paths means they cannot drift.
+
+**Alternatives.** Keep patching parity by hand (the status quo — burned a full
+session). Rejected. A codegen approach (generate delta from full) was
+considered but the delete-before-write semantics are genuinely delta-only.
+
+**Revisit when.** Executed — staged so each subsystem migrates behind an
+unchanged wire format, verified by golden-graph diff. Step 1 in
+`docs/design/multi-language-architecture.md`.
+
