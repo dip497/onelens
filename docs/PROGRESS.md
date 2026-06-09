@@ -452,6 +452,19 @@ Multi-reviewer audit (delta-correctness, delta-UX, graph-richness gap-finder). F
 | D7 | Tier-1 data-flow — `READS_FIELD`/`WRITES_FIELD`/`INSTANTIATES` via new `DataFlowCollector` body walk; full + delta parity (delete-then-recreate on upsert), verified vs falkordblite | ✅ | `DataFlowCollector.kt`, `ExportModels.kt`, `SpringBootAdapter.kt`, `DeltaExportService.kt`, `loader.py`, `delta_loader.py` |
 | D8a | Delta UX — merge-base `--is-ancestor` guard before git diff: branch switch / rebase forces full re-export instead of a garbage whole-branch "delta" | ✅ | `DeltaTracker.kt::getGitChanges` |
 | D8b | Delta UX — queue saves landing mid-sync (dropped today); `.kt`/`.vue` save triggers (Java-only today) | ⬜ | `AutoSyncFileListener.kt`, `AutoSyncService.kt` |
+| D9 | Plugin audit fixes — tool-window timer/console leak (Disposable), delta per-collector guards + `ProcessCanceledException` rethrow | ✅ | `OneLensToolWindow.kt`, `DeltaExportService.kt::guardCollect` |
+
+## Phase E — Multi-language / multi-framework architecture (2026-06)
+
+3-agent architecture audit (Python importer duplication, Kotlin plugin quality, N-language extensibility). Design: `docs/design/multi-language-architecture.md`; ADR-032/033/034.
+
+| ID | Item | Status | Pointer |
+|----|------|--------|---------|
+| E1 | Universal SymbolGraph JSON contract documented (`source` accuracy tag; framework blocks all `if`-gated → core is language-neutral) | ✅ | `tools/extractors/README.md` |
+| E2 | Standalone Python extractor (stdlib `ast`) — emits universal JSON; existing `GraphLoader` imports it; verified on OneLens's own source (104 cls / 370 mth / 312 calls, GraphDB subclasses + PageRank correct) | ✅ | `tools/extractors/python_ast_extractor.py` |
+| E3 | Go reference extractor (`go/ast`) against the same contract | ✅ (reference; needs go/types for FQN call resolution) | `tools/extractors/go/main.go` |
+| E4 | Plugin two-SPI split — `LanguageExtractor` ⊗ `FrameworkAdapter`; honor opaque `CollectorOutput` (kill `ExportService` downcast); relocate Spring/JPA collectors under `framework/` | ⬜ | design §3 step 2-3 |
+| E5 | Importer `SubdocLoader` registry — extract spring/jpa/tests/vue3/core into loaders shared by full + delta; kills the drift-bug class | ⬜ | design §3 step 1 (highest value) |
 
 ## Open regression / verification items
 

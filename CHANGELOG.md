@@ -7,6 +7,31 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Multi-language architecture: design + standalone extractors (2026-06)
+
+- **Proof that the graph is language-neutral.** `tools/extractors/python_ast_extractor.py`
+  parses Python with the stdlib `ast` module (no plugin, no IntelliJ, no Java) and
+  emits the SAME universal JSON contract the IntelliJ plugin emits for Java. The
+  existing unmodified `GraphLoader` imports it: OneLens's own Python source became
+  104 classes / 370 methods / 312 CALLS / 24 EXTENDS in the graph, with `GraphDB`'s
+  three subclasses and PageRank centrality coming out correct. Extraction is
+  per-language; the JSON contract + importer + graph are universal.
+- `tools/extractors/go/main.go` — second reference impl (Go `go/ast`) against the
+  same contract. `tools/extractors/README.md` documents the universal core schema,
+  the `source` accuracy tag, and the recipe for adding a language.
+- `docs/design/multi-language-architecture.md` — target two-SPI design
+  (`LanguageExtractor` ⊗ `FrameworkAdapter`), tiered PSI/LSP/tree-sitter backends,
+  importer `SubdocLoader` registry, and a staged migration plan. ADR-032/033/034.
+
+### Fixed — Plugin architecture audit: timer leak + delta guards + PCE (2026-06)
+
+- `OneLensToolWindow` leaked two repeating Swing timers per tool-window open (each
+  kept spawning `nvidia-smi`). Panel is now `Disposable`, tied to the Content
+  disposer; `dispose()` stops both timers + disposes the console.
+- Delta export now guards every collector independently (`guardCollect`) like the
+  full path — a single PSI hiccup no longer aborts the 5 s auto-sync — and rethrows
+  `ProcessCanceledException` so IntelliJ cancellation still works.
+
 ### Added — Graph enrichment Tier 1: data-flow edges (2026-06)
 
 - **`READS_FIELD` / `WRITES_FIELD` (Method → Field) + `INSTANTIATES`
