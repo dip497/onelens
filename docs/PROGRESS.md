@@ -470,6 +470,7 @@ Multi-reviewer audit (delta-correctness, delta-UX, graph-richness gap-finder). F
 | E5.2a | Stage 2a — first `SubdocLoader`: `AnnotationLoader` owns BOTH full + delta annotation paths (was verbatim-duplicated `attr_props` logic). `GraphWriter` primitives now tolerate `progress=None`. Delegated Sonnet agent; 19/19 green, extractor smoke unchanged. | ✅ | `importer/loaders/{base,annotations}.py` |
 | E5.2b | Stage 2b — `TestLoader` owns full + delta tests (`:TestCase` dual-label + MOCKS/SPIES/derived TESTS). The subsystem that demoted on every delta before this session's fix now lives in one place. Delegated Sonnet agent; orchestrator removed the dead `_load_tests`/`_replace_tests`; 19/19 green. | ✅ | `importer/loaders/tests.py` |
 | E5.2c | Stage 2c — `JpaLoader` owns full + delta JPA (`:JpaEntity`/`:JpaColumn`/`:JpaRepository` dual-labels + HAS_COLUMN/RELATES_TO/REPOSITORY_FOR/QUERIES). Combined the two non-contiguous loader blocks into one `load_full`; verified SQL-subsystem ordering preserved. Delegated Sonnet agent; 19/19 green. | ✅ | `importer/loaders/jpa.py` |
+| E5.2d | Stage 2d — `SpringLoader` owns full + delta Spring (`SpringBean`/`Endpoint`/`SpringAutoConfig` + HANDLES/INJECTS/REGISTERED_AS, wing-stamped). The subsystem whose delta dropped `wing` (zeroing the Vue↔Spring HITS bridge) before this session's fix. Delegated Sonnet agent; `_replace_modules` left intact; 19/19 green. All 4 major subsystems now single-sourced. | ✅ | `importer/loaders/spring.py` |
 
 ## Open regression / verification items
 
