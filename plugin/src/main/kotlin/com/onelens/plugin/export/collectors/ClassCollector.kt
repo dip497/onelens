@@ -27,37 +27,55 @@ object ClassCollector {
         LOG.info("Found ${allNames.size} unique class names")
 
         val scope = workspace.scope(project)
-        val result = mutableListOf<ClassData>()
-        val seen = mutableSetOf<String>()
 
-        // Step 2: process each name in a small ReadAction (UI stays responsive)
-        for (name in allNames) {
-            ProgressManager.checkCanceled()
+        // Parallel per-name extraction — each class name is an independent
+        // PsiShortNamesCache lookup. On a 16-core machine the sequential loop
+        // took 60s; parallelizing targets ~8s.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val result = java.util.concurrent.ConcurrentLinkedQueue<ClassData>()
+        val seen = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-            val classes = ReadAction.compute<List<ClassData>, Throwable> {
-                val batch = mutableListOf<ClassData>()
-                val psiClasses = PsiShortNamesCache.getInstance(project).getClassesByName(name, scope)
+        try {
+            val futures = allNames.toList().chunked(maxOf(1, allNames.size / threads)).map { chunk ->
+                executor.submit<Unit> {
+                    for (name in chunk) {
+                        ProgressManager.checkCanceled()
+                        try {
+                            val classes = ReadAction.compute<List<ClassData>, Throwable> {
+                                val batch = mutableListOf<ClassData>()
+                                val psiClasses = PsiShortNamesCache.getInstance(project).getClassesByName(name, scope)
 
-                for (psiClass in psiClasses) {
-                    val fqn = psiClass.qualifiedName ?: continue
-                    if (psiClass.name == null) continue
-                    if (!seen.add(fqn)) continue
+                                for (psiClass in psiClasses) {
+                                    val fqn = psiClass.qualifiedName ?: continue
+                                    if (psiClass.name == null) continue
+                                    if (!seen.add(fqn)) continue
 
-                    val file = psiClass.containingFile?.virtualFile ?: continue
-                    // Filter to workspace roots — prevents sibling-repo / library
-                    // leakage when the scope union is permissive for type resolution.
-                    if (!workspace.contains(file.path)) continue
-                    val filePath = workspace.relativePath(file)
+                                    val file = psiClass.containingFile?.virtualFile ?: continue
+                                    // Filter to workspace roots — prevents sibling-repo / library
+                                    // leakage when the scope union is permissive for type resolution.
+                                    if (!workspace.contains(file.path)) continue
+                                    val filePath = workspace.relativePath(file)
 
-                    batch.add(extractClassData(psiClass, fqn, filePath, project))
+                                    batch.add(extractClassData(psiClass, fqn, filePath, project))
+                                }
+                                batch
+                            }
+                            result.addAll(classes)
+                        } catch (e: Exception) {
+                            LOG.warn("Class extraction failed for name '$name': ${e.message}")
+                        }
+                    }
                 }
-                batch
             }
-            result.addAll(classes)
+            futures.forEach { it.get() }
+        } finally {
+            executor.shutdown()
         }
 
-        LOG.info("Collected ${result.size} classes/interfaces/enums")
-        return result
+        val resultList = result.toList()
+        LOG.info("Collected ${resultList.size} classes/interfaces/enums")
+        return resultList
     }
 
     private fun extractClassData(

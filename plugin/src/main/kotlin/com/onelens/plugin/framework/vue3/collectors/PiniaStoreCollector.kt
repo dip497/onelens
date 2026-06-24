@@ -21,6 +21,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.StoreData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.isTestFile
 import com.onelens.plugin.framework.vue3.smartRead
 
 /**
@@ -127,12 +128,14 @@ object PiniaStoreCollector {
                 id = id,
                 name = exportName,
                 filePath = relative,
+                fqn = "$relative::$exportName",
                 style = style,
                 state = state,
                 getters = getters,
                 actions = actions,
                 lineStart = 0,
-                body = body?.take(MAX_BODY_CHARS)
+                body = body?.take(MAX_BODY_CHARS),
+                isTest = isTestFile(relative)
             )
         }
         return result

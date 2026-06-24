@@ -18,9 +18,15 @@ object CallGraphCollector {
 
     private val LOG = logger<CallGraphCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): List<CallEdge> {
-        // Use half the available cores — keep system responsive
-        val threads = maxOf(1, Runtime.getRuntime().availableProcessors() / 2)
+    fun collect(
+        project: Project,
+        classes: List<ClassData>,
+        workspace: Workspace,
+    ): List<CallEdge> {
+        // Use all available cores — in headless mode we don't need to keep the
+        // system responsive. PSI resolveMethod() is partly I/O-bound (index lock
+        // acquisition + stub lookups), so more threads overlap the blocking waits.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
         val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
         val allEdges = java.util.concurrent.ConcurrentLinkedQueue<CallEdge>()
 

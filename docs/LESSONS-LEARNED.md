@@ -76,10 +76,23 @@ What was tried, what failed, and what to avoid. Read this before making changes.
 - **Gotcha**: Some "missing" callees are actually project classes with implicit default constructors that PSI doesn't export. These should be `external: false`, not `true`. Split by checking if the class FQN exists in the project class set.
 - **Rule**: After import, verify `MATCH ()-[r:CALLS]->() RETURN count(r)` matches the export's `callEdgeCount`. If not, stubs are missing.
 
+### Vue node identity must be declaration-location-qualified, not framework-id-based
+- **Problem**: Pinia store nodes used the framework's own `id` (the first arg to `defineStore('modules', ...)`) as the graph MERGE key. Vitest `vi.mock()` factories in test files call the real `defineStore('modules', {...})` with the SAME id but fewer actions. The importer's `MERGE (n:Store {id: item.id})` collapsed them — last-write-wins overwrote the real store's 10 actions with the mock's 1 fake `vi.fn()`. **This was silent data corruption**, not just noise: queries for "what does useModulesStore do?" returned the mock's stub.
+- **Root cause**: The Pinia `id` is a *runtime* singleton key, not a *declaration* identity. Multiple source files legitimately define a store with the same id (real + N test mocks), just as Java has `Bar` and `BarTest`. The graph needs declaration-level identity, not runtime-level.
+- **Fix**: Every Vue node now carries `fqn = "<filePath>::<name>"` (the convention Composable/JsFunction/ApiCall already used). The importer MERGEs on `fqn`, so the real store (`src/state/modulesStore.js::useModulesStore`) and the mock (`__tests__/list.test.js::useModulesStore`) are separate nodes — same as Java's `Bar` vs `BarTest`. Edges carry `storeFqn` so `USES_STORE` links to the correct node. Test-originated nodes are tagged `isTest=true` (not excluded — Java indexes tests too, and the mock→real relationship is queryable).
+- **Rule**: Graph node identity = declaration location, never a framework's runtime singleton key. If two source files can legitimately produce the same framework id, the MERGE key must include the file path. When adding a new framework adapter, audit every node type: does its "natural" id collide across test mocks or multi-module definitions? If yes, qualify it with filePath.
+
 ### Don't try to index transitive library dependencies in the graph
 - **Tried**: User asked "blast radius of upgrading Jersey?" — graph showed zero usage. But Jira SDK uses Jersey internally, and the project overrides the Jersey version in pom.xml.
 - **Problem**: The graph only sees your code → library calls. It can't see library → library dependencies (Jira → Jersey).
 - **Lesson**: This is a dependency management problem, not a code graph problem. Use `mvn dependency:tree` for transitive deps. Don't bolt dependency resolution onto the graph — Maven/Gradle already solve it. Stay focused: OneLens = code intelligence, not dependency management.
+
+### Multi-project workspace: Maven import ordering matters
+- **Problem**: When a workspace YAML declares sibling repos as roots (e.g. `../sibling_plugins`), the headless Maven import added sibling poms via `addManagedFiles()` BEFORE checking `hasProjects()`. The siblings registered first → `hasProjects()` returned true → `forceUpdateAllProjectsOrFindAllAvailablePomFiles()` was SKIPPED → the primary project's pom was never discovered → primary classes missing from the export.
+- **Fix**: Always call `forceUpdateAllProjectsOrFindAllAvailablePomFiles()` (primary discovery) BEFORE `addManagedFiles(siblingPoms)`. The ordering is critical: primary discovery must see `hasProjects() == false` to trigger pom scanning.
+- **Inter-project dependency caveat**: Sibling repos with dependencies on the primary project's artifacts (e.g. `com.example.common`) need `mvn install -DskipTests` on the primary first. Without it, Maven creates the sibling modules but can't resolve their dependencies → IntelliJ can't create proper source roots → those classes never enter the stub index.
+- **Rule**: `Workspace.scope()` adds sibling directories to the SEARCH SCOPE, but scope ≠ index. `PsiShortNamesCache` only returns classes from the STUB INDEX, which only covers files IntelliJ has actually indexed. Module registration ≠ index coverage — the files must be in both the module model AND the stub index.
+- **Rule**: `FileBasedIndex.requestReindex()` marks files as DIRTY (changed), triggering a full rescan that can invalidate the primary project's stable index. For NEW files IntelliJ hasn't seen, VFS refresh + `UnindexedFilesScanner` is the correct mechanism, not `requestReindex`.
 
 ## What NOT to do
 

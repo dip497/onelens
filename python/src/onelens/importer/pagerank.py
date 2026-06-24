@@ -184,16 +184,19 @@ def compute_vue_pagerank(db) -> tuple[dict[str, float], dict[str, float], dict[s
     flows Route -> Component -> (Store | Composable | ApiCall), which matches how
     a user's traffic actually exercises the frontend.
 
-    Returns (component_scores, composable_scores, store_scores) keyed by filePath
-    (Component), fqn (Composable), id (Store). Empty when NetworkX is absent or
-    there are no Vue nodes.
+    Returns (component_scores, composable_scores, store_scores) keyed by fqn
+    (Component, Composable, Store all use "<filePath>::<name>"). Empty when
+    NetworkX is absent or there are no Vue nodes.
     """
     if nx is None:
         return {}, {}, {}
 
     # Build the combined frontend digraph in one query per edge type; cheap.
-    component_rows = db.query("MATCH (c:Component) RETURN c.filePath AS id") or []
-    store_rows = db.query("MATCH (s:Store) RETURN s.id AS id") or []
+    # All Vue nodes are keyed on `fqn` ("<filePath>::<name>") — the stable
+    # declaration identity. Component and Store previously used filePath / id
+    # which collided across test mocks; fqn is unique per declaration.
+    component_rows = db.query("MATCH (c:Component) RETURN c.fqn AS id") or []
+    store_rows = db.query("MATCH (s:Store) RETURN s.fqn AS id") or []
     composable_rows = db.query("MATCH (co:Composable) RETURN co.fqn AS id") or []
     route_rows = db.query("MATCH (r:Route) RETURN r.name AS id") or []
 
@@ -222,36 +225,37 @@ def compute_vue_pagerank(db) -> tuple[dict[str, float], dict[str, float], dict[s
     # Route -> Component edges (from DISPATCHES) carry user traffic into the tree.
     for row in db.query(
         "MATCH (r:Route)-[:DISPATCHES]->(c:Component) "
-        "WHERE r.name IS NOT NULL AND c.filePath IS NOT NULL "
-        "RETURN r.name AS r, c.filePath AS c"
+        "WHERE r.name IS NOT NULL AND c.fqn IS NOT NULL "
+        "RETURN r.name AS r, c.fqn AS c"
     ) or []:
         G.add_edge(cid("route", row["r"]), cid("component", row["c"]))
 
     # Component / Composable -> Store (both direct and indirect edges).
-    for row in db.query(
-        "MATCH (caller)-[:USES_STORE]->(s:Store) "
-        "WHERE s.id IS NOT NULL RETURN "
-        "labels(caller)[0] AS kind, coalesce(caller.filePath, caller.fqn) AS src, s.id AS dst"
-    ) or []:
-        kind = (row.get("kind") or "").lower()
-        src = row.get("src")
-        dst = row.get("dst")
-        if not (kind and src and dst):
-            continue
-        G.add_edge(cid(kind, src), cid("store", dst))
+    # Two label-specific queries — a label-less `MATCH (caller)-[:USES_STORE]->`
+    # forces a full graph scan (222K+ nodes). Splitting by caller label lets
+    # FalkorDB use the Component_fqn / Composable index.
+    for label in ("Component", "Composable"):
+        for row in db.query(
+            f"MATCH (caller:{label})-[:USES_STORE]->(s:Store) "
+            "WHERE caller.fqn IS NOT NULL AND s.fqn IS NOT NULL RETURN "
+            f"caller.fqn AS src, s.fqn AS dst"
+        ) or []:
+            src = row.get("src")
+            dst = row.get("dst")
+            if src and dst:
+                G.add_edge(cid(label.lower(), src), cid("store", dst))
 
-    # Component / Composable -> Composable
-    for row in db.query(
-        "MATCH (caller)-[:USES_COMPOSABLE]->(co:Composable) "
-        "WHERE co.fqn IS NOT NULL RETURN "
-        "labels(caller)[0] AS kind, coalesce(caller.filePath, caller.fqn) AS src, co.fqn AS dst"
-    ) or []:
-        kind = (row.get("kind") or "").lower()
-        src = row.get("src")
-        dst = row.get("dst")
-        if not (kind and src and dst):
-            continue
-        G.add_edge(cid(kind, src), cid("composable", dst))
+    # Component / Composable -> Composable — same label-split pattern.
+    for label in ("Component", "Composable"):
+        for row in db.query(
+            f"MATCH (caller:{label})-[:USES_COMPOSABLE]->(co:Composable) "
+            "WHERE caller.fqn IS NOT NULL AND co.fqn IS NOT NULL RETURN "
+            f"caller.fqn AS src, co.fqn AS dst"
+        ) or []:
+            src = row.get("src")
+            dst = row.get("dst")
+            if src and dst:
+                G.add_edge(cid(label.lower(), src), cid("composable", dst))
 
     if G.number_of_nodes() == 0:
         return {}, {}, {}
@@ -294,11 +298,11 @@ def write_vue_pagerank(
     written = {"components": 0, "composables": 0, "stores": 0}
 
     if component_scores:
-        items = [{"fp": fp, "pr": float(pr)} for fp, pr in component_scores.items()]
+        items = [{"fqn": fqn, "pr": float(pr)} for fqn, pr in component_scores.items()]
         for i in range(0, len(items), 2000):
             chunk = items[i : i + 2000]
             db.query(
-                "UNWIND $items AS row MATCH (c:Component {filePath: row.fp}) "
+                "UNWIND $items AS row MATCH (c:Component {fqn: row.fqn}) "
                 "SET c.pagerank = row.pr",
                 {"items": chunk},
             )
@@ -316,11 +320,11 @@ def write_vue_pagerank(
             written["composables"] += len(chunk)
 
     if store_scores:
-        items = [{"id": i_, "pr": float(pr)} for i_, pr in store_scores.items()]
+        items = [{"fqn": fqn, "pr": float(pr)} for fqn, pr in store_scores.items()]
         for i in range(0, len(items), 2000):
             chunk = items[i : i + 2000]
             db.query(
-                "UNWIND $items AS row MATCH (s:Store {id: row.id}) "
+                "UNWIND $items AS row MATCH (s:Store {fqn: row.fqn}) "
                 "SET s.pagerank = row.pr",
                 {"items": chunk},
             )

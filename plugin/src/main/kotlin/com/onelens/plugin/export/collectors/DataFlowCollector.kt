@@ -30,8 +30,12 @@ object DataFlowCollector {
 
     private val LOG = logger<DataFlowCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): DataFlowData {
-        val threads = maxOf(1, Runtime.getRuntime().availableProcessors() / 2)
+    fun collect(
+        project: Project,
+        classes: List<ClassData>,
+        workspace: Workspace,
+    ): DataFlowData {
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
         val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
         val fieldAccesses = java.util.concurrent.ConcurrentLinkedQueue<FieldAccessEdge>()
         val instantiations = java.util.concurrent.ConcurrentLinkedQueue<InstantiationEdge>()

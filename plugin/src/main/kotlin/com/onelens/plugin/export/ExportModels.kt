@@ -194,7 +194,11 @@ data class Vue3Data(
 data class JsModuleData(
     val filePath: String,              // project-relative, canonicalized
     val isBarrel: Boolean = false,     // heuristic: all statements are re-exports
-    val fileKind: String = "js"        // "js" | "ts" | "vue"
+    val fileKind: String = "js",       // "js" | "ts" | "vue"
+    // True when the file lives under a test directory or matches a test-file
+    // naming convention (__tests__/, *.test.js, *.spec.js). Indexed but tagged
+    // so retrieval/queries can distinguish production modules from test doubles.
+    val isTest: Boolean = false
 )
 
 /**
@@ -213,7 +217,8 @@ data class JsFunctionData(
     val isAsync: Boolean = false,
     val lineStart: Int = 0,
     val lineEnd: Int = 0,
-    val body: String? = null
+    val body: String? = null,
+    val isTest: Boolean = false
 )
 
 /**
@@ -243,13 +248,20 @@ data class ImportsEdge(
 data class ComponentData(
     val name: String,
     val filePath: String,         // canonical (symlink-resolved) relative path
+    // Stable identity: "<filePath>::<name>". Matches the callerFqn convention
+    // already used by edges (UsesStoreEdge, CallsApiEdge) and by the existing
+    // Composable / JsFunction fqn field. The importer MERGEs Component nodes
+    // on this field so test-file components and production components with the
+    // same name (e.g. 58 files all named "list") never collide.
+    val fqn: String,
     val scriptSetup: Boolean = true,
     val props: List<PropData> = emptyList(),
     val emits: List<String> = emptyList(),
     val exposes: List<String> = emptyList(),
     val lineStart: Int = 0,
     val lineEnd: Int = 0,
-    val body: String? = null       // <script setup> content, truncated by Python miner
+    val body: String? = null,      // <script setup> content, truncated by Python miner
+    val isTest: Boolean = false
 )
 
 @Serializable
@@ -267,20 +279,30 @@ data class ComposableData(
     val filePath: String,
     val lineStart: Int = 0,
     val lineEnd: Int = 0,
-    val body: String? = null
+    val body: String? = null,
+    val isTest: Boolean = false
 )
 
 @Serializable
 data class StoreData(
-    val id: String,               // first arg of defineStore(...)
+    val id: String,               // first arg of defineStore(...) — Pinia store id (NOT unique)
     val name: String,             // `useXStore` export name
     val filePath: String,
+    // Stable identity: "<filePath>::<name>". The Pinia `id` is NOT unique —
+    // test mocks (vi.mock factories) call defineStore('modules', {...}) with
+    // the SAME id as the real store. Merging on `id` collapses them and
+    // last-write-wins overwrites the real store. Merging on `fqn` keeps the
+    // real store (src/state/modulesStore.js::useModulesStore) and the mock
+    // (src/modules/.../__tests__/list.test.js::useModulesStore) as separate
+    // nodes — same model as Java Bar vs BarTest.
+    val fqn: String,
     val style: String = "options", // "options" | "setup"
     val state: List<String> = emptyList(),
     val getters: List<String> = emptyList(),
     val actions: List<String> = emptyList(),
     val lineStart: Int = 0,
-    val body: String? = null
+    val body: String? = null,
+    val isTest: Boolean = false
 )
 
 @Serializable
@@ -308,7 +330,11 @@ data class ApiCallData(
 @Serializable
 data class UsesStoreEdge(
     val callerFqn: String,        // component or composable fqn
-    val storeId: String,
+    val storeId: String,          // Pinia store id (kept for back-compat / diagnostics)
+    // FQN of the target Store node ("<filePath>::<name>"). Resolved at edge-
+    // creation time by CallThroughResolver from the matched store's fqn, so
+    // the importer can MATCH the correct Store node without reconstructing it.
+    val storeFqn: String,
     val indirect: Boolean = false,
     val via: String? = null       // wrapper function name when indirect
 )

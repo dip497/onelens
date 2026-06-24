@@ -1,5 +1,6 @@
 package com.onelens.plugin.framework.springboot
 
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.onelens.plugin.export.AnnotationUsage
@@ -121,92 +122,81 @@ class SpringBootCollector : Collector {
         val indicator = ctx.indicator
         val base = ctx.progressFraction
         val workspace = ctx.workspace
+        val timings = StringBuilder()
+        fun <T> timed(label: String, fraction: Double, block: () -> T?): T? {
+            indicator?.text = "Java: $label…"
+            indicator?.fraction = fraction
+            val start = System.nanoTime()
+            val result = block()
+            val ms = (System.nanoTime() - start) / 1_000_000
+            timings.append("  $label: ${ms}ms\n")
+            return result
+        }
 
-        indicator?.text = "Java: collecting classes…"
-        indicator?.fraction = base
-        val classes = ClassCollector.collect(project, workspace)
-        LOG.info("Collected ${classes.size} classes")
+        val classes = timed("collecting classes", base) {
+            ClassCollector.collect(project, workspace).also { LOG.info("Collected ${it.size} classes") }
+        }!!
 
-        indicator?.text = "Java: methods & fields (${classes.size} classes)…"
-        indicator?.fraction = base + 0.02
-        val members = MemberCollector.collect(project, classes, workspace)
-        LOG.info("Collected ${members.methods.size} methods, ${members.fields.size} fields")
-
-        indicator?.text = "Java: resolving call graph…"
-        indicator?.fraction = base + 0.05
-        val callGraph = CallGraphCollector.collect(project, classes, workspace)
-        LOG.info("Collected ${callGraph.size} call edges")
-
-        indicator?.text = "Java: data-flow (field access, instantiation)…"
-        indicator?.fraction = base + 0.23
-        val dataFlow = try { DataFlowCollector.collect(project, classes, workspace) }
+        val members = timed("methods & fields (${classes.size} classes)", base + 0.02) {
+            MemberCollector.collect(project, classes, workspace).also { LOG.info("Collected ${it.methods.size} methods, ${it.fields.size} fields") }
+        }!!
+        @Suppress("UNCHECKED_CAST")
+        val callGraph = timed("resolving call graph", base + 0.05) {
+            CallGraphCollector.collect(project, classes, workspace).also { LOG.info("Collected ${it.size} call edges") }
+        }!!
+        val dataFlow = timed("data-flow (field access, instantiation)", base + 0.23) {
+            try { DataFlowCollector.collect(project, classes, workspace) }
             catch (t: Throwable) { LOG.warn("DataFlowCollector failed", t); null }
-
-        indicator?.text = "Java: inheritance & overrides…"
-        indicator?.fraction = base + 0.25
-        val inheritance = InheritanceCollector.collect(project, classes, workspace)
-        LOG.info("Collected ${inheritance.edges.size} inheritance edges, ${inheritance.overrides.size} overrides")
-
-        indicator?.text = "Java: modules…"
-        indicator?.fraction = base + 0.35
-        val modules = ModuleCollector.collect(project, workspace)
-        LOG.info("Collected ${modules.size} modules")
-
-        indicator?.text = "Java: annotation usages…"
-        indicator?.fraction = base + 0.38
-        val annotations = AnnotationCollector.collect(project, classes, workspace)
-        LOG.info("Collected ${annotations.size} annotation usages")
-
-        indicator?.text = "Java: Spring beans & endpoints…"
-        indicator?.fraction = base + 0.42
-        val annotationSpring = SpringCollector.collect(project, workspace)
-
-        // Augment with IntelliJ Spring-plugin model when available. The plugin
-        // resolves @Bean factories, XML beans, JAM beans, @Primary, scope — things
-        // annotation scraping misses. Guard is runtime so the JAR still loads on
-        // IC / WebStorm where com.intellij.spring is absent; the SpringModelCollector
-        // class (which statically references SpringManager) is only touched on the
-        // true branch, so the JVM never tries to verify it otherwise.
+        }
+        val inheritance = timed("inheritance & overrides", base + 0.25) {
+            InheritanceCollector.collect(project, classes, workspace).also { LOG.info("Collected ${it.edges.size} inheritance edges, ${it.overrides.size} overrides") }
+        }!!
+        val modules = timed("modules", base + 0.35) {
+            ModuleCollector.collect(project, workspace).also { LOG.info("Collected ${it.size} modules") }
+        }!!
+        val annotations = timed("annotation usages", base + 0.38) {
+            AnnotationCollector.collect(project, classes, workspace).also { LOG.info("Collected ${it.size} annotation usages") }
+        }!!
+        val annotationSpring = timed("Spring beans & endpoints", base + 0.42) {
+            SpringCollector.collect(project, workspace)
+        }
         val springModelBeans = if (isSpringPluginAvailable()) {
-            try { SpringModelCollector.collect(project, workspace) }
-            catch (t: Throwable) {
-                LOG.warn("SpringModelCollector failed — falling back to annotation beans", t)
-                emptyList()
+            timed("Spring model (@Bean, XML, scope)", base + 0.425) {
+                try { SpringModelCollector.collect(project, workspace) }
+                catch (t: Throwable) { LOG.warn("SpringModelCollector failed", t); emptyList() }
             }
-        } else emptyList()
-        val mergedSpring = mergeSpring(annotationSpring, springModelBeans)
-
-        indicator?.text = "Spring: auto-configuration chains…"
-        indicator?.fraction = base + 0.43
-        val autoConfigs = try { AutoConfigCollector.collect(project, workspace) }
+        } else null
+        val mergedSpring = mergeSpring(annotationSpring, springModelBeans ?: emptyList())
+        val autoConfigs = timed("Spring auto-configuration chains", base + 0.43) {
+            try { AutoConfigCollector.collect(project, workspace) }
             catch (t: Throwable) { LOG.warn("AutoConfigCollector failed", t); emptyList() }
+        }!!
         val spring = if (mergedSpring != null || autoConfigs.isNotEmpty()) {
             (mergedSpring ?: SpringData()).copy(autoConfigs = autoConfigs)
         } else null
 
-        indicator?.text = "JPA: entities & repositories…"
-        indicator?.fraction = base + 0.44
-        val jpa = try { JpaCollector.collect(project, workspace) }
+        val jpa = timed("JPA entities & repositories", base + 0.44) {
+            try { JpaCollector.collect(project, workspace) }
             catch (t: Throwable) { LOG.warn("JpaCollector failed", t); null }
-
-        indicator?.text = "Apps & packages…"
-        indicator?.fraction = base + 0.445
-        val apps = try { AppCollector.collect(project, workspace) }
+        }
+        val apps = timed("apps", base + 0.445) {
+            try { AppCollector.collect(project, workspace) }
             catch (t: Throwable) { LOG.warn("AppCollector failed", t); emptyList() }
+        }!!
         val packages = try { PackageCollector.collect(classes, apps) }
             catch (t: Throwable) { LOG.warn("PackageCollector failed", t); emptyList() }
-
-        indicator?.text = "Tests…"
-        indicator?.fraction = base + 0.448
-        val testResult = try { TestCollector.collect(project, workspace) }
+        val testResult = timed("tests", base + 0.448) {
+            try { TestCollector.collect(project, workspace) }
             catch (t: Throwable) {
                 LOG.warn("TestCollector failed", t)
                 TestCollector.Result(emptyList(), emptyList(), emptyList())
             }
+        }!!
+        val diagnostics = timed("diagnostics", base + 0.45) {
+            DiagnosticsCollector.collect(project)
+        }!!
 
-        indicator?.text = "Java: diagnostics…"
-        indicator?.fraction = base + 0.45
-        val diagnostics = DiagnosticsCollector.collect(project)
+        System.err.println("[onelens] Java collector timings:\n$timings")
 
         val result = SpringBootCollectionResult(
             classes = classes,

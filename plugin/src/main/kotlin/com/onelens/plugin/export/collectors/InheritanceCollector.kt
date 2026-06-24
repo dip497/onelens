@@ -23,73 +23,94 @@ object InheritanceCollector {
 
     private val LOG = logger<InheritanceCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): InheritanceResult {
+    fun collect(
+        project: Project,
+        classes: List<ClassData>,
+        workspace: Workspace,
+    ): InheritanceResult {
         val facade = JavaPsiFacade.getInstance(project)
         val scope = workspace.scope(project)
 
-        val inheritanceEdges = mutableListOf<InheritanceEdge>()
-        val overrideEdges = mutableListOf<OverrideEdge>()
-        val seenOverrides = mutableSetOf<String>()
+        // Parallel per-class extraction — same pattern as CallGraphCollector.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val inheritanceEdges = java.util.concurrent.ConcurrentLinkedQueue<InheritanceEdge>()
+        val overrideEdges = java.util.concurrent.ConcurrentLinkedQueue<OverrideEdge>()
+        val seenOverrides = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-        for (classData in classes) {
-            ProgressManager.checkCanceled()
+        try {
+            val futures = classes.chunked(maxOf(1, classes.size / threads)).map { chunk ->
+                executor.submit<Unit> {
+                    for (classData in chunk) {
+                        ProgressManager.checkCanceled()
+                        try {
+                            ReadAction.run<Throwable> {
+                                val psiClass = facade.findClass(classData.fqn, scope) ?: return@run
 
-            ReadAction.run<Throwable> {
-                val psiClass = facade.findClass(classData.fqn, scope) ?: return@run
+                                // EXTENDS
+                                val superClass = psiClass.superClass
+                                if (superClass != null) {
+                                    val superFqn = superClass.qualifiedName
+                                    if (superFqn != null && superFqn != "java.lang.Object") {
+                                        inheritanceEdges.add(InheritanceEdge(classData.fqn, superFqn, "EXTENDS"))
+                                    }
+                                }
 
-                // EXTENDS
-                val superClass = psiClass.superClass
-                if (superClass != null) {
-                    val superFqn = superClass.qualifiedName
-                    if (superFqn != null && superFqn != "java.lang.Object") {
-                        inheritanceEdges.add(InheritanceEdge(classData.fqn, superFqn, "EXTENDS"))
-                    }
-                }
+                                // IMPLEMENTS (directly declared only)
+                                for (ref in psiClass.implementsListTypes) {
+                                    val resolved = ref.resolve()
+                                    if (resolved is PsiClass) {
+                                        val ifaceFqn = resolved.qualifiedName ?: return@run
+                                        inheritanceEdges.add(InheritanceEdge(classData.fqn, ifaceFqn, "IMPLEMENTS"))
+                                    }
+                                }
 
-                // IMPLEMENTS (directly declared only)
-                for (ref in psiClass.implementsListTypes) {
-                    val resolved = ref.resolve()
-                    if (resolved is PsiClass) {
-                        val ifaceFqn = resolved.qualifiedName ?: return@run
-                        inheritanceEdges.add(InheritanceEdge(classData.fqn, ifaceFqn, "IMPLEMENTS"))
-                    }
-                }
+                                // Interface extends interface
+                                for (ref in psiClass.extendsListTypes) {
+                                    val resolved = ref.resolve()
+                                    if (resolved is PsiClass && resolved.qualifiedName != "java.lang.Object") {
+                                        val parentFqn = resolved.qualifiedName ?: return@run
+                                        if (parentFqn != superClass?.qualifiedName) {
+                                            inheritanceEdges.add(InheritanceEdge(
+                                                classData.fqn, parentFqn,
+                                                if (psiClass.isInterface) "EXTENDS" else "IMPLEMENTS"
+                                            ))
+                                        }
+                                    }
+                                }
 
-                // Interface extends interface
-                for (ref in psiClass.extendsListTypes) {
-                    val resolved = ref.resolve()
-                    if (resolved is PsiClass && resolved.qualifiedName != "java.lang.Object") {
-                        val parentFqn = resolved.qualifiedName ?: return@run
-                        if (parentFqn != superClass?.qualifiedName) {
-                            inheritanceEdges.add(InheritanceEdge(
-                                classData.fqn, parentFqn,
-                                if (psiClass.isInterface) "EXTENDS" else "IMPLEMENTS"
-                            ))
-                        }
-                    }
-                }
-
-                // Method overrides (immediate parents via findSuperMethods)
-                for (method in psiClass.methods) {
-                    if (method.containingClass != psiClass) continue
-                    val superMethods = method.findSuperMethods(false)
-                    if (superMethods.isNotEmpty()) {
-                        val childFqn = buildMethodFqn(method, classData.fqn)
-                        for (superMethod in superMethods) {
-                            val superClassFqn = superMethod.containingClass?.qualifiedName ?: continue
-                            val parentFqn = buildMethodFqn(superMethod, superClassFqn)
-                            val key = "$childFqn→$parentFqn"
-                            if (seenOverrides.add(key)) {
-                                overrideEdges.add(OverrideEdge(childFqn, parentFqn))
+                                // Method overrides (immediate parents via findSuperMethods)
+                                for (method in psiClass.methods) {
+                                    if (method.containingClass != psiClass) continue
+                                    val superMethods = method.findSuperMethods(false)
+                                    if (superMethods.isNotEmpty()) {
+                                        val childFqn = buildMethodFqn(method, classData.fqn)
+                                        for (superMethod in superMethods) {
+                                            val superClassFqn = superMethod.containingClass?.qualifiedName ?: continue
+                                            val parentFqn = buildMethodFqn(superMethod, superClassFqn)
+                                            val key = "$childFqn→$parentFqn"
+                                            if (seenOverrides.add(key)) {
+                                                overrideEdges.add(OverrideEdge(childFqn, parentFqn))
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        } catch (e: Exception) {
+                            LOG.warn("Inheritance extraction failed for ${classData.fqn}: ${e.message}")
                         }
                     }
                 }
             }
+            futures.forEach { it.get() }
+        } finally {
+            executor.shutdown()
         }
 
-        LOG.info("Collected ${inheritanceEdges.size} inheritance edges, ${overrideEdges.size} overrides")
-        return InheritanceResult(inheritanceEdges, overrideEdges)
+        val edgeList = inheritanceEdges.toList()
+        val overrideList = overrideEdges.toList()
+        LOG.info("Collected ${edgeList.size} inheritance edges, ${overrideList.size} overrides")
+        return InheritanceResult(edgeList, overrideList)
     }
 
     private fun buildMethodFqn(method: PsiMethod, classFqn: String): String {

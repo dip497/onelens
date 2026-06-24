@@ -53,6 +53,12 @@ object CallThroughResolver {
         val storeByName = ctx.stores.associateBy { it.name }
         val composableByName = ctx.composables.associateBy { it.name }
 
+        // File-path → ComponentData index. Replaces the O(files × components) linear
+        // scans (`.any { it.filePath == relative }` / `.first { it.filePath == relative }`)
+        // that ran per file AND per call expression with O(1) HashMap lookups.
+        val componentByPath = ctx.components.associateBy { it.filePath }
+        val composablePaths: Set<String> = ctx.composables.map { it.filePath }.toSet()
+
         // Also build a view "file → defineStore exports" so we can detect wrappers that
         // internally invoke a store from the same file they live in.
         val storeFiles: Set<String> = ctx.stores.map { it.filePath }.toSet()
@@ -77,8 +83,9 @@ object CallThroughResolver {
             // symbolic name; for composable/store files we use file::fn form, matching
             // how the collectors emit fqns.
             val componentName = vf.name.removeSuffix(".vue")
-            val fileIsComponent = ctx.components.any { it.filePath == relative }
-            val fileIsComposable = ctx.composables.any { it.filePath == relative }
+            val component = componentByPath[relative]
+            val fileIsComponent = component != null
+            val fileIsComposable = relative in composablePaths
             if (!fileIsComponent && !fileIsComposable) continue
 
             ReadAction.run<Throwable> {
@@ -89,11 +96,9 @@ object CallThroughResolver {
                     val name = ref.referenceName ?: continue
                     if (!name.startsWith("use")) continue
 
-                    val callerFqn = if (fileIsComponent) {
+                    val callerFqn = if (fileIsComponent && component != null) {
                         // Component fqn matches SfcScriptSetupCollector: just the name
-                        ctx.components.first { it.filePath == relative }.let {
-                            "${it.filePath}::${it.name}"
-                        }
+                        "${component.filePath}::${component.name}"
                     } else {
                         val fn = PsiTreeUtil.getParentOfType(call, JSFunction::class.java, true)
                         "$relative::${fn?.name ?: componentName}"
@@ -107,6 +112,7 @@ object CallThroughResolver {
                             ctx.usesStore += UsesStoreEdge(
                                 callerFqn = callerFqn,
                                 storeId = directStore.id,
+                                storeFqn = directStore.fqn,
                                 indirect = false,
                                 via = null
                             )
@@ -138,6 +144,7 @@ object CallThroughResolver {
                                     ctx.usesStore += UsesStoreEdge(
                                         callerFqn = callerFqn,
                                         storeId = store.id,
+                                        storeFqn = store.fqn,
                                         indirect = true,
                                         via = composable.name
                                     )

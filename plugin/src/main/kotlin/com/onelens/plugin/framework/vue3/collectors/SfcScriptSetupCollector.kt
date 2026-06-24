@@ -18,6 +18,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComponentData
 import com.onelens.plugin.export.PropData
 import com.onelens.plugin.framework.vue3.Vue3Context
+import com.onelens.plugin.framework.vue3.isTestFile
 import com.onelens.plugin.framework.vue3.smartRead
 import java.nio.file.Paths
 
@@ -99,11 +100,13 @@ object SfcScriptSetupCollector {
         return ComponentData(
             name = name,
             filePath = relative,
+            fqn = "$relative::$name",
             scriptSetup = true,
             props = props,
             emits = emits,
             exposes = exposes,
-            body = scriptSetupBody?.take(MAX_BODY_CHARS)
+            body = scriptSetupBody?.take(MAX_BODY_CHARS),
+            isTest = isTestFile(relative)
         )
     }
 

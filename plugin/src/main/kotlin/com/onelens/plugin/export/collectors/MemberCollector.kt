@@ -27,52 +27,73 @@ object MemberCollector {
     /** Shared JSON codec for serializing EnumConstant.args / Annotation.attributes. */
     private val JSON: Json = Json { encodeDefaults = true }
 
-    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): MemberResult {
+    fun collect(
+        project: Project,
+        classes: List<ClassData>,
+        workspace: Workspace,
+    ): MemberResult {
         val facade = JavaPsiFacade.getInstance(project)
         val scope = workspace.scope(project)
 
-        val methods = mutableListOf<MethodData>()
-        val fields = mutableListOf<FieldData>()
-        val enumConstants = mutableListOf<EnumConstantData>()
+        // Parallel per-class extraction — same pattern as CallGraphCollector.
+        // On a 16-core machine the sequential loop took 35s for 10K classes;
+        // parallelizing across all cores targets ~5s.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val methods = java.util.concurrent.ConcurrentLinkedQueue<MethodData>()
+        val fields = java.util.concurrent.ConcurrentLinkedQueue<FieldData>()
+        val enumConstants = java.util.concurrent.ConcurrentLinkedQueue<EnumConstantData>()
 
-        for (classData in classes) {
-            ProgressManager.checkCanceled()
+        try {
+            val futures = classes.chunked(maxOf(1, classes.size / threads)).map { chunk ->
+                executor.submit<Unit> {
+                    for (classData in chunk) {
+                        ProgressManager.checkCanceled()
+                        try {
+                            ReadAction.run<Throwable> {
+                                val psiClass = facade.findClass(classData.fqn, scope) ?: return@run
 
-            ReadAction.run<Throwable> {
-                val psiClass = facade.findClass(classData.fqn, scope) ?: return@run
+                                for (method in psiClass.methods) {
+                                    if (method.containingClass != psiClass) continue
+                                    try {
+                                        methods.add(extractMethod(method, classData.fqn, classData.filePath, project))
+                                    } catch (e: Exception) {
+                                        LOG.debug("Failed to extract method ${method.name} from ${classData.fqn}: ${e.message}")
+                                    }
+                                }
 
-                for (method in psiClass.methods) {
-                    if (method.containingClass != psiClass) continue
-                    try {
-                        methods.add(extractMethod(method, classData.fqn, classData.filePath, project))
-                    } catch (e: Exception) {
-                        LOG.debug("Failed to extract method ${method.name} from ${classData.fqn}: ${e.message}")
-                    }
-                }
-
-                var enumOrdinal = 0
-                for (field in psiClass.fields) {
-                    if (field.containingClass != psiClass) continue
-                    try {
-                        // EnumConstant is a PsiField subtype — still emit the FieldData row so
-                        // existing HAS_FIELD edges / fqn lookups keep working, then additionally
-                        // emit EnumConstantData with resolved constructor args.
-                        fields.add(extractField(field, classData.fqn, classData.filePath, project))
-                        if (field is PsiEnumConstant) {
-                            enumConstants.add(
-                                extractEnumConstant(field, classData.fqn, classData.filePath, enumOrdinal, project)
-                            )
-                            enumOrdinal++
+                                var enumOrdinal = 0
+                                for (field in psiClass.fields) {
+                                    if (field.containingClass != psiClass) continue
+                                    try {
+                                        fields.add(extractField(field, classData.fqn, classData.filePath, project))
+                                        if (field is PsiEnumConstant) {
+                                            enumConstants.add(
+                                                extractEnumConstant(field, classData.fqn, classData.filePath, enumOrdinal, project)
+                                            )
+                                            enumOrdinal++
+                                        }
+                                    } catch (e: Exception) {
+                                        LOG.debug("Failed to extract field ${field.name} from ${classData.fqn}: ${e.message}")
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            LOG.warn("Member extraction failed for ${classData.fqn}: ${e.message}")
                         }
-                    } catch (e: Exception) {
-                        LOG.debug("Failed to extract field ${field.name} from ${classData.fqn}: ${e.message}")
                     }
                 }
             }
+            futures.forEach { it.get() }
+        } finally {
+            executor.shutdown()
         }
 
-        LOG.info("Collected ${methods.size} methods, ${fields.size} fields, ${enumConstants.size} enum constants")
-        return MemberResult(methods, fields, enumConstants)
+        val methodList = methods.toList()
+        val fieldList = fields.toList()
+        val enumList = enumConstants.toList()
+        LOG.info("Collected ${methodList.size} methods, ${fieldList.size} fields, ${enumList.size} enum constants")
+        return MemberResult(methodList, fieldList, enumList)
     }
 
     private fun extractMethod(

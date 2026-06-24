@@ -20,6 +20,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComposableData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
+import com.onelens.plugin.framework.vue3.isTestFile
 import com.onelens.plugin.framework.vue3.smartRead
 
 /**
@@ -58,15 +59,34 @@ object ComposableCollector {
         val files = smartRead(project) { jsTypes.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
         val psiManager = PsiManager.getInstance(project)
 
-        for (vf in files) {
-            ProgressManager.checkCanceled()
-            val composables = ReadAction.compute<List<ComposableData>, Throwable> {
-                val psi = psiManager.findFile(vf) ?: return@compute emptyList()
-                // Skip files that define Pinia stores — [PiniaStoreCollector] owns them.
-                if (psi.text.contains("defineStore(")) return@compute emptyList()
-                extract(psi, ctx)
+        // Parallel file processing — same pattern as JsModuleCollector /
+        // CallGraphCollector. On a 28K-file project the sequential loop
+        // took 55s; parallelizing across cores/2 threads targets ~15s.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        try {
+            val chunks = files.chunked(maxOf(1, files.size / threads))
+            val futures = chunks.map { chunk ->
+                executor.submit<List<ComposableData>> {
+                    val localOut = mutableListOf<ComposableData>()
+                    for (vf in chunk) {
+                        ProgressManager.checkCanceled()
+                        val composables = ReadAction.compute<List<ComposableData>, Throwable> {
+                            val psi = psiManager.findFile(vf) ?: return@compute emptyList()
+                            // Skip files that define Pinia stores — [PiniaStoreCollector] owns them.
+                            if (psi.text.contains("defineStore(")) return@compute emptyList()
+                            extract(psi, ctx)
+                        }
+                        localOut += composables
+                    }
+                    localOut
+                }
             }
-            ctx.composables += composables
+            for (future in futures) {
+                ctx.composables += future.get()
+            }
+        } finally {
+            executor.shutdownNow()
         }
         LOG.info("ComposableCollector: ${ctx.composables.size} composables")
     }
@@ -107,7 +127,8 @@ object ComposableCollector {
                 name = name,
                 fqn = "$relative::$name",
                 filePath = relative,
-                body = fn.text.take(MAX_BODY_CHARS)
+                body = fn.text.take(MAX_BODY_CHARS),
+                isTest = isTestFile(relative)
             )
         }
 
@@ -129,7 +150,8 @@ object ComposableCollector {
                 name = name,
                 fqn = "$relative::$name",
                 filePath = relative,
-                body = v.text.take(MAX_BODY_CHARS)
+                body = v.text.take(MAX_BODY_CHARS),
+                isTest = isTestFile(relative)
             )
         }
 

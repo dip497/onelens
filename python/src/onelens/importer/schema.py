@@ -21,9 +21,13 @@ NODE_SCHEMA = {
     # Vue 3 — frontend nodes sharing the same graph wing with the Java backend
     # so cross-stack queries work in a single Cypher call. See bridge_http.py
     # for the `HITS` edge that links Vue ApiCall to Spring Endpoint.
-    "Component": "CREATE INDEX FOR (n:Component) ON (n.filePath)",
+    # Component and Store merge on `fqn` ("<filePath>::<name>") — the unique
+    # declaration identity. Component retains a `filePath` index for the
+    # DISPATCHES edge (route.componentRef is a path, not an fqn).
+    "Component_fqn": "CREATE INDEX FOR (n:Component) ON (n.fqn)",
+    "Component_filePath": "CREATE INDEX FOR (n:Component) ON (n.filePath)",
     "Composable": "CREATE INDEX FOR (n:Composable) ON (n.fqn)",
-    "Store": "CREATE INDEX FOR (n:Store) ON (n.id)",
+    "Store_fqn": "CREATE INDEX FOR (n:Store) ON (n.fqn)",
     "Route": "CREATE INDEX FOR (n:Route) ON (n.name)",
     "ApiCall": "CREATE INDEX FOR (n:ApiCall) ON (n.fqn)",
     # Phase B2 — JS business-logic layer (plain helpers / modules).
