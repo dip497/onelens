@@ -1,0 +1,12 @@
+{
+  "name": "onelens",
+  "version": "0.2.0",
+  "description": "Code knowledge graph for Java/Spring Boot + Vue 3. Gives AI 100% type-accurate understanding of your codebase via MCP search + Cypher query tools.",
+  "skills": ["skills/onelens"],
+  "mcp_servers": {
+    "onelens": {
+      "command": "onelens",
+      "args": ["mcp-server"]
+    }
+  }
+}

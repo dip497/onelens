@@ -177,6 +177,50 @@ def _probe_edge_counts(db) -> dict[str, int]:
         return {}
 
 
+# ── 0. Init / first-run setup ────────────────────────────────────────────────
+
+
+@mcp.tool
+def onelens_init(
+    graph: str = "onelens",
+    backend: Literal["falkordb", "falkordblite"] = "falkordblite",
+    export_path: str | None = None,
+) -> dict:
+    """One-command setup: create the graph, import an export (if provided),
+    and verify the installation.
+
+    If [export_path] is provided, imports the JSON (full or delta — auto-detected)
+    into the specified graph. If not provided, just creates an empty graph and
+    returns status.
+
+    This is the fastest path from "just installed" to "querying my codebase":
+    ```
+    onelens call-tool onelens_init \\
+      --export-path /tmp/exports/myproject-full.json \\
+      --graph myproject
+    ```
+    """
+    result: dict[str, Any] = {"graph": graph, "backend": backend}
+
+    if export_path:
+        # Delegate to onelens_import (auto-detects full vs delta).
+        imp = onelens_import(
+            export_path=export_path, graph=graph, backend=backend,
+            context=False, clear=True,
+        )
+        result["import"] = imp
+        result["mode"] = imp.get("mode", "unknown")
+    else:
+        # Just touch the graph so it exists.
+        db = _get_db(backend, graph, "~/.onelens/graphs")
+        result["message"] = f"Graph '{graph}' ready (empty). Import an export to populate."
+
+    # Return status.
+    status = onelens_status(graph=graph, backend=backend)
+    result["status"] = status
+    return result
+
+
 # ── 1. Wake-up ───────────────────────────────────────────────────────────────
 
 
@@ -273,11 +317,51 @@ def onelens_query(
     db_path: str = "~/.onelens/graphs",
     limit: int = 100,
 ) -> list[dict]:
-    """Run raw Cypher against any graph. Returns up to `limit` rows.
+    """Run raw Cypher queries against the code knowledge graph for graph traversal.
 
-    Use this for impact analysis, trace, entry-point enumeration, schema
-    introspection — the skill docs have ready-made patterns for each of
-    those. Works on code graphs and the palace memory graph uniformly.
+    Use this for: impact analysis ("what breaks if I change X?"), execution
+    traces ("trace /api/users"), dependency chains ("who injects AuthService?"),
+    dead code detection, cross-stack queries (Vue to Spring via HITS edges),
+    entry-point enumeration, and any question about relationships between nodes.
+
+    ## Graph schema — nodes
+
+    Java/Spring: Class {fqn, name, kind, filePath, superClass, packageName},
+    Method {fqn, name, classFqn, returnType, body, visibility, isStatic, isConstructor, external},
+    Field {fqn, name, type}, Endpoint {path, httpMethod}, SpringBean {name, classFqn, scope},
+    Module {name}, Package {name}, Annotation {fqn, name}
+
+    Vue 3: Component {fqn, name, filePath, props, emits, isTest},
+    Store {fqn, name, id, state, getters, actions, isTest},
+    Composable {fqn, name, body}, Route {name, path, fullPath},
+    ApiCall {method, path, callerFqn}, JsFunction {fqn, name, filePath, body},
+    JsModule {filePath, name}
+
+    ## Graph schema — edges
+
+    CALLS (Method→Method), HAS_METHOD (Class→Method), HAS_FIELD (Class→Field),
+    EXTENDS (Class→Class), IMPLEMENTS (Class→Class), OVERRIDES (Method→Method),
+    HANDLES (Class→Endpoint), INJECTS (Class→SpringBean),
+    ANNOTATED_WITH (Class/Method→Annotation), READS_FIELD (Method→Field),
+    WRITES_FIELD (Method→Field), INSTANTIATES (Method→Class),
+    USES_STORE (Component→Store), USES_COMPOSABLE (Component→Composable),
+    CALLS_API (Component→ApiCall), DISPATCHES (Route→Component),
+    IMPORTS (JsModule→JsModule/JsFunction),
+    HITS (ApiCall→Endpoint — cross-stack: Vue API call matches Spring endpoint)
+
+    ## FalkorDB Cypher rules
+
+    - No `=~` regex. Use CONTAINS, STARTS WITH, ENDS WITH.
+    - No variable-length paths (`[:CALLS*1..3]`). Use explicit hops.
+    - Properties are camelCase: fqn, filePath, classFqn, returnType.
+    - Always include LIMIT. Filter `WHERE n.external IS NULL` for project code only.
+
+    ## Common patterns
+
+    Impact: `MATCH (caller:Method)-[:CALLS]->(t:Method) WHERE t.classFqn CONTAINS 'UserService' RETURN caller.fqn`
+    Trace: `MATCH (e:Endpoint {path:'/api/users'})<-[:HANDLES]-(c) MATCH (c)-[:HAS_METHOD]->(m)-[:CALLS]->(callee) RETURN callee.name`
+    Cross-stack: `MATCH (comp:Component)-[:CALLS_API]->(a:ApiCall)-[:HITS]->(e:Endpoint) RETURN comp.name, e.path`
+    Dead code: `MATCH (m:Method) WHERE m.external IS NULL AND NOT ()-[:CALLS]->(m) RETURN m.fqn`
     """
     db = _get_db(backend, graph, db_path)
     result = db.query(cypher) or []
@@ -293,26 +377,58 @@ def onelens_query(
 
 @mcp.tool
 def onelens_search(
-    term: str,
-    node_type: str = "",
+    query: str,
     graph: str = "onelens",
+    node_type: str = "",
+    n_results: int = 20,
     backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
     db_path: str = "~/.onelens/graphs",
-    n_results: int = 50,
 ) -> list[dict]:
-    """Name-based search across graph nodes (FTS, supports `User*`, `%auth%`).
+    """Search the code knowledge graph using RediSearch full-text syntax.
 
-    `node_type`: one of "class", "method", "endpoint", "drawer", or "" for any.
-    For conceptual / natural-language questions, use `onelens_retrieve`
-    instead — that one reads actual code content.
+    Searches across ALL node types (Java classes/methods/endpoints, Vue
+    components/stores/composables/routes, JS functions/modules) when node_type
+    is empty, or filters to one type when specified.
+
+    ## Search syntax (RediSearch)
+
+    - Prefix: `auth*` (matches authenticate, authorize, authentication)
+    - Fuzzy: `%passwor%` (matches password, passwd, passw0rd)
+    - Union: `login|signin|authenticate` (any term)
+    - Phrase: `"password encryption"` (exact contiguous)
+    - Intersection: `password encryption` (both terms, any field)
+    - Wildcard: `*` (match all — use with node_type to list everything)
+
+    ## node_type values
+
+    Empty string "" = search all types. Otherwise:
+    Java/Spring: "class", "method", "endpoint", "springbean", "field"
+    Vue 3: "component", "store", "composable", "route", "apicall", "jsfunction", "jsmodule"
+
+    ## Scoring
+
+    Results ranked by BM25: name (10x) > javadoc/path/id (3-8x) > body (1x).
+
+    ## Return format
+
+    Each result: {type, fqn, name, file} — compact, no full bodies.
+    Use Read tool on file to see source code.
+
+    ## Examples
+
+    onelens_search("UserService", node_type="class") — find specific class
+    onelens_search("auth*") — all auth-related methods
+    onelens_search("password encryption") — methods mentioning both words
+    onelens_search("ticket*", node_type="component") — Vue components for tickets
+    onelens_search("*", node_type="store") — list all Pinia stores
     """
     from onelens.graph.analysis import search_code
 
     db = _get_db(backend, graph, db_path)
-    return search_code(db, term, node_type)[:n_results]
+    return search_code(db, query, node_type)[:n_results]
 
 
-# ── 4. Hybrid retrieval (the headline capability) ────────────────────────────
+# ── 4. Hybrid retrieval (kept for backward compat — prefer onelens_search) ──
 
 
 @mcp.tool
