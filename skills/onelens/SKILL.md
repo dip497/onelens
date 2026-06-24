@@ -2,370 +2,406 @@
 name: onelens
 description: >
   Query the OneLens code knowledge graph — Java / Kotlin / Spring Boot backends,
-  Vue 3 / Pinia / vue-router frontends, JPA entities, Flyway migrations, custom
-  SQL, and test coverage. Use whenever the user asks about code impact,
-  dependencies, call chains, blast radius, Spring bean wiring, REST endpoint
-  tracing, SQL → entity mapping, which tests cover X, inheritance, dead code,
-  or any cross-stack question like "what breaks on the frontend if I change
-  this Java endpoint". Trigger even without the words OneLens / graph when the
-  user says "what calls X", "who depends on X", "trace this endpoint", "impact
-  of renaming Y", "which report breaks if I change this column", "how does
-  feature Z work", or similar. Skip only when the active project is in an
-  unsupported stack (Python, Go, Rust, plain JS) — fall back to Grep / LSP.
+  Vue 3 / Pinia / vue-router frontends, JPA entities, SQL migrations, and test
+  coverage. Use whenever the user asks about code impact, dependencies, call
+  chains, blast radius, Spring bean wiring, REST endpoint tracing, SQL to entity
+  mapping, which tests cover X, dead code, or cross-stack questions like "what
+  breaks on the frontend if I change this Java endpoint". Trigger even without
+  the words OneLens / graph when the user says "what calls X", "who depends on
+  X", "trace this endpoint", "impact of renaming Y", "how does feature Z work",
+  or similar. Skip only when the project is in an unsupported stack (Python, Go,
+  Rust, plain JS without Vue) — fall back to Grep.
 ---
 
-# OneLens: Code + SQL + Test Knowledge Graph
+<overview>
+OneLens indexes a codebase as a knowledge graph: every class, method, field,
+Spring bean, REST endpoint, Vue component, Pinia store, composable, route, API
+call, JPA entity, SQL statement, and test case — plus the edges between them
+(CALLS, EXTENDS, IMPLEMENTS, INJECTS, USES_STORE, HITS, etc.).
 
-OneLens indexes a codebase as a graph of **Class / Method / Field /
-SpringBean / Endpoint / JpaEntity / Migration / SqlQuery / TestCase / …**
-nodes plus the edges between them. Each project lives in a **graph** (the
-`--graph` name); many graphs coexist on one backend (FalkorDB Lite by
-default — embedded, no Docker — or FalkorDB server on port 17532).
+The graph lives in FalkorDB (embedded falkordblite by default — no Docker
+needed — or FalkorDB server on port 17532). Each project is a named graph.
 
-All operations are exposed as **19 MCP tools** under the `onelens_*`
-prefix.
+You have exactly **2 query tools** plus a mandatory wake-up:
 
-## Transport modes
+1. **`onelens_search`** — Full-text search (RediSearch syntax) across all node
+   types. Fuzzy, prefix, phrase, union. Weighted by field (name > body).
+   Use for "find me X by name or content."
 
-Two ways Claude Code reaches the tools. Both support the same tool
-names and arguments — only the invocation syntax differs.
+2. **`onelens_query`** — Raw Cypher against the graph. Use for traversal:
+   impact analysis, execution traces, dependency chains, dead code, cross-stack.
 
-1. **MCP server (remote or local)** — preferred when `~/.claude/settings.json`
-   has an `mcpServers.onelens` entry (stdio or http). Tools appear in
-   the agent's tool list directly; call them by name with keyword args,
-   e.g. `onelens_status(graph="myapp")`. No shell needed.
-2. **CLI fallback** — if MCP isn't configured, shell-out via the bundled
-   CLI: `onelens call-tool <tool> --key val --key val`. Same tools,
-   translated to flags. Shapes below document the canonical keys; both
-   modes use the same ones.
+0. **`onelens_status`** — MANDATORY first call. Returns what's indexed.
+</overview>
 
-If you see an agent running examples as `onelens call-tool …`, they're
-the CLI form; MCP clients just call the tool directly with the same
-key/value pairs.
+<wake_up>
+## Step 0 — ALWAYS call onelens_status first
 
----
-
-## Wake-up protocol (MANDATORY first step)
-
-**Every session, call `onelens_status` first.** It returns the graph's
-capabilities — the rest of the skill branches off those flags. Without this
-call you will mis-pick tools (e.g. invoke `onelens_retrieve` when the
-semantic layer isn't indexed).
-
-**Never invent the graph name.** IDE project dir ≠ graph name. If
-`total_nodes == 0` **and** `available_graphs` is non-empty, auto-pivot to
-`available_graphs[0].graph` (the largest indexed one — list is sorted by
-name, usually only one candidate anyway). No need to ask the user. Only
-fall back to Grep/LSP when `available_graphs` is empty — meaning the
-graph really isn't indexed; then tell the user to run Sync Graph.
-
-**Hard rule — the first `onelens_status` is a probe, not a verdict.**
-Always parse `.available_graphs` before *any* other tool (IDE search, Grep,
-LSP). If you even think "let me fall back to…" on the first empty status,
-stop and re-call against the populated graph first.
-
-```bash
-onelens call-tool onelens_status --graph <name>
+```
+onelens_status(graph="<project-name>")
 ```
 
-Returns (shape — concrete values vary per project):
+Returns node counts, edge counts, and capability flags. If `total_nodes == 0`,
+the response includes `available_graphs` — switch to the populated one
+automatically. Do NOT ask the user. Do NOT invent graph names.
 
+Parse the response to learn:
+- What node types exist (Class: 10K, Method: 80K, Endpoint: 2K, Component: 2K, ...)
+- What edge types exist (CALLS: 600K, INJECTS: 8K, USES_STORE: 2K, HITS: 1K, ...)
+- Capabilities: has_spring, has_jpa, has_vue3, has_sql, has_tests
+- Scale: total_nodes / total_edges
+
+This tells you which Cypher patterns work and which node_types are valid for search.
+</wake_up>
+
+<decision_tree>
+## Which tool to use — decide before calling
+
+| User asks | Tool | Why |
+|-----------|------|-----|
+| "Find UserService" / "is there a class called X" | `onelens_search` | Name lookup = FTS |
+| "Find all auth methods" | `onelens_search` | Prefix wildcard: `auth*` |
+| "Where is password encryption?" | `onelens_search` | Body search: `password encryption` |
+| "Find Vue components for tickets" | `onelens_search` | `ticket*` + `node_type="component"` |
+| "What calls UserService?" / "impact of X" | `onelens_query` | Traverse CALLS edges |
+| "Trace /api/users endpoint" | `onelens_query` | Traverse HANDLES → CALLS chain |
+| "Who injects AuthService?" | `onelens_query` | Traverse INJECTS edges |
+| "Is this method dead code?" | `onelens_query` | Check for inbound CALLS |
+| "What REST endpoints exist?" | `onelens_query` | `MATCH (e:Endpoint)` |
+| "What breaks on frontend?" | `onelens_query` | Cross-stack HITS traversal |
+| "How many classes?" | `onelens_status` | Already in wake-up response |
+
+**Naming questions (find X) → search. Relationship questions (X connects to Y) → query.**
+</decision_tree>
+
+<search_tool>
+## onelens_search — full-text search
+
+### Parameters
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | YES | — | Search terms (RediSearch syntax) |
+| `graph` | string | no | `"onelens"` | Graph name |
+| `node_type` | string | no | `""` (all) | Filter to one type |
+| `n_results` | int | no | `20` | Max results |
+
+### Search syntax (RediSearch — FalkorDB FTS)
+
+| Syntax | Example | What it matches |
+|--------|---------|-----------------|
+| Prefix | `auth*` | authenticate, authorize, authentication |
+| Fuzzy | `%passwor%` | password, passwd, passw0rd (edit-distance) |
+| Union (OR) | `login\|signin\|authenticate` | Any of the terms |
+| Phrase | `"password encryption"` | Exact contiguous phrase |
+| Intersection | `password encryption` | Both terms anywhere (AND) |
+| Exact | `BCrypt` | Exact term |
+
+### Valid node_type values
+
+When `node_type` is empty (default), searches ALL types simultaneously.
+
+**Java / Spring backend:**
+| Value | Node label | Key fields |
+|-------|-----------|------------|
+| `"class"` | Class | `fqn`, `name`, `kind` (CLASS/INTERFACE/ENUM/ABSTRACT_CLASS/RECORD), `filePath`, `superClass`, `packageName` |
+| `"method"` | Method | `fqn` (format: `com.example.Foo#bar(String,int)`), `name`, `classFqn`, `body`, `javadoc`, `returnType`, `visibility`, `isStatic`, `isConstructor`, `isAbstract` |
+| `"endpoint"` | Endpoint | `path` (e.g. `/api/users/{id}`), `httpMethod` (GET/POST/PATCH/DELETE), `consumes`, `produces` |
+| `"springbean"` | SpringBean | `name`, `classFqn`, `scope`, `primary` |
+| `"field"` | Field | `fqn` (format: `com.example.Foo#bar`), `name`, `type` |
+
+**Vue 3 frontend:**
+| Value | Node label | Key fields |
+|-------|-----------|------------|
+| `"component"` | Component | `fqn` (format: `src/views/X.vue::X`), `name`, `filePath`, `props`, `emits`, `scriptSetup`, `body`, `isTest` |
+| `"store"` | Store | `fqn`, `name`, `id` (Pinia store id like `"user"`), `state`, `getters`, `actions`, `style` (options/setup), `isTest` |
+| `"composable"` | Composable | `fqn`, `name`, `body`, `isTest` |
+| `"route"` | Route | `name`, `path`, `fullPath`, `componentRef` |
+| `"apicall"` | ApiCall | `method` (GET/POST/etc.), `path`, `callerFqn` |
+| `"jsfunction"` | JsFunction | `fqn`, `name`, `filePath`, `exported`, `body` |
+| `"jsmodule"` | JsModule | `filePath`, `name`, `isBarrel` |
+
+### How results are ranked (BM25)
+
+FalkorDB scores results by BM25 across indexed fields with weights:
+- **name**: 10x — most discriminative (method/class name)
+- **javadoc** / **path** / **id**: 3-8x — documentation, endpoint path, Pinia id
+- **body**: 1x — source code text (catches terms not in the name)
+
+### Return format (compact — no full bodies)
 ```json
-{
-  "protocol": "onelens/v1",
-  "graph": "<graph-name>",
-  "backend": "falkordblite",
-  "capabilities": {
-    "has_structural": true,   "has_semantic": false,
-    "has_spring": true,       "has_jpa": true,
-    "has_sql": true,          "has_tests": true,
-    "has_vue3": false,        "has_memory": false,
-    "has_apps": true
-  },
-  "counts": { "Class": 10000, "Method": 80000, "JpaEntity": 700, "…": "…" },
-  "edge_counts": { "CALLS": 630000, "HAS_METHOD": 80000, "ANNOTATED_WITH": 70000, "…": "…" },
-  "total_nodes": 190000,
-  "total_edges": 1040000
-}
+{"type": "method", "fqn": "com.example.AuthService#login(String)", "name": "login", "file": "src/.../AuthService.java"}
 ```
 
-`edge_counts` is sorted desc by count — you can see at a glance which
-relations dominate (CALLS ≫ everything else on a mature code graph) and
-pick the most selective edge for traversals. No need to follow up with
-`MATCH ()-[r]->() RETURN type(r), count(r)`.
-
-When the requested graph is empty, the payload adds `available_graphs`:
-
-```json
-{ "total_nodes": 0,
-  "available_graphs": [ { "graph": "my-app", "rdb_bytes": 51346823 } ] }
+### Worked examples
 ```
-Re-call `onelens_status` against the populated one — **parse the field,
-don't guess a fallback name**. One-liner:
+# Find a specific class by name
+onelens_search("UserService", node_type="class", graph="myapp")
+→ [{"type":"class","fqn":"com.example.UserService","name":"UserService","file":"src/.../UserService.java"}]
 
-```bash
-graph=$(onelens call-tool onelens_status --graph <guess> \
-  | jq -r '.available_graphs[0].graph // empty')
-onelens call-tool onelens_status --graph "$graph"
+# Find all auth-related methods (prefix wildcard)
+onelens_search("auth*", graph="myapp")
+→ [{"type":"method","fqn":"...#authenticate()","name":"authenticate","file":"..."},
+   {"type":"method","fqn":"...#setAuthenticationType()","name":"setAuthenticationType","file":"..."}]
+
+# Find methods whose body mentions "password" AND "encryption" (intersection)
+onelens_search("password encryption", graph="myapp")
+→ [{"type":"method","fqn":"...#encryptApiFieldPassword()","name":"encryptApiFieldPassword","file":"..."}]
+
+# Find Vue components related to tickets
+onelens_search("ticket*", node_type="component", graph="myapp")
+→ [{"type":"component","fqn":"src/views/TicketList.vue::TicketList","name":"TicketList","file":"src/views/TicketList.vue"}]
+
+# Find all Pinia stores (wildcard)
+onelens_search("*", node_type="store", graph="myapp")
 ```
-Do NOT use `|| --graph default` — there is no `default` graph.
+</search_tool>
 
-`capabilities` → see `references/capabilities.md` for what each flag unlocks.
+<query_tool>
+## onelens_query — Cypher for graph traversal
 
----
+### Parameters
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `cypher` | string | YES | — | Cypher query |
+| `graph` | string | no | `"onelens"` | Graph name |
+| `limit` | int | no | `100` | Max rows |
 
-## Decision tree
+### FalkorDB Cypher rules (READ BEFORE WRITING QUERIES)
 
-After reading `onelens_status`, pick the tool based on question type:
+FalkorDB is NOT Neo4j. These differences cause errors:
 
+- **No `=~` regex.** Use `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `toLower(x) CONTAINS 'y'`.
+- **No `[:REL*1..3]` variable-length paths.** Use explicit hops:
+  `MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c)`.
+- **Property names are camelCase**: `fqn`, `filePath`, `classFqn`, `returnType`.
+- **Always include `LIMIT`** — unbounded MATCH on 200K nodes hangs.
+- **External stubs exist** — filter with `WHERE n.external IS NULL` to get only
+  project code (not JDK/library methods).
+- **If a query errors, rewrite and retry 2-3 times** before falling back to Grep.
+
+### Graph schema — nodes
+
+**Java / Spring:**
+| Label | Properties |
+|-------|-----------|
+| Class | `fqn`, `name`, `kind` (CLASS/INTERFACE/ENUM/ABSTRACT_CLASS/RECORD), `filePath`, `superClass`, `packageName` |
+| Method | `fqn` (`com.example.Foo#bar(String)`), `name`, `classFqn`, `returnType`, `body`, `javadoc`, `visibility`, `isStatic`, `isConstructor`, `isAbstract`, `external` |
+| Field | `fqn` (`com.example.Foo#bar`), `name`, `classFqn`, `type` |
+| Endpoint | `id`, `path`, `httpMethod`, `consumes`, `produces` |
+| SpringBean | `name`, `classFqn`, `scope`, `primary` |
+| Module | `name` |
+| Package | `name`, `parentId` |
+| Annotation | `fqn`, `name` |
+
+**Vue 3:**
+| Label | Properties |
+|-------|-----------|
+| Component | `fqn` (`src/views/X.vue::X`), `name`, `filePath`, `props`, `emits`, `body`, `isTest` |
+| Store | `fqn`, `name`, `id`, `state`, `getters`, `actions`, `isTest` |
+| Composable | `fqn`, `name`, `body`, `isTest` |
+| Route | `name`, `path`, `fullPath`, `componentRef` |
+| ApiCall | `fqn`, `method`, `path`, `callerFqn` |
+| JsFunction | `fqn`, `name`, `filePath`, `exported`, `body` |
+| JsModule | `filePath`, `name`, `isBarrel` |
+
+### Graph schema — edges (relationships)
+
+**Structural:**
+| Edge | From → To | Meaning |
+|------|-----------|---------|
+| `HAS_METHOD` | Class → Method | Class declares method |
+| `HAS_FIELD` | Class → Field | Class declares field |
+| `CONTAINS` | Package → Class/Package | Package nesting |
+| `EXTENDS` | Class → Class | Inheritance (`extends`) |
+| `IMPLEMENTS` | Class → Class | Interface implementation |
+| `OVERRIDES` | Method → Method | Method overrides parent |
+
+**Code flow:**
+| Edge | From → To | Meaning |
+|------|-----------|---------|
+| `CALLS` | Method → Method | Method A calls method B (**the big one — 600K+ edges**) |
+| `READS_FIELD` | Method → Field | Field read access |
+| `WRITES_FIELD` | Method → Field | Field write access |
+| `INSTANTIATES` | Method → Class | `new Foo()` |
+| `RETURNS` | Method → Class | Return type |
+| `THROWS` | Method → Class | Throws exception |
+| `HAS_PARAMETER` | Method → Class | Method parameter type |
+
+**Spring:**
+| Edge | From → To | Meaning |
+|------|-----------|---------|
+| `HANDLES` | Class → Endpoint | @RestController maps to endpoint |
+| `INJECTS` | Class → SpringBean | @Autowired/constructor injection |
+| `REGISTERED_AS` | Class → SpringBean | @Service/@Component/@Repository |
+| `ANNOTATED_WITH` | Class/Method → Annotation | Annotation usage |
+
+**Vue 3:**
+| Edge | From → To | Meaning |
+|------|-----------|---------|
+| `USES_STORE` | Component/Composable → Store | Component uses Pinia store |
+| `USES_COMPOSABLE` | Component/Composable → Composable | Component uses composable |
+| `CALLS_API` | Component/Composable/JsFunction → ApiCall | Frontend calls HTTP API |
+| `DISPATCHES` | Route → Component | Route renders component |
+| `HAS_FUNCTION` | JsModule → JsFunction | Module exports function |
+| `IMPORTS` | JsModule/Component/Store → JsModule/JsFunction | ES6 import |
+
+**Cross-stack (the killer feature):**
+| Edge | From → To | Meaning |
+|------|-----------|---------|
+| `HITS` | ApiCall → Endpoint | Vue API call matches Spring endpoint (normalized HTTP path) |
+
+### Copy-paste Cypher recipes
+
+**IMPACT ANALYSIS — "What breaks if I change UserService?"**
+```cypher
+MATCH (caller:Method)-[:CALLS]->(target:Method)
+WHERE target.classFqn STARTS WITH 'com.example.UserService'
+RETURN DISTINCT caller.classFqn AS affected_class, caller.name AS caller_method
+ORDER BY affected_class LIMIT 50
 ```
-user's question                               tool to call
-──────────────────────────────────────────────────────────────────────
-"what's the FQN / name / class called X"     → onelens_search
-"impact / rename / trace / call-graph"       → onelens_query + queries-code.md
-"schema / migration / column / report SQL"   → onelens_query + queries-sql.md
-"which test covers X" / coverage             → onelens_query + queries-tests.md
-"how does X work" / conceptual question      → onelens_retrieve  (ONLY if has_semantic=true;
-                                                                  else onelens_search)
-"frontend ↔ backend integration trace"       → onelens_query + queries-code.md (cross-stack)
-"decisions / notes / cross-session memory"   → onelens_kg_* / onelens_add_drawer / onelens_diary_*
-"how many / stats / counts / distribution"   → onelens_status (already has it) or
-                                               onelens_query with aggregate Cypher
-"what labels / edges exist / schema shape"   → onelens_status (counts + edge_counts) +
-                                               graph-schema.md for semantics
-"does A reference/link/point-to B"           → onelens_query, scan HAS_COLUMN,
-                                               HAS_FIELD, method param/return,
-                                               ANNOTATED_WITH.attributes,
-                                               SqlStatement.sql  (recipes.md #12)
-"is method X really dead code?"              → onelens_query, also check
-                                               HANDLES, ANNOTATED_WITH (Scheduled/
-                                               EventListener/PostConstruct),
-                                               OVERRIDES, then grep reflection
-                                               (recipes.md #14)
-"what runs on startup/schedule/event"        → unified entry points (recipes.md #13)
-"compare two releases / API diff / churn"    → pull snapshots via onelens_snapshots_pull;
-                                               then cross-graph diff (recipes.md #16)
-"pull a release snapshot"                    → onelens_snapshots_list → onelens_snapshots_pull
+
+**BLAST RADIUS (2 hops) — "Full impact of changing this specific method"**
+```cypher
+MATCH (caller:Method)-[:CALLS]->(mid:Method)-[:CALLS]->(target:Method)
+WHERE target.fqn = 'com.example.UserService#findById(Long)'
+RETURN DISTINCT caller.fqn AS blast_radius LIMIT 100
 ```
 
-## Naming vs Referencing — the split that catches agents
+**EXECUTION TRACE — "Trace /api/users endpoint through the call chain"**
+```cypher
+MATCH (e:Endpoint {path: '/api/users'})<-[:HANDLES]-(controller:Class)
+MATCH (controller)-[:HAS_METHOD]->(handler:Method)
+MATCH (handler)-[:CALLS]->(callee:Method)
+WHERE callee.external IS NULL
+RETURN handler.name AS entry_point, callee.name AS calls, callee.classFqn AS in_class LIMIT 50
+```
 
-Two question shapes agents conflate:
+**ALL REST ENDPOINTS**
+```cypher
+MATCH (e:Endpoint) RETURN e.httpMethod AS method, e.path AS path ORDER BY path LIMIT 100
+```
 
-- **Naming** ("is there a class/method/table called X") → `onelens_search`
-  on `name` / `fqn`. Cheap, one hop.
-- **Referencing** ("does A link to B", "does A store B's id", "what touches
-  B") → traverse edges. **A reference almost never lives in a class name.**
-  It lives in a **column** (`HAS_COLUMN`), a **field type** (`HAS_FIELD` +
-  `Field.typeFqn`), a **method param/return type**, an **annotation
-  attribute** (`ANNOTATED_WITH.attributes` JSON), an **SQL statement**, or
-  an **enum-arg registry** (`EnumConstant.argList`). Class-name search
-  misses all six.
+**SPRING DEPENDENCY CHAIN — "Who injects AuthService?"**
+```cypher
+MATCH (dependent:Class)-[:INJECTS]->(bean:SpringBean)
+WHERE bean.classFqn CONTAINS 'AuthService'
+RETURN dependent.name AS dependent_class, bean.name AS bean_name
+```
 
-Rule of thumb: user verb is "named/called/has class" → *naming*. Verb is
-"reference/link/point/knows/stores/maps to/touches" → *referencing*.
+**DEAD CODE — "Which public methods have no callers?"**
+```cypher
+MATCH (m:Method)
+WHERE m.external IS NULL AND m.visibility = 'public'
+  AND NOT ()-[:CALLS]->(m)
+RETURN m.fqn AS potentially_dead LIMIT 50
+```
+Note: before declaring dead, also check OVERRIDES (polymorphic dispatch),
+ANNOTATED_WITH (@Scheduled/@EventListener/@PostConstruct), and reflection.
 
-**Think in two buckets:** *node probes* (`onelens_search`, `onelens_retrieve`,
-`MATCH (n:Label)`) vs *edge/fact probes* (`MATCH ()-[r]->()`, traversals in
-`queries-code.md` / `queries-sql.md` / recipes.md). Users asking "what X"
-are on node side; "which X connects to Y", "what breaks if", "what touches"
-are on edge side. Pick the bucket first, then the tool.
+**INHERITANCE TREE — "What implements UserRepository?"**
+```cypher
+MATCH (impl:Class)-[:IMPLEMENTS]->(iface:Class)
+WHERE iface.name CONTAINS 'UserRepository'
+RETURN impl.fqn AS implementation
+```
 
----
+**ANNOTATION USAGE — "What classes use @Transactional?"**
+```cypher
+MATCH (c:Class)-[:ANNOTATED_WITH]->(a:Annotation)
+WHERE a.fqn CONTAINS 'Transactional'
+RETURN c.fqn AS transactional_class
+```
 
-## Cypher dialect — FalkorDB quirks (read this before writing queries)
+**CROSS-STACK TRACE — "Which Vue components call which Spring endpoints?"**
+```cypher
+MATCH (c:Component)-[:CALLS_API]->(a:ApiCall)-[:HITS]->(e:Endpoint)
+RETURN c.name AS vue_component, a.method AS http_method,
+       a.path AS api_path, e.path AS spring_endpoint LIMIT 50
+```
 
-FalkorDB ≠ Neo4j. These differences burn agents in every session:
+**VUE STORE USAGE — "Which components use the user store?"**
+```cypher
+MATCH (c:Component)-[:USES_STORE]->(s:Store)
+WHERE s.name CONTAINS 'user' OR s.id CONTAINS 'user'
+RETURN c.name AS component, s.name AS store_name
+```
 
-- **No `=~` regex.** Use `CONTAINS`, `STARTS WITH`, `ENDS WITH`, or
-  `toLower(x) CONTAINS 'y'` for case-insensitive substring match.
-- **No variable-length paths in plain MATCH** (`[:REL*1..3]` is slow and
-  sometimes unsupported). Prefer explicit multi-hop: `MATCH (a)-[:R]->(b)-[:R]->(c)`.
-- **Property names are camelCase** — `fqn`, `filePath`, `classFqn`,
-  `returnType`, not `fq_n` or `file_path`. See `graph-schema.md`.
-- **`CALL { ... }` subqueries do not accept `$param`** — inline literals
-  or let the outer query pass them via WITH.
-- **No `apoc.*`, no `date()` helpers.** Timestamps are epoch numerics.
-- **Always include `LIMIT`** — unbounded MATCH on a 200k-node graph
-  returns everything and hangs the client.
+**FIND ALL CALLERS OF A METHOD**
+```cypher
+MATCH (caller:Method)-[:CALLS]->(target:Method)
+WHERE target.name = 'findById' AND target.classFqn CONTAINS 'UserService'
+RETURN caller.fqn AS called_from LIMIT 30
+```
 
-If a Cypher call errors, **rewrite and retry 2-3 times** before falling
-back to Grep. Most errors are dialect mismatches, not "graph doesn't
-have the data."
+**TEST: exclude test doubles**
+```cypher
+MATCH (m:Method) WHERE m.external IS NULL
+RETURN count(m) AS project_methods
+-- or for Vue nodes:
+MATCH (s:Store) WHERE NOT s.isTest RETURN s.name
+```
+</query_tool>
 
-## Retry protocol (when the first query doesn't land)
+<retry_protocol>
+## Retry when queries return empty
 
-1. **Empty result, graph is populated?** Relax the predicate:
+1. **Empty result, graph is populated?** Relax predicate:
    `name = 'X'` → `name CONTAINS 'X'` → `toLower(name) CONTAINS 'x'`.
-   Try FQN fragments: `classFqn CONTAINS 'package.Sub'`.
-2. **Cypher error?** Check the dialect quirks above. Rewrite, don't grep.
-3. **Overwhelming results (hundreds of rows)?** Add filters:
-   `WHERE NOT n.external`, `WHERE n.wing = '<graph>'`, tighter LIMIT,
-   `ORDER BY n.pagerank DESC` to surface the important ones first.
-4. **Still stuck after 3 tries** *and* `has_semantic = true`? Pivot to
-   `onelens_retrieve` — conceptual queries benefit from embeddings.
-5. **Only then** fall back to Grep/LSP. Graph is populated → graph has
-   the answer; grep is a last resort, not a parallel path.
+2. **Wrong FQN format?** Method FQNs include params: `Foo#bar(String,int)`.
+   Search by name first: `onelens_search("bar", node_type="method")`.
+3. **Node type doesn't exist?** Check `onelens_status` — if no Vue data imported,
+   `Component` nodes won't exist. Only query node types that appear in counts.
+4. **FalkorDB dialect error?** Rewrite: remove `=~`, remove `*1..3`, add `LIMIT`.
+5. **Overwhelming results?** Filter `WHERE n.external IS NULL` (project code only),
+   add tighter `LIMIT`, add `WHERE` on `classFqn` or `name`.
+6. **After 2-3 retries** still empty, fall back to Grep and tell the user.
+</retry_protocol>
 
-## Schema probe (before complex queries)
+<anti_patterns>
+## Common mistakes to AVOID
 
-When you need properties you haven't used before, sample 1 node:
+- Don't skip `onelens_status` — it tells you what's available.
+- Don't invent graph names — parse `available_graphs` from status.
+- Don't use snake_case in Cypher — properties are camelCase.
+- Don't use variable-length paths (`[:CALLS*1..3]`) — use explicit hops.
+- Don't query without `LIMIT` — graphs can have 200K+ nodes.
+- Don't use `onelens_search` for impact/trace — that's `onelens_query`.
+- Don't use `onelens_query` for name lookup — that's `onelens_search`.
+- Don't search class names for cross-entity references — "Does Order link to
+  Customer?" is answered by traversing edges, not by a class named "OrderCustomer".
+- Don't treat "0 callers" as dead code without checking OVERRIDES,
+  ANNOTATED_WITH (@Scheduled, @EventListener, @PostConstruct), and reflection.
+- Don't stop at abstract declarations — `(caller)-[:CALLS]->(abstract_method)`
+  means the real implementation lives on subclasses via OVERRIDES.
+- Don't claim a bug from graph reachability alone — read the actual source
+  code at `file:line` before asserting "off-by-one" or "dead branch".
+</anti_patterns>
 
-```cypher
-MATCH (n:JpaEntity) RETURN keys(n) AS props, n LIMIT 1
-```
+<reading_code>
+## After finding code — read it
 
-Cheaper than guessing property names and getting zero rows because you
-typed `tableName` but the schema has `table`.
+Both tools return `filePath` and `fqn` but NOT full source code. After finding
+the relevant node:
 
-## Dual labels — don't over-filter
+1. Use the `Read` tool on the `file` / `filePath` value to see actual code.
+2. Method FQNs include the method name + params — use to locate it in the file.
+3. For Vue components, `filePath` is relative to the project root.
 
-Some nodes carry two labels so queries can hit either:
+Pattern: **search → read**. Find candidates via graph, then read source for logic.
+Graph tells you WHERE and WHAT CONNECTS. Source tells you HOW.
+</reading_code>
 
-- `JpaEntity` ∪ `Class` — every JpaEntity is also a Class.
-- `JpaRepository` ∪ `Class` — same.
-- `JpaColumn` ∪ `Field` — every column is also a Field.
-- `EnumConstant` ∪ `Field` — enum constants are Fields.
-- `TestCase` ∪ `Method` — tests are Methods.
-
-This means `MATCH (c:Class)` returns entities + repositories too. If you
-want *only* plain Classes (no entity/repo), add `WHERE NOT c:JpaEntity AND NOT c:JpaRepository`.
-
-**Traversal gotcha:** when following `[:EXTENDS]` from a `JpaEntity`, the
-parent may *also* be a `JpaEntity` (dual-labeled). Match the superclass
-with `:Class` — it hits both. Don't assume only the leaf is labeled.
-
-```cypher
-// Wrong — drops parents also labeled JpaEntity
-MATCH (e:JpaEntity {name:'Request'})-[:EXTENDS]->(p:Class) WHERE NOT p:JpaEntity
-// Right — hits abstract JPA parents too
-MATCH (e:JpaEntity {name:'Request'})-[:EXTENDS]->(p:Class)
-```
-
-## Anti-patterns (things agents get wrong)
-
-- ❌ Falling back to Grep after one Cypher error. Graph still has the data.
-- ❌ `name = '<string>'` when the user gave a partial. Default to `CONTAINS`.
-- ❌ Querying `fqn` when the user pasted a short class name — use `name`.
-- ❌ Running structural queries without filtering `external: true` — project signal drowned by JDK/library stubs.
-- ❌ `onelens_retrieve` on a graph where `has_semantic: false` — returns empty; use `onelens_search` / `onelens_query` instead.
-- ❌ Asking a conceptual question with `onelens_query`. If "how does X work" / "show me the logic": prefer `onelens_retrieve` when semantic is on, else read `onelens_search` top hits' source.
-- ❌ Inventing tool flag names. See invocation shapes below.
-- ❌ **Searching class names for cross-entity linkage.** "Does Order link to Customer?" is answered by `HAS_COLUMN` on `customerId` — not by a class named `OrderCustomer`. See *Naming vs Referencing* above.
-- ❌ **Treating "0 CALLS callers" as dead code.** Rule out `HANDLES` (REST), `ANNOTATED_WITH {Scheduled, EventListener, PostConstruct, PreDestroy}` (lifecycle), `OVERRIDES` (polymorphic dispatch), and reflection (`Class.forName`, `getBean`, string-based dispatch) before declaring anything dead. Recipe #14.
-- ❌ **Stopping at the abstract declaration.** `(caller)-[:CALLS]->(m)` on an abstract `m` — real implementation lives on subclasses. Walk `(m)<-[:OVERRIDES]-(impl)`.
-- ❌ **Missing inherited columns/annotations.** `@Table` / `@Column` / `@RequestMapping` often sit on an abstract parent or `@MappedSuperclass`. Walk `[:EXTENDS*1..5]` before concluding "not annotated."
-- ❌ **Ignoring runtime gates.** `@ConditionalOnProperty("feature.x.enabled")` + missing property = structurally reachable but runtime-dead. Check `ANNOTATED_WITH.attributes` before claiming execution.
-- ❌ **Wrong property for the question.** References in `Field.typeFqn` / `Method.parameterTypes` / `Method.returnType` — not `name`. Check `graph-schema.md` for which property carries what.
-
----
-
-## Tool catalog — reads
-
-| Tool | Use when |
-|---|---|
-| `onelens_status` | session start — wake-up, capabilities probe, counts |
-| `onelens_query` | raw Cypher — any graph. Default tool for structural questions |
-| `onelens_search` | FTS by name / FQN / pattern (`User*`, `%auth%`). Node-type filter optional |
-| `onelens_retrieve` | hybrid FTS + semantic with source snippets. **Only when `has_semantic: true`** |
-| `onelens_kg_timeline` | time-series over facts touching an entity |
-| `onelens_find_tunnels` | concepts shared across wings (semantic similarity threshold) |
-| `onelens_diary_read` | per-wing diary log |
-| `onelens_check_duplicate` | semantic dedup before adding a drawer |
-
-### Canonical invocation shapes (exact flags)
-
-```bash
-onelens call-tool onelens_status   --graph <name>
-onelens call-tool onelens_query    --cypher "<CYPHER>" --graph <name> [--limit 30]
-onelens call-tool onelens_search   --term "<text>" --graph <name> [--node-type Method]
-onelens call-tool onelens_retrieve --query "<conceptual phrase>" --graph <name>
-```
-`--cypher`, `--term`, `--query` are *required positional-like* — omitting
-the value yields `requires an argument`. Quote the value when it contains
-spaces.
-
-**Flag-name traps (seen in real sessions):**
-
-| Tool | Right flag | Common wrong guess |
-|---|---|---|
-| `onelens_search` | `--term` | ❌ `--query` (that's `onelens_retrieve`) |
-| `onelens_search` | `--node-type Method` | ❌ `--nodeType` / `--type` |
-| `onelens_query` | `--cypher` | ❌ `--q` / positional |
-| `onelens_retrieve` | `--query` | ❌ `--term` / `--q` |
-
-If you see `parameter '--X' requires an argument. Did you mean '--Y'?`,
-fastmcp already told you the fix — use Y, don't guess further.
-
-## Tool catalog — writes (agents rarely invoke; mostly CLI)
-
-| Tool | Use when |
-|---|---|
-| `onelens_import` | index a JSON export into a graph |
-| `onelens_delta_import` | apply a delta export explicitly |
-| `onelens_add_drawer` / `onelens_delete_drawer` | store / remove a note |
-| `onelens_kg_add` / `onelens_kg_invalidate` | assert / retract a temporal fact |
-| `onelens_diary_write` | append to per-wing diary |
-
----
-
-## Reference files — load on demand
+<references_index>
+## Reference files — load for advanced patterns
 
 | File | Load when |
-|---|---|
-| `references/recipes.md` | **first stop for any user question** — canonical multi-step recipes for 10 common intents (impact, endpoint-to-table, test coverage, bean graph, dead code, migrations, cross-stack) |
-| `references/capabilities.md` | interpreting the flags in `onelens_status` |
-| `references/graph-schema.md` | need node-label + edge-type vocabulary |
-| `references/queries-code.md` | impact, trace, entry-points, call-graph, inheritance |
-| `references/queries-sql.md` | migrations, custom SQL queries, column lineage, report impact |
-| `references/queries-tests.md` | test coverage, unit vs integration split, MOCKS/SPIES |
-| `references/retrieval.md` | `onelens_retrieve` usage + fallback rules |
-| `references/jvm.md` | Spring / JPA deep patterns (`@Qualifier` injection, bean graph) |
-| `references/vue3.md` | Vue 3 / Pinia / vue-router patterns |
-
-Don't load everything up-front. Read the ones the question actually needs.
-
----
-
-## Answer principles (shared)
-
-- **Answer the question; don't dump pointers.** Top-hit synthesis with
-  `file:line` evidence beats ranked lists of FQNs.
-- **Structural reachability ≠ runtime execution.** A graph edge proves a
-  call statement exists in source, not that it runs. When the user asks
-  "does X actually execute", read the call site + any predicate bodies
-  before claiming yes. See the dead-gate detection section in `jvm.md`.
-- **Empty result = genuine no-match.** If `onelens_query` returns zero rows
-  for a concept, say so plainly — don't keep inventing synonyms.
-- **Default `LIMIT 20-30`**, `name` matching over `fqn`, to keep context
-  budget lean. Only switch to `fqn` / `filePath` when the user pasted one.
-- **Gate semantic tools on the flag.** `onelens_retrieve` on a graph where
-  `has_semantic: false` returns empty; fall back to `onelens_search`.
-- **Commit to an interpretation; don't ask.** If the user says "custom
-  SQL for X" — answer with SQL. If they say "trace the endpoint" — answer
-  with Cypher. Don't end with "Did you mean SQL or Cypher?" — pick the
-  literal reading of their words, deliver, and let them redirect.
-- **Surface coverage gaps in the answer, not just in internal thinking.**
-  If the user asks about graph X but X is empty (or `available_graphs`
-  redirected you elsewhere), say so up front: *"The `foo-frontend` graph
-  is empty — answer below is backend-only. Run Sync Graph on the frontend
-  project to get cross-stack coverage."* Silent coverage loss is worse
-  than a partial answer.
-- **BUG claims require evidence.** Before asserting *"off-by-one in gate
-  5"* / *"strict `<` should be `<=`"* / *"dead branch"*, cite exact
-  `file:line` and quote the operator. No naked bug accusations from graph
-  reachability alone — read the source, quote the 1-2 lines, then assert.
-- **Don't bypass the graph when the user asked a graph-scoped question.**
-  If you find yourself reading only raw source via grep/context-mode after
-  the status probe, you've silently abandoned OneLens. Use the graph to
-  find the entry-point (endpoint, controller, service class) *first*,
-  then drop into source for logic. Raw-source-only answers miss the
-  structural claims the graph can make cheaply.
-
----
-
-## Unsupported stacks
-
-Python, Go, Rust, C#, Ruby, plain JS (no Vue): not in the graph yet. Use
-Grep / LSP there. `onelens_retrieve` / `onelens_query` on a graph without
-the relevant labels returns empty or nonsense — check `capabilities` first.
+|------|-----------|
+| `references/recipes.md` | First stop for complex multi-step queries (20+ real recipes) |
+| `references/graph-schema.md` | Complete property list for every node + edge |
+| `references/queries-code.md` | Advanced Java code patterns (polymorphism, generics) |
+| `references/queries-sql.md` | SQL migration, table/column lineage, report impact |
+| `references/queries-tests.md` | Test coverage queries |
+| `references/jvm.md` | Spring/JPA deep patterns (@Qualifier, bean graph, @MappedSuperclass) |
+| `references/vue3.md` | Vue 3 specific patterns |
+| `references/capabilities.md` | What each capability flag means |
+</references_index>
