@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
 
 plugins {
     id("java")
@@ -143,5 +144,91 @@ tasks {
                 "modal_index*.py",
             )
         }
+    }
+
+    // Headless export — runs the OneLensExportStarter ApplicationStarter
+    // inside a real IntelliJ Platform JVM launched from the prepared sandbox,
+    // with no display. Writes ~/.onelens/exports/<graph>-full-<ts>.json and
+    // exits. PSI + collectors are exercised exactly as in the IDE; only the
+    // GUI/EDT is absent. See OneLensExportStarter.kt + docs/headless.md.
+    //
+    // Usage:
+    //   ./gradlew headlessExport \
+    //     -PonelensProject=/abs/path/to/spring/app \
+    //     [-PonelensOutput=/abs/path/to/outdir]
+    //
+    // Implementation note: we configure the plugin's built-in `runIde` task
+    // (which already has platformType / platformVersion / splitMode / plugins
+    // wired by the intellij-platform-gradle-plugin) and inject our starter
+    // command as its argv. Registering a fresh RunIdeTask requires
+    // re-declaring all of that wiring; reusing runIde avoids it. `headlessExport`
+    // is then a thin alias that depends on runIde so the user-facing command
+    // reads naturally and enforces the required -PonelensProject property.
+    named<RunIdeTask>("runIde") {
+        // Only meaningful when driving the headless starter; runIde's normal
+        // use (popping a GUI IDE) is unaffected for other invocations because
+        // these args are only consumed when the IDE is launched.
+        val projectPath = providers.gradleProperty("onelensProject")
+            .orElse(providers.environmentVariable("ONELENS_PROJECT"))
+        val outputPath = providers.gradleProperty("onelensOutput")
+            .orElse(providers.environmentVariable("ONELENS_OUTPUT"))
+            .orElse("")
+        argumentProviders.add {
+            val proj = projectPath.orNull ?: return@add emptyList()
+            val out = outputPath.orNull?.takeIf { it.isNotBlank() }
+                ?: "${System.getProperty("user.home")}/.onelens/exports"
+            val args = mutableListOf("onelens-export", "--project", proj, "--output-dir", out)
+            // Read delta flag at execution time (not configuration time) to
+            // avoid configuration-cache serialization issues.
+            if (System.getenv("ONELENS_DELTA")?.toBooleanStrictOrNull() == true) {
+                args.add("--delta")
+            }
+            args
+        }
+        // Headless: no EDT, no Swing. The platform + our starter honor this.
+        systemProperty("java.awt.headless", "true")
+        // Auto-link Maven/Gradle projects on open. Without this, a headless
+        // open of a project with a pom.xml/build.gradle shows an "unlinked
+        // project" notification (which a user would click) and never imports
+        // — so no source roots, no indexing, empty export. AUTO links it
+        // without UI. Same registry key the IDE writes when the user picks
+        // "Import" on the unlinked-project balloon.
+        systemProperty("external.system.link.unlinked.projects", "AUTO")
+        // Isolated system/ dir per run. The shared build/idea-sandbox index
+        // contaminates across projects: the scanner reports "0 files for
+        // indexing" on subsequent runs because it thinks a prior project's
+        // index already covers the new files. This is a documented platform
+        // behavior — bentolor/idea-cli-inspector's troubleshooting verbatim:
+        // "The analysis seems to produce different results on subsequent runs…
+        // Try if deleting the system/ directory prior to executing produces
+        // stable results." JetBrains' own inspection-plugin uses a fresh
+        // locked system/ dir per run (SystemPathManager + marker.ipl lock).
+        // We point idea.system.path (NOT idea.home.path — that must stay the
+        // real IDE install or bootstrap crashes) at a per-output location.
+        // Set ONELENS_SYSTEM_DIR to override (e.g. a CI-specific path).
+        val systemDir = providers.environmentVariable("ONELENS_SYSTEM_DIR")
+            .orElse(layout.buildDirectory.dir("onelens-system").map { it.asFile.path })
+        systemProperty("idea.system.path", systemDir.get())
+        // Configurable max heap for large projects. The platform default
+        // (~2GB) is fine for fixtures but a 45K-file enterprise codebase
+        // hits memory pressure → GC compaction → index rebuild → timeout.
+        // Override via -PonelensXmx=4g (or ONELENS_XMX env). No-op for the
+        // default fixture runs.
+        val xmx = providers.gradleProperty("onelensXmx")
+            .orElse(providers.environmentVariable("ONELENS_XMX"))
+        xmx.orNull?.let { jvmArgs("-Xmx$it") }
+    }
+
+    register("headlessExport") {
+        group = "onelens"
+        description = "Run the OneLens PSI export headlessly (no GUI). Writes JSON, then exits."
+        dependsOn("runIde")
+        // Note: we intentionally do NOT validate -PonelensProject here. A
+        // doFirst closure would capture `providers` and break Gradle 9's
+        // configuration cache (cannot serialize Gradle script object refs).
+        // runIde's argumentProviders already no-ops when the property is
+        // absent, and a missing property just launches a normal IDE — the
+        // user-visible failure mode is "IDE opened instead of export", which
+        // the docs call out. Keeping this task config-cache-compatible.
     }
 }

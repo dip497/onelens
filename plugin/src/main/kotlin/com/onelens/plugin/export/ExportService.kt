@@ -253,10 +253,23 @@ class ExportService {
             json.encodeToStream(document, out)
         }
 
-        // Update state
+        // Update state — capture git hash + file→classes map so the next delta
+        // export (headless --delta or GUI autosync) can diff from this point.
         val state = ExportState.getInstance(project)
         state.state.lastExportTimestamp = System.currentTimeMillis()
         state.state.lastExportPath = outputFile.toString()
+        // Capture the current git HEAD as the diff base for the next delta.
+        val newGitHash = com.onelens.plugin.export.delta.DeltaTracker.getCurrentGitHash(
+            workspace.primaryRoot.toString()
+        )
+        if (newGitHash.isNotEmpty()) state.state.lastGitHash = newGitHash
+        // Rebuild file→classes map from the freshly-collected classes so the
+        // next delta knows which classes lived in a deleted/modified file.
+        state.state.fileHashes.clear()
+        for (cls in document.classes) {
+            val existing = state.state.fileHashes.getOrDefault(cls.filePath, "")
+            state.state.fileHashes[cls.filePath] = if (existing.isEmpty()) cls.fqn else "$existing,${cls.fqn}"
+        }
 
         LOG.info("Full export complete: $outputFile (${durationMs}ms)")
         publish(OneLensEvent.Info("Full export complete: $outputFile (${durationMs}ms)"))
