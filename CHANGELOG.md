@@ -7,6 +7,256 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Headless delta export (2026-06)
+
+- **`--delta` flag for headless export.** `ONELENS_DELTA=true ./gradlew
+  headlessExport` runs a git-diff-based incremental export — only changed
+  files are re-collected, producing a small delta JSON. Falls back to full
+  export if no previous export state exists.
+- **Cross-JVM delta state persistence** via
+  `~/.onelens/graphs/<graphId>/.onelens-lastexport`. Stores the last export's
+  git commit + file→classes map outside IntelliJ's isolated system dir, so
+  successive headless runs can diff. The Python importer auto-detects
+  `exportType: "delta"` and applies incrementally.
+- **Full export now captures git hash + file→classes map** in ExportState,
+  enabling the delta flow without requiring the GUI.
+- **Delta verified end-to-end**: 1 changed file → 28s export + 16s import
+  (was ~7 min full export + 25s import = 8.4x speedup for incremental sync).
+
+### Added — Multi-project workspace support (2026-06)
+
+- **Sibling workspace roots auto-imported as Maven projects.** The headless
+  Maven import now discovers sibling repos declared in `onelens.workspace.yaml`
+  via `MavenProjectsManager.addManagedFiles()` and resolves them alongside
+  the primary project. Requires `mvn install -DskipTests` on the primary
+  project first when sibling repos have inter-project dependencies.
+- **Root cause fix**: `addManagedFiles` must be called AFTER primary pom
+  discovery (`forceUpdateAllProjectsOrFindAllAvailablePomFiles`), not before —
+  otherwise `hasProjects()` returns true (siblings registered) and the primary
+  pom is never discovered.
+- **Verified**: 3-project test workspace (no inter-project deps) → all 3
+  projects' classes indexed correctly. Sibling modules' source roots
+  registered via the correct Maven import ordering.
+
+### Added — Vue3 export performance (2026-06)
+
+- **Parallelized JsModuleCollector and ComposableCollector.** Both processed
+  ~28K files sequentially. Ported the `FixedThreadPool(cores)` pattern
+  from Java's CallGraphCollector — chunked file lists across worker threads
+  with thread-local accumulation. Output verified 100% identical across all
+  12 node/edge types.
+- **CallThroughResolver O(n²) linear scans → HashMap lookups.** Replaced
+  `ctx.components.any { it.filePath == relative }` with a pre-built
+  `Map<String, ComponentData>`.
+- **Per-collector timing instrumentation** in both Java (SpringBootAdapter)
+  and Vue3 (Vue3Adapter) collectors. Logs per-stage timings to stderr so
+  export bottlenecks are visible without a profiler.
+- **All collectors now use all available cores** (was `cores/2`).
+
+### Added — Java export performance (2026-06)
+
+- **Parallelized ClassCollector, MemberCollector, InheritanceCollector.**
+  These three were running sequentially. Porting the thread-pool pattern
+  brought ClassCollector 60s → 20s, MemberCollector 35s → 26s,
+  InheritanceCollector 9s → 4s. CallGraphCollector and DataFlowCollector
+  upgraded from `cores/2` to `cores` threads.
+
+### Fixed — Vue3 import performance (2026-06)
+
+- **Edge queries used label-less MATCH — 6000x slower than indexed.** The
+  USES_STORE, USES_COMPOSABLE, and CALLS_API edge queries omitted the node
+  label from the Cypher MATCH pattern (`MATCH (c {fqn: ...}) WHERE c:Component
+  OR c:Composable`), forcing FalkorDB to scan all 222K nodes per edge batch.
+  Splitting each edge set by caller label (`.vue` → Component, `.js` →
+  Composable/JsFunction) and using label-indexed MATCH (`MATCH (c:Component
+  {fqn: ...})`) brought the edge phases from **15+ minutes to under 1 second**.
+  Same fix applied to pagerank edge queries (75 min → 12 sec).
+- **Total Vue3 import: 984s → 24s (41x faster).** Edge counts verified
+  identical before and after.
+
+### Fixed — Vue3 export performance (2026-06)
+
+- **Parallelized JsModuleCollector and ComposableCollector.** Both processed
+  ~28K files sequentially. Ported the `FixedThreadPool(cores/2)` pattern
+  from Java's CallGraphCollector — chunked file lists across worker threads
+  with thread-local accumulation. JsModuleCollector: 144s → 111s.
+  ComposableCollector: 55s → 22s. Output verified 100% identical across all
+  12 node/edge types.
+- **CallThroughResolver O(n²) linear scans → HashMap lookups.** Replaced
+  `ctx.components.any { it.filePath == relative }` (per-file linear scan) and
+  `ctx.components.first { it.filePath == relative }` (per-call-expression linear
+  scan) with a pre-built `Map<String, ComponentData>`. Converts O(files ×
+  components × calls) to O(files × calls).
+- **Per-collector timing instrumentation.** `Vue3Collector.collect()` now logs
+  per-stage timings to stderr so export bottlenecks are visible without a
+  profiler.
+- **Total Vue3 export: 336s → 178s (1.9x faster).**
+
+### Fixed — Vue3 node identity model (2026-06)
+
+- **Store data corruption from test mocks** — Pinia store nodes were MERGEd
+  on the framework's `id` (first arg to `defineStore('modules', ...)`).
+  Vitest `vi.mock()` factories in `__tests__/*.test.js` call the real
+  `defineStore` with the SAME id but fewer actions. The importer's
+  `MERGE (n:Store {id: item.id})` collapsed them → last-write-wins
+  overwrote the real store's actions with the mock's stubs. On the dogfood
+  Vue3 repo, `useModulesStore` appeared 10 times (1 real + 9 test mocks),
+  and the real store's 10 actions were silently replaced by the mock's 1.
+  **Fix**: every Vue Component and Store now carries `fqn =
+  "<filePath>::<name>"` (the convention Composable/JsFunction/ApiCall
+  already used). The importer MERGEs on `fqn`, so the real store and the
+  mock are separate nodes — same model as Java's `Bar` vs `BarTest`.
+  `UsesStoreEdge` carries `storeFqn` so edges link to the correct node.
+- **`isTest` tag on all Vue nodes** — Components, Stores, Composables,
+  JsModules, and JsFunctions now carry `isTest: boolean`, populated by
+  `isTestFile()` (matches `__tests__/`, `*.test.js`, `*.spec.js`, `tests/`,
+  `e2e/`). Test files are indexed (consistent with Java, which indexes
+  `src/test/java/...Test.java`) but tagged so retrieval can distinguish
+  `WHERE NOT n.isTest` (production) from `WHERE n.isTest` (test doubles).
+  No data loss — the mock→real relationship is preserved and queryable.
+- **Edge queries simplified** — `USES_STORE`, `USES_COMPOSABLE`, and
+  `CALLS_API` edges previously used a fragile 3-way OR match
+  (`c.fqn = e.caller OR c.filePath = e.caller OR e.caller STARTS WITH
+  (c.filePath + '::')`) because Component nodes lacked `fqn`. Now that
+  every Vue node carries `fqn`, all three edge types collapse to a clean
+  single-key `c.fqn = e.caller` match — same pattern Java uses for
+  Class/Method edges. The 15-20x edge overproduction risk is eliminated.
+- **Schema + pagerank updated** — FalkorDB indexes and pagerank
+  computation/write-back now key on `fqn` for Component and Store
+  (previously `filePath` and `id`).
+
+### Added — Headless export mode (ApplicationStarter + Docker) (2026-06)
+
+- **`OneLensExportStarter`** — a Kotlin `ApplicationStarter` that runs the
+  full PSI export without a GUI. Registered as `<appStarter id="onelens-export">`
+  in `plugin.xml`; the platform dispatches by that `id`. Drives the exact
+  same `ExportService.exportFull` the in-IDE Tools → OneLens → Sync Graph
+  action drives (verified GUI-decoupled: zero AWT/Swing/EDT references across
+  the `export/` package). Writes `~/.onelens/exports/<graph>-full-<ts>.json`
+  and exits. JSON-only — `autoImport=false`, `buildSemanticIndex=false`;
+  graph + embeddings are a separate `onelens call-tool onelens_import` step.
+  **End-to-end verified and DETERMINISTIC for both plain-Java AND Spring Boot**:
+  - Plain Java (`tools/headless-fixture/`): **3/3 runs** → identical
+    `2 classes, 5 methods, 4 calls`, `exit=0`, ~3-8 s export.
+  - Spring Boot (`tools/spring-fixture/`, `@RestController`+`@Service`+
+    `@Configuration`+`@Bean`+`@Autowired`+`spring-boot-starter-web`):
+    **3/3 runs (1 cold + 2 warm)** → identical `4 classes, 6 methods, 3 calls,
+    2 endpoints`, `exit=0`, ~6-7 s export. Endpoints (`GET /api/greetings`,
+    `GET /api/greetings/{name}`), the `@Autowired` constructor injection, and
+    the `@SpringBootApplication` app node are all detected — the depth tier
+    resolved type-accurately through PSI against real Spring JARs.
+  - **Complex Spring Boot** (`tools/complex-spring-fixture/`, realistic
+    multi-layer app: API→Service→Repository→Domain, 2 controllers, 2 services
+    with cross-service composition, 2 Spring Data `JpaRepository` interfaces,
+    3 JPA entities incl. a `@MappedSuperclass`, an enum, 4 records, a
+    `@Configuration` with `@Bean` methods; `spring-boot-starter-data-jpa` +
+    `validation` deps): **2/2 runs (cold + warm)** → identical `17 classes,
+    55 methods, 57 calls, 5 endpoints` plus **3 JPA entities, 2 repositories
+    with derived queries, 9 inheritance edges** (`Customer/Order →
+    AbstractEntity`, repos `→ JpaRepository`, enum `→ Enum`, records
+    `→ Record`), `exit=0`, ~8-11 s export. Every collector fired correctly
+    and type-accurately.
+- **External-system (Maven/Gradle) import synchronization** — the hardest
+  part of headless PSI export, three race conditions closed (see
+  `docs/headless.md` "External-system import synchronization"): (1) the
+  stub-index gate catches `IndexNotReadyException` instead of propagating;
+  (2) Maven uses its own `MavenImportListener.TOPIC` (NOT the unified
+  external-system bus) — now consumed via a **typed adapter**
+  (`com.onelens.plugin.headless.maven.MavenHeadlessImport`) compiled against
+  the Maven plugin classes through an optional `<depends config-file=
+  "maven-headless.xml">org.jetbrains.idea.maven</depends>` (the same
+  Spring/Vue/Git optional-dep pattern) + Maven added to `platformBundledPlugins`
+  for compile-time typing. (An earlier version used ~85 lines of reflection to
+  reach MavenImportListener + MavenProjectsManager across the isolated plugin
+  classloader — strictly worse: a Maven-API rename would silently stop the
+  event instead of failing the build.); (3) Maven doesn't auto-import reliably
+  in headless and `hasProjects()` can be false on warm cache — fixed by
+  `forceUpdateAllProjectsOrFindAllAvailablePomFiles()` +
+  `scheduleImportAndResolve()`, with `importFinished` as the completion signal
+  followed by smart-mode + stub re-gate. Stricter than the per-call
+  `runReadActionInSmartMode` workaround JetBrains' own `mcp-jetbrains#87`
+  still uses.
+- **Three indexing gates in the starter** (hard-won; see `docs/headless.md`
+  "Operational gotchas"): `waitForSmartMode` alone yields `0 classes` because
+  the deferred `UnindexedFilesScanner` hasn't populated the stub index yet.
+  The starter additionally polls `JavaPsiFacade.findClass` +
+  `PsiShortNamesCache.allClassNames` (different indexes that lag each other),
+  forces a synchronous VFS refresh so `WorkspaceLoader.scope()` sees the root,
+  runs all blocking work on a pooled thread (not the EDT — self-deadlock
+  risk), and force-exits the JVM on a 2 s delay (Gradle's JavaExec keeps
+  non-daemon threads alive after `Application.exit()`).
+- **`./gradlew headlessExport`** task — configures the built-in `runIde` task
+  (avoids re-declaring platform wiring) with the starter command,
+  `java.awt.headless=true`, and `external.system.link.unlinked.projects=AUTO`
+  (so a pom.xml/gradle build auto-links instead of showing an "unlinked
+  project" notification that headless mode can't dismiss). Usage:
+  `./gradlew headlessExport -PonelensProject=/abs/path [-PonelensOutput=/out]`.
+- **`docker/Dockerfile`** on `jetbrains/qodana-jvm` — packages the headless
+  exporter as a containerized Ultimate-platform image. Fixed a double-nested
+  plugin-dir bug (the ZIP ships a top-level `onelens-graph-builder/`, so
+  unzipping under `/opt/idea/plugins/<name>` would nest twice and the plugin
+  loader wouldn't discover the `<appStarter>` EP). `docker/README.md`
+  documents the Qodana license requirement and Community/scip-java
+  alternatives. Implements `docs/design/PLAN-onboard-cli.md` Phase 5.
+- **`tools/headless-fixture/`** — minimal 2-class Java project
+  (`Greeter`, `Counter`) for verifying the headless chain end-to-end. Must
+  be copied to a `.idea`-ancestor-free path before opening (see gotcha #3).
+- **`docs/headless.md`** — user-facing doc covering the three run modes
+  (Gradle / Docker / raw `idea.sh`), the licensing constraint, internals,
+  and the four operational gotchas that cause silent `0 classes` failures.
+
+### Fixed — Test compilation (2026-06)
+
+- `Vue3CollectorsSmokeTest.ctx()` now supplies the required `workspace`
+  param to `Vue3Context` (gained in the Phase C workspace refactor) via
+  `WorkspaceLoader.load(project)`, unblocking `./gradlew test`.
+
+### Refactored — Headless export: architecture-review cleanup (2026-06)
+
+Driven by an adversarial design review. Determinism preserved: all 3 fixtures
+re-verified after the refactor (plain-Java `2/5/4/0`, Spring `4/6/3/2`,
+complex Spring `17/55/57/5` — all identical to pre-refactor counts).
+
+- **Docker descopted honestly (P0).** The `docker/Dockerfile` `ENTRYPOINT`
+  invokes `/opt/idea/bin/idea.sh` directly, but `jetbrains/qodana-jvm`
+  actually sets `ENTRYPOINT ["/opt/idea/bin/qodana"]` (the Qodana CLI wrapper
+  that consumes `QODANA_TOKEN` for Ultimate license checkout). Direct
+  `idea.sh` bypasses the wrapper. Marked **EXPERIMENTAL / UNVERIFIED** in
+  both `Dockerfile` and `docker/README.md`; the verified headless path is
+  `./gradlew headlessExport`. Docker will be properly smoke-tested + fixed
+  in a follow-up.
+- **Shutdown contract fixed (P0).** The 2-second daemon-thread
+  `exitProcess` was the PRIMARY shutdown path, institutionalizing "we don't
+  know if `closeAndDispose` completes." Reversed: `Application.exit()` is
+  primary; a generous 60s watchdog (`SHUTDOWN_WATCHDOG_SEC`) force-exits
+  only if the graceful path wedges, logging loudly when it fires so a real
+  shutdown bug is visible. Under Gradle-JavaExec the watchdog still fires
+  (non-daemon worker threads keep the JVM alive), but it's now correctly
+  labeled as the fallback.
+- **Maven reflection replaced with typed adapter (P1).** ~85 lines of
+  reflection (PluginManagerCore → IdeaPluginDescriptor → plugin classloader
+  → Class.forName → Proxy → reflective subscribe) replaced by a typed
+  `MavenHeadlessImport` in a new `headless/maven/` subpackage, compiled
+  against Maven plugin classes via an optional `<depends config-file=
+  "maven-headless.xml">org.jetbrains.idea.maven</depends>`. Maven API
+  renames now fail the build instead of silently stopping the import event.
+  Includes a 5s fallback for genuinely-non-Maven projects so they don't
+  wait the full resolve timeout.
+- **ClassCollector retry reverted (P1).** The `IndexNotReadyException`
+  retry-loop added to `ClassCollector` patched 1 of ~15 collectors and
+  leaked headless concerns into shared in-IDE code. Reverted to the
+  pre-retry shape — the starter's stable-probe gate is the correct layer
+  for resilience.
+- **Gates fail loud on timeout (P1).** Gate timeouts upgraded from `warn`
+  (easy to miss) to `error`/SEVERE in `idea.log` plus a stderr line, so CI
+  greps catch silent degradations.
+- **Diagnostic dump opt-in (P1).** `dumpProjectStructure` now runs only
+  when `ONELENS_DEBUG=1` — was running on every export.
+- **Hardening (P2).** Removed unused `COMMAND` constant; `firstJavaClassFqn`
+  uses `Files.walk(base, 20).use { }` (closes the stream handle, depth cap)
+  and excludes `/build/`, `/target/`, `/node_modules/`, `/.gradle/`, `/out/`.
+- Fixed typo: `EXTResolve_TIMEOUT_SEC` → `EXT_RESOLVE_TIMEOUT_SEC`.
+
 ### Changed — Importer refactor toward SubdocLoader registry (E5, staged) (2026-06)
 
 - **Stage 1: `graph_writer.py`.** The five/six batch-write primitives and the

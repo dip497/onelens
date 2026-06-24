@@ -98,9 +98,41 @@ data class Workspace(
         return normalized.removePrefix("/")
     }
 
-    /** Predicate: does any root contain [absolute]? Used for delta filtering. */
+    /**
+     * Directory segments that are always excluded from the export regardless
+     * of whether they're under a workspace root. These are build output,
+     * version-control internals, IDE state, and tool-managed worktree
+     * directories that contain duplicate or generated source. Without this
+     * filter, `Workspace.contains()` admits everything under the project root,
+     * which means e.g. `.claude/worktrees/` (git worktree copies of the entire
+     * repo) would double the class count and produce duplicate FQNs.
+     *
+     * This is deliberately a path-segment match (not a suffix) so it doesn't
+     * accidentally exclude a legitimate package named e.g. `target` — only
+     * the well-known top-level dirs.
+     *
+     * Not a full `.gitignore` parser — that would require shelling out to
+     * `git ls-files` at runtime (slow, needs git on PATH, breaks offline).
+     * This covers the directories that matter for indexing correctness.
+     */
+    private val EXCLUDED_SEGMENTS = setOf(
+        "/.git/",
+        "/target/",           // Maven build output (also excluded by the importer, belt-and-suspenders)
+        "/build/",            // Gradle build output
+        "/out/",              // IntelliJ compiler output
+        "/.gradle/",          // Gradle caches
+        "/.idea/",            // IDE state
+        "/node_modules/",     // JS deps
+        "/.claude/worktrees/", // Claude Code parallel-task worktrees (full repo copies)
+    )
+
+    /** Predicate: does any root contain [absolute] AND is it not excluded? */
     fun contains(absolute: String): Boolean {
         val normalized = absolute.replace('\\', '/')
+        // Exclude known build/VCS/worktree dirs BEFORE the root-prefix check.
+        // This is what prevents worktree duplicates and generated sources from
+        // polluting the export.
+        if (EXCLUDED_SEGMENTS.any { normalized.contains(it) }) return false
         return roots.any { r ->
             val rs = r.path.toString().replace('\\', '/')
             normalized == rs || normalized.startsWith("$rs/")

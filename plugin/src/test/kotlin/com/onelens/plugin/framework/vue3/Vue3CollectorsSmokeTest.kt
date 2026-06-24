@@ -1,6 +1,7 @@
 package com.onelens.plugin.framework.vue3
 
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import org.junit.Assert.assertNotEquals
 import com.onelens.plugin.framework.vue3.collectors.ApiCallCollector
 import com.onelens.plugin.framework.vue3.collectors.ComposableCollector
 import com.onelens.plugin.framework.vue3.collectors.LazyRouteCollector
@@ -29,13 +30,24 @@ class Vue3CollectorsSmokeTest : BasePlatformTestCase() {
             "useCounter.js",
             "userStore.js",
             "ticket-routes.js",
-            "config.js"
+            "config.js",
+            "__tests__/mockStore.test.js"
         ).forEach { myFixture.copyFileToProject(it) }
     }
 
     private fun ctx(): Vue3Context {
         val base = Paths.get(project.basePath ?: "/tmp")
-        return Vue3Context(projectBase = base, aliases = emptyMap(), symlinks = emptyList())
+        // Vue3Context gained a required `workspace` param to scope every
+        // collector + resolver through one root. Production code builds it via
+        // WorkspaceLoader.load(project) (ExportService.exportFull); the test
+        // fixture does the same so the implicit single-root workspace is used.
+        val workspace = com.onelens.plugin.framework.workspace.WorkspaceLoader.load(project)
+        return Vue3Context(
+            projectBase = base,
+            aliases = emptyMap(),
+            symlinks = emptyList(),
+            workspace = workspace,
+        )
     }
 
     fun testSfcCollectorFindsAllVueFiles() {
@@ -52,19 +64,36 @@ class Vue3CollectorsSmokeTest : BasePlatformTestCase() {
         assertEquals(listOf("update", "close"), simpleProps.emits)
         assertEquals(listOf("reset"), simpleProps.exposes)
         assertTrue("script setup body captured", simpleProps.body?.contains("defineProps") == true)
+        // fqn = "<filePath>::<name>" — the stable identity the importer MERGEs on.
+        assertTrue("fqn must be filePath::name", simpleProps.fqn.endsWith("SimpleProps.vue::SimpleProps"))
+        assertFalse("non-test component must have isTest=false", simpleProps.isTest)
     }
 
     fun testPiniaCollectorExtractsStore() {
         val ctx = ctx()
         PiniaStoreCollector.collect(project, ctx)
-        assertEquals("userStore.js contains one defineStore", 1, ctx.stores.size)
-        val store = ctx.stores[0]
-        assertEquals("user", store.id)
-        assertEquals("useUserStore", store.name)
-        assertEquals("options", store.style)
-        assertTrue("name state key captured", store.state.contains("name"))
-        assertTrue("isLoggedIn getter captured", store.getters.contains("isLoggedIn"))
-        assertTrue("fetchProfile action captured", store.actions.contains("fetchProfile"))
+        // Two stores: userStore.js (real) + __tests__/mockStore.test.js (mock).
+        // Both call defineStore('user', ...) — same Pinia id, different files.
+        assertEquals("userStore.js + mockStore.test.js = 2 stores", 2, ctx.stores.size)
+
+        val realStore = ctx.stores.first { !it.isTest }
+        assertEquals("user", realStore.id)
+        assertEquals("useUserStore", realStore.name)
+        assertEquals("options", realStore.style)
+        assertTrue("name state key captured", realStore.state.contains("name"))
+        assertTrue("isLoggedIn getter captured", realStore.getters.contains("isLoggedIn"))
+        assertTrue("fetchProfile action captured", realStore.actions.contains("fetchProfile"))
+        assertTrue("real store fqn is filePath::name", realStore.fqn.endsWith("userStore.js::useUserStore"))
+
+        // The mock store has the SAME Pinia id but a DIFFERENT fqn — this is the
+        // whole point of the identity fix. Without unique fqns, MERGE on `id`
+        // would collapse them and the mock's stubAction would overwrite
+        // fetchProfile.
+        val mockStore = ctx.stores.first { it.isTest }
+        assertEquals("mock shares the same Pinia id", "user", mockStore.id)
+        assertNotEquals("mock must have a different fqn from the real store", realStore.fqn, mockStore.fqn)
+        assertTrue("mock store fqn includes test path", mockStore.fqn.contains("__tests__"))
+        assertTrue("mock store fqn is filePath::name", mockStore.fqn.endsWith("mockStore.test.js::useUserStore"))
     }
 
     fun testRouteCollectorExpandsInterpolatedNames() {
@@ -126,9 +155,13 @@ class Vue3CollectorsSmokeTest : BasePlatformTestCase() {
         CallThroughResolver.collect(project, ctx)
 
         // UsesComposable.vue directly calls useUserStore → direct USES_STORE edge.
+        // The edge now carries storeFqn so the importer links to the correct
+        // fqn-keyed Store node (not the id-keyed one that collides with mocks).
+        val directEdge = ctx.usesStore.firstOrNull { !it.indirect && it.storeId == "user" }
+        assertNotNull("direct USES_STORE edge to user store from UsesComposable", directEdge)
         assertTrue(
-            "direct USES_STORE edge to user store from UsesComposable",
-            ctx.usesStore.any { !it.indirect && it.storeId == "user" }
+            "direct edge must carry storeFqn matching the real store",
+            directEdge!!.storeFqn.endsWith("userStore.js::useUserStore")
         )
         // UsesComposable.vue calls useCounter → USES_COMPOSABLE edge.
         assertTrue(
@@ -146,5 +179,6 @@ class Vue3CollectorsSmokeTest : BasePlatformTestCase() {
         val useCounter = ctx.composables.first { it.name == "useCounter" }
         assertTrue("fqn includes file path + name", useCounter.fqn.endsWith("::useCounter"))
         assertTrue("body includes ref()", useCounter.body?.contains("ref(") == true)
+        assertFalse("non-test composable must have isTest=false", useCounter.isTest)
     }
 }

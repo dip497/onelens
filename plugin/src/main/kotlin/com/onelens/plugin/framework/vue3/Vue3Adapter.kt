@@ -110,38 +110,44 @@ class Vue3Collector : Collector {
 
         val indicator = ctx.indicator
         val baseFraction = ctx.progressFraction
+        val timings = StringBuilder()
+        fun timed(label: String, fraction: Double, block: () -> Unit) {
+            indicator?.text = "Vue 3: $label…"
+            indicator?.fraction = fraction
+            val start = System.nanoTime()
+            block()
+            val ms = (System.nanoTime() - start) / 1_000_000
+            timings.append("  $label: ${ms}ms\n")
+        }
 
-        indicator?.text = "Vue 3: components (.vue files)…"
-        indicator?.fraction = baseFraction
-        SfcScriptSetupCollector.collect(project, vueCtx)
+        timed("components (.vue files)", baseFraction) {
+            SfcScriptSetupCollector.collect(project, vueCtx)
+        }
+        timed("Pinia stores", baseFraction + 0.15) {
+            PiniaStoreCollector.collect(project, vueCtx)
+        }
+        timed("composables", baseFraction + 0.25) {
+            ComposableCollector.collect(project, vueCtx)
+        }
+        timed("routes", baseFraction + 0.32) {
+            LazyRouteCollector.collect(project, vueCtx)
+        }
+        timed("API calls", baseFraction + 0.40) {
+            ApiCallCollector.collect(project, vueCtx)
+        }
+        timed("binding parametric URLs", baseFraction + 0.44) {
+            ModuleNameBinder.bind(project, vueCtx)
+        }
+        timed("store / composable edges (1-hop)", baseFraction + 0.46) {
+            CallThroughResolver.collect(project, vueCtx)
+        }
+        timed("JS modules + functions + imports", baseFraction + 0.48) {
+            JsModuleCollector.collect(project, vueCtx)
+        }
 
-        indicator?.text = "Vue 3: Pinia stores…"
-        indicator?.fraction = baseFraction + 0.15
-        PiniaStoreCollector.collect(project, vueCtx)
-
-        indicator?.text = "Vue 3: composables…"
-        indicator?.fraction = baseFraction + 0.25
-        ComposableCollector.collect(project, vueCtx)
-
-        indicator?.text = "Vue 3: routes…"
-        indicator?.fraction = baseFraction + 0.32
-        LazyRouteCollector.collect(project, vueCtx)
-
-        indicator?.text = "Vue 3: API calls…"
-        indicator?.fraction = baseFraction + 0.40
-        ApiCallCollector.collect(project, vueCtx)
-
-        indicator?.text = "Vue 3: binding parametric URLs…"
-        indicator?.fraction = baseFraction + 0.44
-        ModuleNameBinder.bind(project, vueCtx)
-
-        indicator?.text = "Vue 3: store / composable edges (1-hop)…"
-        indicator?.fraction = baseFraction + 0.46
-        CallThroughResolver.collect(project, vueCtx)
-
-        indicator?.text = "Vue 3: JS modules + functions + imports…"
-        indicator?.fraction = baseFraction + 0.48
-        JsModuleCollector.collect(project, vueCtx)
+        // Log per-collector timings so export bottlenecks are visible without
+        // a profiler. Goes to stderr (visible in headless run logs).
+        System.err.println("[onelens] Vue3 collector timings:\n$timings")
 
         val snapshot: Vue3Data = vueCtx.snapshot()
         val nodeCount = snapshot.components.size + snapshot.composables.size +

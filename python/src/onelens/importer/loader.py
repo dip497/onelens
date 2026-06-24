@@ -472,7 +472,12 @@ class GraphLoader:
         """
         wing = graph_name or "default"
 
-        # Components — primary key = filePath (unique per repo).
+        # Components — primary key = fqn ("<filePath>::<name>"), the stable
+        # declaration identity. Components merged on `filePath` alone before,
+        # which left the node without a name-qualified identity — 58 components
+        # all named "list" were indistinguishable to retrieval. Merging on `fqn`
+        # keeps them separate and mirrors the Composable / JsFunction identity
+        # convention.
         components = [dict(c, wing=wing) for c in vue3.get("components", [])]
         for c in components:
             # Props list is a list of small dicts; flatten to a comma-separated name
@@ -481,24 +486,32 @@ class GraphLoader:
             c["propNames"] = ",".join(p.get("name", "") for p in props)
             c["emits"] = ",".join(c.get("emits", []) or [])
             c["exposes"] = ",".join(c.get("exposes", []) or [])
-        self._batch_nodes(progress, "Vue Components", components, "Component", "filePath", [
-            "name", "scriptSetup", "propNames", "emits", "exposes", "body", "wing",
+        self._batch_nodes(progress, "Vue Components", components, "Component", "fqn", [
+            "name", "filePath", "scriptSetup", "propNames", "emits", "exposes", "body",
+            "isTest", "wing",
         ])
 
         # Composables
         composables = [dict(c, wing=wing) for c in vue3.get("composables", [])]
         self._batch_nodes(progress, "Vue Composables", composables, "Composable", "fqn", [
-            "name", "filePath", "body", "wing",
+            "name", "filePath", "body", "isTest", "wing",
         ])
 
-        # Stores
+        # Stores — primary key = fqn ("<filePath>::<name>"), NOT the Pinia id.
+        #   The Pinia `id` (first arg to defineStore, e.g. "modules") is shared
+        #   by the real store AND every vi.mock factory that redefines it in a
+        #   test file. Merging on `id` collapsed them and last-write-wins
+        #   overwrote the real store's actions with the mock's. Merging on `fqn`
+        #   keeps the real store and the mock as separate nodes — same model as
+        #   Java's Bar vs BarTest.
         stores = [dict(s, wing=wing) for s in vue3.get("stores", [])]
         for s in stores:
             s["state"] = ",".join(s.get("state", []) or [])
             s["getters"] = ",".join(s.get("getters", []) or [])
             s["actions"] = ",".join(s.get("actions", []) or [])
-        self._batch_nodes(progress, "Vue Stores", stores, "Store", "id", [
-            "name", "filePath", "style", "state", "getters", "actions", "body", "wing",
+        self._batch_nodes(progress, "Vue Stores", stores, "Store", "fqn", [
+            "id", "name", "filePath", "style", "state", "getters", "actions", "body",
+            "isTest", "wing",
         ])
 
         # Routes
@@ -562,13 +575,13 @@ class GraphLoader:
             stem = base.rsplit(".", 1)[0] if "." in base else base
             _m.setdefault("name", stem or fp)
         self._batch_nodes(progress, "JS Modules", modules, "JsModule", "filePath", [
-            "name", "fileKind", "isBarrel", "wing",
+            "name", "fileKind", "isBarrel", "isTest", "wing",
         ])
 
         functions = [dict(f, wing=wing) for f in vue3.get("functions", [])]
         self._batch_nodes(progress, "JS Functions", functions, "JsFunction", "fqn", [
             "name", "filePath", "exported", "isDefault", "isAsync",
-            "lineStart", "lineEnd", "body", "wing",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
         ])
 
         # HAS_FUNCTION: JsModule -> JsFunction by shared filePath. Without
@@ -594,43 +607,85 @@ class GraphLoader:
         #   Component-scoped call   -> "<filePath>::<ComponentName>"   (CallThroughResolver)
         #   Function-scoped call    -> "<filePath>::<fnName>"           (ApiCallCollector)
         #   Module-top-level call   -> "<filePath>::<module>"
-        # Component nodes are keyed on `filePath` (no `::name` suffix), so a
-        # literal equality check misses most component-sourced edges. We
-        # additionally accept any caller whose string starts with
-        # `c.filePath + '::'` — which matches Component rows without
-        # double-counting Composable rows whose `fqn` already equals the full
-        # caller string.
+        #
+        # PERFORMANCE: Each edge batch MUST use a label in the MATCH pattern
+        # (e.g. `MATCH (c:Component {fqn: ...})`) so FalkorDB uses the fqn
+        # index. A label-less `MATCH (c {fqn: ...}) WHERE c:Component OR ...`
+        # forces a full scan of every node in the graph (222K+ on motadata),
+        # costing ~120ms per edge vs ~0.02ms with the index — a 6000x penalty.
+        # The caller type is determined by file extension: `.vue` → Component,
+        # `.js`/`.ts`/`.mjs` → Composable or JsFunction.
+        def _split_by_caller_ext(edges: list[dict], caller_key: str = "caller") -> dict[str, list[dict]]:
+            """Split edges by the caller's source label, inferred from the
+            caller fqn's file extension. Returns {label: [edges]} so each
+            bucket can use a label-indexed MATCH."""
+            buckets: dict[str, list[dict]] = {
+                "Component": [], "Composable": [], "JsFunction": [],
+            }
+            for e in edges:
+                caller = e.get(caller_key, "")
+                if ".vue::" in caller or caller.endswith(".vue"):
+                    buckets["Component"].append(e)
+                else:
+                    # .js/.ts/.mjs callers — could be Composable or JsFunction.
+                    # Try Composable first (the more common caller for USES_STORE
+                    # and USES_COMPOSABLE); JsFunction is only relevant for CALLS_API.
+                    buckets["Composable"].append(e)
+            return buckets
+
+        def _emit_label_split_edges(
+            desc: str, edges: list[dict], caller_key: str,
+            dst_match: str, tail: str,
+        ) -> None:
+            """Run label-indexed edge batches for each caller type."""
+            if not edges:
+                return
+            for label, rows in _split_by_caller_ext(edges, caller_key).items():
+                if not rows:
+                    continue
+                # CALLS_API callers can be JsFunction (api-wrapper modules) —
+                # if no Composable matches, fall those rows to JsFunction.
+                if label == "Composable" and desc == "CALLS_API":
+                    # Split: keep as Composable, move unmatched to JsFunction
+                    comp_fqns = {c["fqn"] for c in composables}
+                    js_rows = [r for r in rows if r.get(caller_key) not in comp_fqns]
+                    rows = [r for r in rows if r.get(caller_key) in comp_fqns]
+                    if js_rows:
+                        self._batch_edges_simple(
+                            progress, f"{desc} (·JsFunction)", js_rows,
+                            f"MATCH (c:JsFunction {{wing: $wing, fqn: e.{caller_key}}})",
+                            dst_match, tail, wing=wing,
+                        )
+                    if not rows:
+                        continue
+                self._batch_edges_simple(
+                    progress, f"{desc} (·{label})", rows,
+                    f"MATCH (c:{label} {{wing: $wing, fqn: e.{caller_key}}})",
+                    dst_match, tail, wing=wing,
+                )
+
+        # USES_STORE — Component/Composable → Store, matched by fqn.
         uses_store = [
-            {"caller": e.get("callerFqn", ""), "store": e.get("storeId", ""),
+            {"caller": e.get("callerFqn", ""),
+             "storeFqn": e.get("storeFqn", ""),
              "indirect": bool(e.get("indirect", False)), "via": e.get("via", "") or ""}
             for e in vue3.get("usesStore", [])
         ]
-        self._batch_edges_simple(
-            progress, "USES_STORE", uses_store,
-            "MATCH (c {wing: $wing}) "
-            "WHERE (c:Component OR c:Composable) AND ("
-            "    c.fqn = e.caller OR c.filePath = e.caller "
-            " OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
-            ")",
-            "MATCH (s:Store {wing: $wing, id: e.store})",
+        _emit_label_split_edges(
+            "USES_STORE", uses_store, "caller",
+            "MATCH (s:Store {wing: $wing, fqn: e.storeFqn})",
             "MERGE (c)-[r:USES_STORE]->(s) SET r.indirect = e.indirect, r.via = e.via",
-            wing=wing,
         )
 
+        # USES_COMPOSABLE — Component/Composable → Composable, matched by fqn.
         uses_comp = [
             {"caller": e.get("callerFqn", ""), "comp": e.get("composableFqn", "")}
             for e in vue3.get("usesComposable", [])
         ]
-        self._batch_edges_simple(
-            progress, "USES_COMPOSABLE", uses_comp,
-            "MATCH (c {wing: $wing}) "
-            "WHERE (c:Component OR c:Composable) AND ("
-            "    c.fqn = e.caller OR c.filePath = e.caller "
-            " OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
-            ")",
+        _emit_label_split_edges(
+            "USES_COMPOSABLE", uses_comp, "caller",
             "MATCH (co:Composable {wing: $wing, fqn: e.comp})",
             "MERGE (c)-[:USES_COMPOSABLE]->(co)",
-            wing=wing,
         )
 
         # DISPATCHES: route.componentRef is as-typed in source ('./views/X.vue'),
@@ -670,42 +725,15 @@ class GraphLoader:
             src_var="r",
         )
 
+        # CALLS_API — Component/Composable/JsFunction → ApiCall, matched by fqn.
         calls_api = [
             {"caller": e.get("callerFqn", ""), "api": e.get("apiCallFqn", "")}
             for e in vue3.get("callsApi", [])
         ]
-        # Restrict the caller MATCH to Component or Composable — an untyped match
-        # also picks up ApiCall / Route nodes (they carry filePath) and pairs
-        # every such match with every target ApiCall in the batch, which over-
-        # produces edges by a factor of ~20 on a 1500-component repo.
-        # JsFunction carries an `fqn` that exactly equals `callerFqn` for api-
-        # wrapper functions (e.g. `src/modules/x/x-api.js::fooApi`). Without
-        # JsFunction in the label set, every CALLS_API edge from a plain-JS
-        # api wrapper drops — the dogfood shipped 0 CALLS_API edges before
-        # this was widened. Component / Composable stay included for callers
-        # declared inline inside `.vue` / composable files.
-        # Caller match rules per label:
-        #   - Component / Composable: filePath == caller OR caller STARTS WITH
-        #     (filePath + '::'). These nodes are keyed on the file itself, so
-        #     the STARTS_WITH lets a `src/x/Foo.vue::fn` caller fqn still hit
-        #     the `src/x/Foo.vue` component row.
-        #   - JsFunction: exact fqn match only. JsFunction nodes all share
-        #     `filePath` with their siblings; the STARTS_WITH fallback would
-        #     match every function in the file, amplifying CALLS_API 15-20x
-        #     (dogfooded — 22974 edges instead of 1404 before this split).
-        self._batch_edges_simple(
-            progress, "CALLS_API", calls_api,
-            "MATCH (c {wing: $wing}) "
-            "WHERE ("
-            "  ((c:Component OR c:Composable) AND ("
-            "       c.fqn = e.caller OR c.filePath = e.caller "
-            "    OR (c.filePath IS NOT NULL AND e.caller STARTS WITH (c.filePath + '::'))"
-            "  ))"
-            "  OR (c:JsFunction AND c.fqn = e.caller)"
-            ")",
+        _emit_label_split_edges(
+            "CALLS_API", calls_api, "caller",
             "MATCH (a:ApiCall {wing: $wing, fqn: e.api})",
             "MERGE (c)-[:CALLS_API]->(a)",
-            wing=wing,
         )
 
         # IMPORTS edges — JsModule / Component / Composable / Store → JsFunction (or JsModule).
