@@ -1,0 +1,10 @@
+<idea-plugin>
+    <!-- Empty config-file: exists only to gate the optional
+         org.jetbrains.idea.maven <depends> in plugin.xml. The actual adapter
+         code (com.onelens.plugin.headless.maven.MavenHeadlessImport) is
+         loaded by the OneLens classloader and reaches the Maven classes
+         through the Maven plugin's classloader via this dependency edge.
+         OneLens does NOT register any components here — the starter calls
+         the adapter reflectively-guarded so the JAR still loads on IDEs
+         without the Maven plugin. -->
+</idea-plugin>

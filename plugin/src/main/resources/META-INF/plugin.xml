@@ -27,6 +27,13 @@
          the plugin still loads on WebStorm without Git plugin. -->
     <depends optional="true" config-file="git-features.xml">Git4Idea</depends>
 
+    <!-- Maven — the headless export starter uses MavenImportListener +
+         MavenProjectsManager to synchronize the Maven import before exporting
+         (headless mode doesn't reliably auto-import). Optional: the starter
+         probes for MavenProjectsManager at runtime and skips the Maven path
+         if the plugin isn't installed (Gradle / plain-Java projects). -->
+    <depends optional="true" config-file="maven-headless.xml">org.jetbrains.idea.maven</depends>
+
     <!-- Framework adapter extension point. Each language/framework contributes an adapter. -->
     <extensionPoints>
         <extensionPoint name="frameworkAdapter"
@@ -57,6 +64,15 @@
                     anchor="right"
                     secondary="false"
                     factoryClass="com.onelens.plugin.ui.OneLensToolWindowFactory"/>
+        <!-- Headless export entry point. Lets the IDE be launched as
+             `idea.sh onelens-export` with a project path argument to run the
+             PSI collectors without a GUI (CI / Docker). The `id` attribute is
+             the command name: the modern platform reads it from here, not
+             from ApplicationStarter.getCommandName() (which is Deprecated for
+             exactly this reason). See OneLensExportStarter.kt and
+             docs/headless.md. -->
+        <appStarter id="onelens-export"
+                    implementation="com.onelens.plugin.headless.OneLensExportStarter"/>
     </extensions>
 
     <applicationListeners>
