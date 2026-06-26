@@ -2,7 +2,18 @@
 
 Source of truth for what's landed, what's in flight, and what's deferred. Append-only per phase; mark status inline. Links point to the canonical artefact so this file stays skimmable.
 
-Last updated: 2026-05-07.
+Last updated: 2026-06.
+
+## Phase H — Headless server one-shot + non-JVM export (2026-06)
+
+| # | Feature | Status | Where |
+|---|---------|--------|-------|
+| H1 | One-shot headless flow for a no-IDE server (preflight → engine → plugin → license → export → import → verify; no sudo/Docker) | ✅ | `scripts/onelens-headless.sh` |
+| H2 | Headless-server licensing: `idea.key` into gradle sandbox config + restore-before-every-export (JBA keys self-invalidate after one session) | ✅ | `scripts/onelens-headless.sh::license`, `docs/headless.md` Gotcha A |
+| H3 | Non-JVM (Vue/JS) content-root fix — generate minimal `.idea` (web module + `src/` source root) so a directory-opened npm project is indexable; symlinked source dirs followed too | ✅ | `scripts/onelens-headless.sh::gen_idea` (`--frontend`), `docs/headless.md` Gotcha B |
+| H4 | `onelens_init --export-path` JSON-encoding documented (generated CLI `json.loads()` the arg) | ✅ | `docs/headless.md` Gotcha C |
+| H5 | Verified end-to-end on a real 28-module Spring backend (195K nodes) + 2.5K-component Vue frontend, both queryable via falkordblite | ✅ | — |
+| H6 | Starter-side auto content-root for directory-opened projects (drop the `.idea` step) | ⬜ | future — `OneLensExportStarter.kt` + `UnindexedFilesScanner.queue().get()` |
 
 ## Embedder profiles · low-end CPU UX (2026-05-07 → 2026-05-08)
 

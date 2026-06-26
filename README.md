@@ -83,7 +83,18 @@ ONELENS_DELTA=true ./gradlew headlessExport -PonelensProject=/path/to/project -P
 onelens call-tool onelens_import --export-path /tmp/exports/myproject-*.json --graph myproject
 ```
 
-See [`docs/headless.md`](./docs/headless.md) for delta, auto-sync (watchexec), and multi-project docs.
+**On a bare server (no IDE), use the one-shot wrapper** — it handles JDK/network
+preflight, the engine install, the **license key** placement (the downloaded
+IDE is *not* license-free headless), and content roots for Vue/JS projects:
+
+```bash
+export ONELENS_LICENSE_KEY=/path/to/your/idea.key   # you place the key (a credential)
+scripts/onelens-headless.sh all /opt/myapp-server   myapp                 # Maven/Spring
+scripts/onelens-headless.sh all /opt/myapp-frontend myapp-frontend --frontend  # Vue/npm
+```
+
+See [`docs/headless.md`](./docs/headless.md) for the server gotchas (license-key
+trick, content roots), delta, auto-sync (watchexec), and multi-project docs.
 
 ---
 

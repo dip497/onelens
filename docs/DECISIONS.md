@@ -1595,3 +1595,39 @@ considered but the delete-before-write semantics are genuinely delta-only.
 unchanged wire format, verified by golden-graph diff. Step 1 in
 `docs/design/multi-language-architecture.md`.
 
+## ADR-035 · 2026-06 · Headless server licensing + non-JVM content root
+
+**Decision.** Headless OneLens on a no-IDE server runs the verified Gradle
+`headlessExport` path (Gradle downloads IU itself), with two server-only
+requirements made explicit and automated in `scripts/onelens-headless.sh`:
+(1) a valid `idea.key` is placed in the gradle sandbox config and **restored
+before every export**; (2) directory-opened non-JVM projects (Vue/JS) get a
+generated minimal `.idea` (web module + `src/` source root) so their files are
+indexable.
+
+**Context.** The Gradle path is "verified" for local dev but the verification
+machine silently inherited its activated IntelliJ license — so the docs implied
+it was license-free. On a bare server, IDEA's `LicenseManager` runs even
+headless and exits 7 (`No valid license found`) before the export starter. And
+an account-tied (JBA) key is re-validated online and **invalidated after a
+single session**, so it must be re-placed each run. Separately, a directory-
+opened npm project has no content root: the scanner reports `0 files for
+indexing` and the Vue collectors emit a silent 0-node export — the same failure
+class as the Java "0 classes" bug, on the *file* index instead of the *stub*
+index.
+
+**Alternatives.** Qodana token (rent Ultimate) — rejected: the OneLens starter
+uses the platform off-label, the repo Dockerfile is experimental, and the user
+already owns a license. scip-java/scip-typescript (license-free, compiler-grade)
+— deferred, a separate future tier, no Spring/Vue PSI depth. For the content
+root: programmatic creation in the starter via
+`UnindexedFilesScanner.queue().get()` + `ModifiableModuleModel` — deferred
+(internal, version-sensitive API); the `.idea` file approach uses IntelliJ's
+standard project-open path with zero internal API and is what shipped.
+
+**Revisit when.** The starter learns to auto-create a content root for
+directory-opened projects (PROGRESS H6) — then the `--frontend` `.idea` step
+disappears and `scripts/onelens-headless.sh` drops it. Also revisit licensing
+if a JetBrains License Server / floating-license path is wired (the clean
+headless-license answer for orgs).
+

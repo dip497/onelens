@@ -7,6 +7,49 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Headless server setup + non-JVM export (2026-06)
+
+- **`scripts/onelens-headless.sh`** — one-shot headless flow for a no-IDE Linux
+  server: preflight (JDK/network/disk) → engine (uv venv + base onelens) →
+  plugin → license → PSI export → falkordblite import → verify. No sudo, no
+  Docker; everything under `$HOME`. Verified end-to-end on a real 28-module
+  Spring backend (195K nodes) + a 2,500-component Vue frontend.
+- **Licensing a headless server documented + automated.** The Gradle path's
+  downloaded IU runs `LicenseManager` even headless (`No valid license found` →
+  exit 7 before the starter). The script places `idea.key` into the sandbox
+  config and **restores it before every export** — account-tied (JBA) keys
+  self-invalidate after one session. See `docs/headless.md` → "Gotcha A".
+- **Non-JVM (Vue/JS) content-root handling.** A directory-opened npm project has
+  no content root → scanner reports `0 files for indexing` → silent 0-node
+  export. `--frontend` generates a minimal `.idea` (web module + `src/` source
+  root); symlinked source dirs inside the content root are indexed too. See
+  `docs/headless.md` → "Gotcha B".
+- **`docs/headless.md`** expanded: corrected the "Gradle path is license-free"
+  implication, added the server one-shot recipe, the license-key trick, the
+  content-root trick, and the `onelens_init` arg-encoding note.
+
+### Fixed — CLI generation safety (2026-06)
+
+- **`cli_generated.py` corruption fix.** The committed artifact (from
+  `8d1fb22`) held a `fastmcp generate-cli` error string instead of code, so
+  every fresh from-source install crashed on `import cli_generated`
+  (`SyntaxError`). Regenerated the valid 726-line file + refreshed
+  `src/onelens/SKILL.md`.
+- **`scripts/regen_cli.sh` hardened against recurrence.** Now generates to a
+  temp file, validates it parses as Python (`ast.parse`), patches in temp, and
+  only overwrites `cli_generated.py` after every transform succeeds — `$OUT` is
+  left untouched on any failure. Previously `generate-cli` wrote its own error
+  text straight into `$OUT`, and that garbage got committed.
+
+### Changed — install.sh default (2026-06)
+
+- **`install.sh` now installs the base package (no semantic extras) by
+  default.** Previously it hardcoded `onelens[context]`, silently pulling the
+  Modal client into every install — useless without a Modal account. Semantic
+  retrieval is now opt-in via `ONELENS_WITH_CONTEXT=local` (account-free ONNX,
+  CPU-OK) or `=modal` (Modal-backed). Base gives the full structural graph
+  (impact / trace / query / search) via embedded falkordblite, zero accounts.
+
 ### Added — Headless delta export (2026-06)
 
 - **`--delta` flag for headless export.** `ONELENS_DELTA=true ./gradlew

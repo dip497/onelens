@@ -74,6 +74,92 @@ idea.sh onelens-export --project /abs/path/to/project --output-dir /out
 The platform discovers the `<appStarter id="onelens-export">` from the
 installed plugin and routes the command to `OneLensExportStarter.main`.
 
+## Server setup (no IDE) — one-shot + the two gotchas
+
+For a no-IDE Linux server the whole flow — engine install, plugin, license,
+export, import, verify — is wrapped by **`scripts/onelens-headless.sh`** (no
+sudo, no Docker; everything lands under `$HOME`). It auto-provisions JDK 21
+(Gradle foojay) and downloads IU itself; you only supply a JDK 17+ for the
+target project and your license.
+
+```bash
+# one-time: ship the python + plugin SOURCE to the server (tar over scp), then:
+export ONELENS_LICENSE_KEY=/path/to/your/idea.key   # you place the key (it's a credential)
+
+# Backend (Maven/Spring):
+scripts/onelens-headless.sh all /opt/myapp-server     myapp
+# Frontend (Vue/npm) — note --frontend:
+scripts/onelens-headless.sh all /opt/myapp-frontend   myapp-frontend --frontend
+```
+
+Two things bite a server run that never bite a laptop:
+
+### Gotcha A — Licensing a headless server (the key trick)
+
+`runIde` boots a real IDEA Ultimate whose `LicenseManager` runs even headless,
+so a license **must** sit in the gradle sandbox config:
+
+```
+plugin/build/idea-sandbox/IU-<ver>/config/idea.key
+```
+
+- **Place your *activated* key** (`ONELENS_LICENSE_KEY=…`, e.g.
+  `~/.config/JetBrains/IntelliJIdea2026.1/idea.key` on a licensed box). **Copy
+  it onto the server yourself** — it's a credential; don't pipe it through
+  tooling that crosses a trust boundary.
+- **An *account-tied* (JBA) key self-invalidates after one session.** IDEA
+  re-validates it online and removes it; the *next* export fails
+  `No valid license found`. The script therefore keeps `~/.onelens/idea.key.bak`
+  and **restores it into the sandbox before every export**. (An *expired* key
+  fails identically — use your currently-active one; an old cached `idea.key`
+  from a prior IDE version is usually stale.)
+- **ToS:** a single-seat license is single-concurrent-use — don't run your
+  desktop IDE while a server export runs.
+
+The license-free route remains scip-java/scip-typescript (future), not the IDE.
+
+### Gotcha B — Content roots for non-JVM projects (Vue / JS / Python / …)
+
+A Maven/Gradle project gets **source roots** from its build import, so its files
+are indexable and the collectors find them. A **directory-opened npm/Vue
+project has no content root** — the scanner reports `scanned N files; 0 for
+indexing` and the Vue collectors emit a **silent 0-node export** (the same
+failure class as the Java "0 classes" bug, on the *file* index instead of the
+*stub* index).
+
+Fix: give the project a minimal `.idea` declaring it a web module with `src/` as
+a source root. `scripts/onelens-headless.sh … --frontend` generates it:
+
+```xml
+<!-- .idea/onelens.iml -->
+<module type="WEB_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$/..">
+      <sourceFolder url="file://$MODULE_DIR$/../src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/../node_modules" />
+    </content>
+  </component>
+</module>
+```
+
+A symlinked source dir inside the content root (e.g. `ui/ → ../shared-lib/src`)
+is followed and indexed too — so a linked component library lands in the same
+graph automatically.
+
+> The official "force + wait for indexing" API is
+> `UnindexedFilesScanner(project, reason).queue().get()`, but it is moot without
+> a content root first — there is nothing in the indexable set to scan. The
+> content root is the actual enabler. (A future enhancement is to have the
+> starter auto-create the content root for directory-opened projects so the
+> `.idea` step disappears.)
+
+### Gotcha C — `onelens_init` arg encoding
+
+The generated CLI `json.loads()` the `--export-path` value (its schema is
+`anyOf[string,null]`), so a bare path fails to parse. **JSON-encode string
+args**: `--export-path '"/abs/path/export.json"'`. The script handles this; do
+the same for any nullable/union string arg.
+
 ## After the export: build the graph
 
 ```bash
@@ -110,6 +196,14 @@ platform:
 - **Gradle task** uses the platform version pinned in
   `plugin/gradle.properties` (`platformType = IU` = Ultimate). Fine for dev;
   not for redistribution.
+  - **The downloaded IU is NOT license-free, even headless.** `runIde` boots a
+    real IDEA Ultimate, and its `LicenseManager` runs on startup — a server
+    with no license logs `No valid license found` and exits 7 *before* the
+    export starter runs. So a valid license **must** be present in the gradle
+    sandbox config: `plugin/build/idea-sandbox/IU-<ver>/config/idea.key`. On a
+    laptop the sandbox silently inherits your activated license, which is why
+    local fixture runs "just work"; a bare server has nothing to inherit. See
+    **Licensing a headless server** below.
 - **Docker (qodana-jvm)** is Ultimate, requires a Qodana token. ~$40/dev/mo
   floor — see `docs/design/PLAN-onboard-cli.md` §9.
 - **Plain Java/Kotlin (no Spring/JPA)** works on Community for free; swap

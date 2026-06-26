@@ -13,11 +13,29 @@ if [[ ! -x "$FASTMCP" ]]; then
 fi
 [[ -n "$FASTMCP" ]] || { echo "fastmcp not found; set FASTMCP=/path/to/fastmcp" >&2; exit 1; }
 export PATH="$(dirname "$FASTMCP"):$PATH"
-"$FASTMCP" generate-cli src/onelens/mcp_server.py --output "$OUT" -f
 
-python - <<'PY'
-import pathlib, re
-p = pathlib.Path("src/onelens/cli_generated.py")
+# Generate to a TEMP file, never directly to $OUT. fastmcp generate-cli has
+# (historically) written its own error text into the --output path on
+# failure; if that garbage reached $OUT it got committed and every fresh
+# install crashed on `import cli_generated` (SyntaxError). So: generate to
+# temp, validate it's real Python, patch in temp, and only overwrite $OUT
+# at the very end once every transform succeeded. $OUT is left untouched on
+# any failure.
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+"$FASTMCP" generate-cli src/onelens/mcp_server.py --output "$TMP" -f
+# Guard: generate-cli can exit 0 having written an error string instead of
+# code. Reject anything that doesn't parse as Python before we patch it.
+python -c "import ast,sys; ast.parse(open('$TMP').read())" 2>/dev/null || {
+  echo "regen_cli.sh: generate-cli output is not valid Python — refusing to write $OUT" >&2
+  echo "  (first line: $(head -1 "$TMP"))" >&2
+  exit 1
+}
+
+OUT="$OUT" TMP="$TMP" python - <<'PY'
+import os, pathlib, re
+out = pathlib.Path(os.environ["OUT"])
+p = pathlib.Path(os.environ["TMP"])
 src = p.read_text()
 src = re.sub(
     r"from fastmcp\.client\.transports import StdioTransport\n",
@@ -148,6 +166,14 @@ if errors:
         sys.stderr.write(f"  - {e}\n")
     sys.exit(1)
 
-p.write_text(src)
-print(f"Patched {p}")
+out.write_text(src)
+print(f"Patched {out}")
 PY
+
+# fastmcp generate-cli also emits SKILL.md alongside its --output path (now a
+# temp dir). Move it into place so regen keeps refreshing src/onelens/SKILL.md.
+SKILL_SRC="$(dirname "$TMP")/SKILL.md"
+if [[ -f "$SKILL_SRC" ]]; then
+  mv "$SKILL_SRC" src/onelens/SKILL.md
+  echo "Wrote src/onelens/SKILL.md"
+fi
