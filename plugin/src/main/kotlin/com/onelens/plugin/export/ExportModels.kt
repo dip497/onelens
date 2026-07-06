@@ -28,6 +28,8 @@ data class ExportDocument(
     val adapters: List<String> = listOf("spring-boot"),
     /** Vue 3 adapter output. Present only if Vue3Adapter was active. */
     val vue3: Vue3Data? = null,
+    /** Next.js adapter output. Present only if NextjsAdapter was active. */
+    val nextjs: NextjsData? = null,
     /** JPA / Spring Data payload (Phase C3c). Null when no @Entity types found. */
     val jpa: JpaData? = null,
     /** Tier-1 data-flow (Phase D): field reads/writes + instantiations. */
@@ -182,6 +184,19 @@ data class Vue3Data(
     val modules: List<JsModuleData> = emptyList(),
     val functions: List<JsFunctionData> = emptyList(),
     val imports: List<ImportsEdge> = emptyList()
+)
+
+/**
+ * Next.js adapter payload. Mirrors the framework-agnostic JS/TS subset of
+ * [Vue3Data] — modules / functions / imports plus HTTP api-call graph.
+ */
+@Serializable
+data class NextjsData(
+    val modules: List<JsModuleData> = emptyList(),
+    val functions: List<JsFunctionData> = emptyList(),
+    val imports: List<ImportsEdge> = emptyList(),
+    val apiCalls: List<ApiCallData> = emptyList(),
+    val callsApi: List<CallsApiEdge> = emptyList(),
 )
 
 /**

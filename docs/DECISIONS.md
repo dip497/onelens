@@ -1631,3 +1631,47 @@ disappears and `scripts/onelens-headless.sh` drops it. Also revisit licensing
 if a JetBrains License Server / floating-license path is wired (the clean
 headless-license answer for orgs).
 
+## ADR-036 · 2026-07 · Next.js adapter — reuse JS-common collectors, don't copy Vue
+
+**Decision.** Add Next.js/React as a third `FrameworkAdapter` peer, built by (a)
+extracting the framework-agnostic JS/TS collectors out of `vue3/` into a new
+`framework/jscommon/` package behind a `JsCommonSink` interface, and (b) reusing
+them from a thin `NextjsAdapter`. Phase 1 emits only the reused
+`JsModule`/`JsFunction`/`ApiCall` graph (no new labels); routes, React
+components, and the RSC boundary come in Phase 2+. On the Python side the
+`nextjs` export section maps into those same reused labels, so trace/impact/
+search and the cross-stack `HITS` bridge work with zero schema change.
+
+**Context.** OneLens shipped Spring + Vue adapters; a Next.js frontend produced a
+near-empty graph. Research showed the Vue routing model (config arrays,
+`vue-router`) and component model (SFC `.vue`, `defineProps`) are *inverted* from
+Next (file-system routing, `.tsx` JSX, RSC server/client split, server actions) —
+so the route/component/store collectors can't be copied. But the module/import/
+api-call collectors and the alias/symlink resolvers are pure JS PSI with no Vue
+dependency; only a `VuePsiScope.findAll` seam (for `.vue` embedded `<script>`)
+and the file-type list were Vue-coupled. Extracting them behind `JsCommonSink`
+(one polymorphic `scriptRoots()` hook) lets both adapters share ~1,200 lines
+without Next depending on the Vue plugin.
+
+**Alternatives.** (1) Copy the Vue collectors and hack them for React — rejected:
+the routing/component/state models don't map, and it forks the JS graph logic.
+(2) tree-sitter for `.tsx` — rejected: IntelliJ JS PSI (bundled JavaScript
+plugin) already gives type-accurate resolution, consistent with the PSI-over-
+tree-sitter moat. (3) Next reaches into the `vue3` package directly — rejected:
+couples Next to Vue-registered classes and risks class-load failures when the
+Vue plugin is absent. (4) A brand-new label set from day one — deferred to P2:
+reusing `JsModule`/`ApiCall`/`Endpoint` in P1 buys the whole trace/impact/search/
+HITS surface for free and lands a useful graph immediately.
+
+**Also decided.** Vendored dirs (`node_modules`/`.next`/`dist`/…) are excluded at
+enumeration in `jscommon` (a real monorepo export was 96 % `node_modules`); the
+Vue import-collection branch is kept byte-for-byte (the `VueFile` check is a
+plain string comparison, no Vue-plugin class reference), so the extraction is a
+behaviour-preserving refactor for Vue.
+
+**Revisit when.** P4 wires Next into the delta path — it will be the first
+frontend ever incrementally re-synced (Vue still full-only), so the export-side
+`.java`-only delta filter must be bypassed *only* when `NextjsAdapter` is active.
+Also revisit if a second React meta-framework (Remix/TanStack Start) lands — the
+route-tree synthesiser should then generalise rather than fork again.
+

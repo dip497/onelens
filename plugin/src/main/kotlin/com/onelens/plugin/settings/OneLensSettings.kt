@@ -30,6 +30,9 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         // Stored as String so kotlinx-serialization-style nulls survive round-trip
         // through IntelliJ's XmlSerializer, which treats Boolean? fields inconsistently.
         var vueAdapterOverride: String = "auto",
+        // Next.js adapter override. null = auto-detect (default); true/false force on/off.
+        // Same String-backed storage rationale as [vueAdapterOverride].
+        var nextAdapterOverride: String = "auto",
         // Build ChromaDB semantic index alongside the graph. OFF by default —
         // graph-only is ~30 s full sync and covers structural queries (impact /
         // trace / Cypher / search). Flip ON to spend ~20 min on Qwen3 embeddings
@@ -85,6 +88,17 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
      */
     val vueAdapterEnabled: Boolean?
         get() = when (state.vueAdapterOverride.lowercase()) {
+            "on", "true", "yes" -> true
+            "off", "false", "no" -> false
+            else -> null
+        }
+
+    /**
+     * Next.js adapter override as a Boolean (null = auto-detect). Thin accessor over
+     * [State.nextAdapterOverride] so callers don't have to parse the stored string.
+     */
+    val nextAdapterEnabled: Boolean?
+        get() = when (state.nextAdapterOverride.lowercase()) {
             "on", "true", "yes" -> true
             "off", "false", "no" -> false
             else -> null

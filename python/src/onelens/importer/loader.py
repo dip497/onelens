@@ -438,6 +438,48 @@ class GraphLoader:
                     _emit("Store", vue3.get("stores", []), "id")
                     _emit("JsModule", vue3.get("modules", []), "filePath")
 
+            # Next.js — load the frontend subdoc if present. Maps only the
+            # JS-common slice (modules / functions / imports / apiCalls /
+            # callsApi) onto the SAME labels/edges the Vue path uses, so the
+            # cross-stack HITS bridge works for free. Java/Vue-only exports
+            # pass through unchanged: `data.get("nextjs")` is None.
+            nextjs = data.get("nextjs")
+            if nextjs:
+                self._load_nextjs(progress, nextjs, graph_name=graph_wing)
+
+                # Package → Next member CONTAINS edges — mirror of the `vue:`
+                # block above. Packages carry `id = next:<rootName>:<segment>`.
+                # Next.js has no Component/Composable/Store surface, so only
+                # JsModule (keyed on filePath) gets package containment.
+                next_pkgs = [p for p in packages if p.get("id", "").startswith("next:")]
+                if next_pkgs:
+                    def _top_n(fp: str) -> str:
+                        p = fp.lstrip("/").removeprefix("src/")
+                        return p.split("/", 1)[0] if "/" in p else ""
+
+                    pkg_by_name_n = {p["name"]: p["id"] for p in next_pkgs}
+
+                    def _emit_n(label, items, key):
+                        edges = []
+                        seen = set()
+                        for it in items:
+                            fp = it.get("filePath", "")
+                            seg = _top_n(fp)
+                            pid = pkg_by_name_n.get(seg)
+                            if not pid or not it.get(key):
+                                continue
+                            dedup = (pid, it[key])
+                            if dedup in seen:
+                                continue
+                            seen.add(dedup)
+                            edges.append({"src": pid, "dst": it[key]})
+                        if edges:
+                            self._batch_edges(progress, f"CONTAINS (Package→{label})",
+                                              edges, "Package", "id", label, key,
+                                              rel_type="CONTAINS")
+
+                    _emit_n("JsModule", nextjs.get("modules", []), "filePath")
+
         # Post-import phase: compute PageRank on the call graph and write
         # it back as Method.pagerank + Class.pagerank. One-time cost (~5-15s
         # for 80K methods). Enables "important methods" queries via
@@ -862,6 +904,156 @@ class GraphLoader:
             logger.info("Vue 3 bridge pass: %s", bridge_stats)
         except Exception as e:
             logger.warning("Vue 3 bridge pass failed: %s", e)
+
+    def _load_nextjs(self, progress, nextjs: dict, graph_name: str):
+        """Load the Next.js subdoc into the same graph wing as the Java/Vue nodes.
+
+        Maps ONLY the JS-common slice (modules / functions / imports /
+        apiCalls / callsApi) onto the SAME labels/edges the Vue path uses —
+        `JsModule`, `JsFunction`, `ApiCall`, `HAS_FUNCTION`, `IMPORTS` /
+        `IMPORTS_FN`, `CALLS_API` — so the cross-stack HITS bridge (ApiCall ↔
+        Spring Endpoint) works for free. Next.js exports carry no
+        Component/Composable/Store/Route arrays, so none of those Vue-only
+        labels are emitted here. Every node/edge is stamped with
+        `wing = graph_name` for cross-wing bridge filtering.
+        """
+        wing = graph_name or "default"
+
+        # ApiCalls — fqn synthesized to be unique even across repeated callers.
+        api_calls = nextjs.get("apiCalls", []) or []
+        for a in api_calls:
+            a["fqn"] = f"{a.get('method', '')}:{a.get('path', '')}:{a.get('callerFqn', '')}"
+            a["wing"] = wing
+        self._batch_nodes(progress, "Next ApiCalls", api_calls, "ApiCall", "fqn", [
+            "method", "path", "parametric", "binding", "callerFqn", "filePath", "wing",
+        ])
+
+        # JsModule per file — derive a display `name` from the filePath basename
+        # (mirror of the Vue path) so the FalkorDB browser has a human label.
+        modules = [dict(m, wing=wing) for m in nextjs.get("modules", [])]
+        import os.path as _osp
+        for _m in modules:
+            fp = _m.get("filePath", "")
+            base = _osp.basename(fp)
+            stem = base.rsplit(".", 1)[0] if "." in base else base
+            _m.setdefault("name", stem or fp)
+        self._batch_nodes(progress, "Next JS Modules", modules, "JsModule", "filePath", [
+            "name", "fileKind", "isBarrel", "isTest", "wing",
+        ])
+
+        functions = [dict(f, wing=wing) for f in nextjs.get("functions", [])]
+        self._batch_nodes(progress, "Next JS Functions", functions, "JsFunction", "fqn", [
+            "name", "filePath", "exported", "isDefault", "isAsync",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        # HAS_FUNCTION: JsModule -> JsFunction by shared filePath.
+        has_fn = [
+            {"fp": f["filePath"], "fqn": f["fqn"]}
+            for f in functions if f.get("filePath") and f.get("fqn")
+        ]
+        if has_fn:
+            self._batch_edges_simple(
+                progress, "HAS_FUNCTION", has_fn,
+                "MATCH (m:JsModule {wing: $wing, filePath: e.fp})",
+                "MATCH (f:JsFunction {wing: $wing, fqn: e.fqn})",
+                "MERGE (m)-[:HAS_FUNCTION]->(f)",
+                wing=wing,
+                src_var="m",
+            )
+
+        # CALLS_API — JsFunction → ApiCall, matched by fqn. Next.js has no
+        # Component/Composable callers, so every caller is a JsFunction.
+        calls_api = [
+            {"caller": e.get("callerFqn", ""), "api": e.get("apiCallFqn", "")}
+            for e in nextjs.get("callsApi", [])
+        ]
+        if calls_api:
+            self._batch_edges_simple(
+                progress, "CALLS_API", calls_api,
+                "MATCH (c:JsFunction {wing: $wing, fqn: e.caller})",
+                "MATCH (a:ApiCall {wing: $wing, fqn: e.api})",
+                "MERGE (c)-[:CALLS_API]->(a)",
+                wing=wing,
+            )
+
+        # IMPORTS edges — source side is always JsModule for Next.js (no
+        # Component/Composable/Store nodes exist). Target: JsFunction by fqn
+        # when resolved, else JsModule by filePath.
+        imports_resolved = [
+            {"src": e.get("sourceModule", ""), "tgt_fqn": e.get("targetFqn") or "",
+             "name": e.get("importedName", ""),
+             "alias": e.get("localAlias") or "",
+             "isDefault": bool(e.get("isDefault", False)),
+             "isNamespace": bool(e.get("isNamespace", False))}
+            for e in nextjs.get("imports", []) if e.get("targetFqn")
+        ]
+        if imports_resolved:
+            self._batch_edges_simple(
+                progress, "IMPORTS (resolved · JsModule)", imports_resolved,
+                "MATCH (src:JsModule {wing: $wing, filePath: e.src})",
+                "MATCH (tgt:JsFunction {wing: $wing, fqn: e.tgt_fqn})",
+                "MERGE (src)-[r:IMPORTS]->(tgt) "
+                "SET r.importedName = e.name, r.alias = e.alias, "
+                "    r.isDefault = e.isDefault, r.isNamespace = e.isNamespace",
+                wing=wing,
+                src_var="src",
+            )
+
+        imports_modulelevel = [
+            {"src": e.get("sourceModule", ""), "tgt": e.get("targetModule", ""),
+             "name": e.get("importedName", ""),
+             "alias": e.get("localAlias") or "",
+             "unresolved": bool(e.get("unresolved", False))}
+            for e in nextjs.get("imports", []) if not e.get("targetFqn")
+        ]
+        # ES6 module resolution: expand extensionless specifiers to candidate
+        # filePaths so the JsModule join hits (mirror of the Vue path).
+        expanded_imports: list[dict] = []
+        module_paths: set[str] = {m["filePath"] for m in modules}
+        for e in imports_modulelevel:
+            tgt = e["tgt"]
+            candidates = [tgt]
+            if not tgt.endswith((".js", ".ts", ".mjs", ".jsx", ".tsx")):
+                candidates += [f"{tgt}.js", f"{tgt}.ts", f"{tgt}/index.js", f"{tgt}/index.ts"]
+            resolved = next((c for c in candidates if c in module_paths), tgt)
+            expanded_imports.append({**e, "tgt": resolved})
+        if expanded_imports:
+            self._batch_edges_simple(
+                progress, "IMPORTS (module · JsModule)", expanded_imports,
+                "MATCH (src:JsModule {wing: $wing, filePath: e.src})",
+                "MATCH (tgt:JsModule {wing: $wing, filePath: e.tgt})",
+                "MERGE (src)-[r:IMPORTS]->(tgt) "
+                "SET r.importedName = e.name, r.alias = e.alias, r.unresolved = e.unresolved",
+                wing=wing,
+                src_var="src",
+            )
+
+        # IMPORTS_FN bridge — re-derive function-level edges from named imports
+        # when a JsFunction with that name exists at the target module's path.
+        fn_bridge_rows = [
+            {"src": e["src"], "tgt": e["tgt"], "name": e["name"]}
+            for e in expanded_imports
+            if e.get("name") and e["name"] not in ("", "*", "default")
+        ]
+        if fn_bridge_rows:
+            self._batch_edges_simple(
+                progress, "IMPORTS_FN (JsModule)", fn_bridge_rows,
+                "MATCH (src:JsModule {wing: $wing, filePath: e.src})",
+                "MATCH (fn:JsFunction {wing: $wing, name: e.name, filePath: e.tgt})",
+                "MERGE (src)-[:IMPORTS_FN]->(fn)",
+                wing=wing,
+                src_var="src",
+            )
+
+        # Bridge pass — cross-wing HITS between Next ApiCall and Spring Endpoint.
+        try:
+            from onelens.importer import bridge_http
+
+            bridge_stats = bridge_http.compute_hits(self.db, graph_name=wing)
+            logger.info("Next.js bridge pass: %s", bridge_stats)
+        except Exception as e:
+            logger.warning("Next.js bridge pass failed: %s", e)
 
     def _load_sql(self, progress, workspace_header: dict, graph_wing: str):
         """

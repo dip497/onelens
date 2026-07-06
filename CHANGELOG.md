@@ -7,6 +7,32 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Next.js / React adapter · Phase 1 (2026-07)
+
+- **`NextjsAdapter`** — a third `FrameworkAdapter` peer (alongside Spring Boot +
+  Vue 3) for Next.js / React frontends. Detects via `next` in `package.json`
+  (root + up to two monorepo levels, so `apps/web/package.json` is found).
+  `plugin/.../framework/nextjs/`.
+- **`framework/jscommon/` package** — the framework-agnostic JS/TS collectors
+  (`JsModuleCollector`, `ApiCallCollector`, `ModuleNameBinder`) + resolvers
+  (`ViteAliasResolver`, `SymlinkResolver`) + helpers (`SmartRead`,
+  `JsTestDetection`) extracted out of `vue3/` behind a `JsCommonSink` interface,
+  so both Vue and Next drive them. Vue import-collection behaviour preserved
+  byte-for-byte (the SFC vs plain-script branch is a string check, no Vue-plugin
+  dependency). `.jsx`/`.tsx` added to the file-type scan.
+- **Vendored-dir exclusion** (`JsFileTypes.isVendorPath`) — `node_modules`,
+  `.next`, `.turbo`, `dist`, `out`, … are dropped from every JS/TS enumeration.
+  A real `manageark-web` export went from 96 % `node_modules` noise (7,399
+  modules, 114 s) to 289 app/package modules in 3 s.
+- **Python `NextLoader._load_nextjs`** — maps the `nextjs` export section into the
+  reused `JsModule` / `JsFunction` / `ApiCall` labels + `HAS_FUNCTION` /
+  `IMPORTS` / `CALLS_API` edges, so trace/impact/search and the cross-stack
+  `HITS` bridge (frontend call → Spring `Endpoint`) work with no schema change.
+  `python/.../importer/loader.py`.
+- Verified end-to-end on `manageark-web`: 289 `JsModule` / 125 `JsFunction` /
+  325 `IMPORTS` queryable in FalkorDB. (P2 adds routes, React components, RSC
+  boundary; P3 adds server actions / route handlers / hooks; P4 wires delta.)
+
 ### Added — Headless server setup + non-JVM export (2026-06)
 
 - **`scripts/onelens-headless.sh`** — one-shot headless flow for a no-IDE Linux

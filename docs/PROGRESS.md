@@ -15,6 +15,22 @@ Last updated: 2026-06.
 | H5 | Verified end-to-end on a real 28-module Spring backend (195K nodes) + 2.5K-component Vue frontend, both queryable via falkordblite | ✅ | — |
 | H6 | Starter-side auto content-root for directory-opened projects (drop the `.idea` step) | ⬜ | future — `OneLensExportStarter.kt` + `UnindexedFilesScanner.queue().get()` |
 
+## Phase N — Next.js / React adapter (2026-07)
+
+| ID | Feature | Status | Pointer |
+|---|---------|--------|-------|
+| N1 | `framework/jscommon/` extraction — JS/TS collectors + resolvers behind `JsCommonSink`; Vue behaviour preserved byte-for-byte | ✅ | `plugin/.../framework/jscommon/*` |
+| N2 | `NextjsAdapter` + `NextjsContext` + `NextjsCollector` — reuse JsModule/ApiCall/ModuleNameBinder over `.ts/.tsx/.jsx` | ✅ | `plugin/.../framework/nextjs/*`, `framework-nextjs.xml` |
+| N3 | `detect()` — `next` in `package.json`, root + 2 monorepo levels; `nextAdapterEnabled` override | ✅ | `NextjsAdapter.kt::detect` |
+| N4 | Vendored-dir exclusion (`node_modules`/`.next`/`dist`/…) across all JS enumerations | ✅ | `JsFileTypes.isVendorPath` |
+| N5 | `ExportModels.nextjs` + `ExportService` dispatch/synthesis/stats wiring | ✅ | `ExportModels.kt`, `ExportService.kt` |
+| N6 | Python `NextLoader._load_nextjs` → reused JsModule/JsFunction/ApiCall + HITS bridge | ✅ | `python/.../importer/loader.py` |
+| N7 | **Verified E2E on `manageark-web`** — 289 JsModule / 125 JsFunction / 325 IMPORTS in FalkorDB | ✅ | — |
+| N8 | **P2** — routes (App Router segment→URL), React components, RSC client/server boundary + new labels/schema/search/miner | ⬜ | planned — `docs/design/PLAN-nextjs-adapter.md` |
+| N9 | **P3** — server actions, route handlers, hooks (origin-classified), Context providers, middleware | ⬜ | planned |
+| N10 | **P4** — Next delta (first frontend wired into delta): `apply_delta` + cascade delete + Next-scoped delta export routing | ⬜ | planned |
+| N11 | `ky` / `fetch` in `CLIENT_NAMES` so App-Router data calls surface as `ApiCall` (why P1 `apiCalls=0`) | ⬜ | P2/P3 — `ApiCallCollector.CLIENT_NAMES` |
+
 ## Embedder profiles · low-end CPU UX (2026-05-07 → 2026-05-08)
 
 | # | Feature | Status | Where |

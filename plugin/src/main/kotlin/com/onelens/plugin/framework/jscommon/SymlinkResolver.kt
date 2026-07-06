@@ -1,4 +1,4 @@
-package com.onelens.plugin.framework.vue3.resolver
+package com.onelens.plugin.framework.jscommon
 
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project

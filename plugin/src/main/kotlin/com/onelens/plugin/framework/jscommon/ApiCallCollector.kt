@@ -1,4 +1,4 @@
-package com.onelens.plugin.framework.vue3.collectors
+package com.onelens.plugin.framework.jscommon
 
 import com.intellij.lang.javascript.psi.JSCallExpression
 import com.intellij.lang.javascript.psi.JSFunction
@@ -6,8 +6,6 @@ import com.intellij.lang.javascript.psi.JSReferenceExpression
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
-import com.intellij.openapi.fileTypes.FileTypeManager
-import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
@@ -18,9 +16,7 @@ import com.intellij.psi.search.FileTypeIndex
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ApiCallData
 import com.onelens.plugin.export.CallsApiEdge
-import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
-import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Emits [ApiCallData] for HTTP calls through common client wrappers:
@@ -41,18 +37,15 @@ object ApiCallCollector {
     private val HTTP_METHODS = setOf("get", "post", "put", "patch", "delete")
     private val CLIENT_NAMES = setOf("api", "axios", "\$http", "http", "Api", "httpClient", "_client")
 
-    fun collect(project: Project, ctx: Vue3Context) {
+    fun collect(project: Project, ctx: JsCommonSink) {
         if (DumbService.isDumb(project)) return
 
-        val ftm = FileTypeManager.getInstance()
-        val types = listOfNotNull(
-            ftm.getFileTypeByExtension("js").takeIf { it != UnknownFileType.INSTANCE },
-            ftm.getFileTypeByExtension("ts").takeIf { it != UnknownFileType.INSTANCE },
-            ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE },
-            ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
-        )
+        val types = JsFileTypes.script()
         val scope = ctx.workspace.scope(project)
-        val files = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        val files = smartRead(project) {
+            types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
+                .filterNot { JsFileTypes.isVendorPath(it.path) }
+        }
         val psiManager = PsiManager.getInstance(project)
 
         var scanned = 0
@@ -84,12 +77,12 @@ object ApiCallCollector {
         LOG.info("ApiCallCollector: ${ctx.apiCalls.size} api calls from $scanned files")
     }
 
-    private fun extractCalls(file: PsiFile, ctx: Vue3Context): List<ApiCallData> {
+    private fun extractCalls(file: PsiFile, ctx: JsCommonSink): List<ApiCallData> {
         val abs = Paths.get(file.virtualFile.path)
         val relative = ctx.relativize(abs)
         val out = mutableListOf<ApiCallData>()
 
-        val allCalls = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSCallExpression>(file)
+        val allCalls = ctx.findAll<JSCallExpression>(file)
         for (call in allCalls) {
             val callee = call.methodExpression as? JSReferenceExpression ?: continue
             val methodName = callee.referenceName?.lowercase() ?: continue

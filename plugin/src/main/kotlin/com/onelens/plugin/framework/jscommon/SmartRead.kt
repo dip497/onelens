@@ -1,4 +1,4 @@
-package com.onelens.plugin.framework.vue3
+package com.onelens.plugin.framework.jscommon
 
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project

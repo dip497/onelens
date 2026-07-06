@@ -1,5 +1,6 @@
 package com.onelens.plugin.framework.vue3.resolver
 
+import com.onelens.plugin.framework.jscommon.ViteAliasResolver
 import junit.framework.TestCase
 import java.nio.file.Files
 import java.nio.file.Path
