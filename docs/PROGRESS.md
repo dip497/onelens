@@ -26,7 +26,9 @@ Last updated: 2026-06.
 | N5 | `ExportModels.nextjs` + `ExportService` dispatch/synthesis/stats wiring | ✅ | `ExportModels.kt`, `ExportService.kt` |
 | N6 | Python `NextLoader._load_nextjs` → reused JsModule/JsFunction/ApiCall + HITS bridge | ✅ | `python/.../importer/loader.py` |
 | N7 | **Verified E2E on `manageark-web`** — 289 JsModule / 125 JsFunction / 325 IMPORTS in FalkorDB | ✅ | — |
-| N8 | **P2** — routes (App Router segment→URL), React components, RSC client/server boundary + new labels/schema/search/miner | ⬜ | planned — `docs/design/PLAN-nextjs-adapter.md` |
+| N8 | **P2** — routes (App Router segment→URL), Page/Layout/SpecialFile, React components, RSC client/server boundary, RENDERS composition + new labels/schema/search/miner | ✅ | `framework/nextjs/collectors/{RouteTree,ReactComponent,Directive,RendersResolver,NextPsiUtil}`; `loader.py::_load_nextjs`, `schema.py`, `queries.py`, `code_miner.py` |
+| N8v | P2 verified E2E on `manageark-web` — 24 Route / 24 Page / 4 Layout / 6 SpecialFile / 50 ReactComponent (26 client) / 11 RENDERS, all queryable | ✅ | — |
+| N12 | RENDERS cross-package resolution — `@scope/*` pnpm-workspace component imports resolve to file paths (P2 only does same-package/relative/`@/`) | ⬜ | P3 — workspace-alias map in `ViteAliasResolver` |
 | N9 | **P3** — server actions, route handlers, hooks (origin-classified), Context providers, middleware | ⬜ | planned |
 | N10 | **P4** — Next delta (first frontend wired into delta): `apply_delta` + cascade delete + Next-scoped delta export routing | ⬜ | planned |
 | N11 | `ky` / `fetch` in `CLIENT_NAMES` so App-Router data calls surface as `ApiCall` (why P1 `apiCalls=0`) | ⬜ | P2/P3 — `ApiCallCollector.CLIENT_NAMES` |

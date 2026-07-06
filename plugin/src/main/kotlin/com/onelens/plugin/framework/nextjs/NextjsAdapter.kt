@@ -12,6 +12,10 @@ import com.onelens.plugin.framework.jscommon.JsModuleCollector
 import com.onelens.plugin.framework.jscommon.ModuleNameBinder
 import com.onelens.plugin.framework.jscommon.SymlinkResolver
 import com.onelens.plugin.framework.jscommon.ViteAliasResolver
+import com.onelens.plugin.framework.nextjs.collectors.DirectiveCollector
+import com.onelens.plugin.framework.nextjs.collectors.ReactComponentCollector
+import com.onelens.plugin.framework.nextjs.collectors.RendersResolver
+import com.onelens.plugin.framework.nextjs.collectors.RouteTreeCollector
 import com.onelens.plugin.settings.OneLensSettings
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -116,12 +120,31 @@ class NextjsCollector : Collector {
         timed("JS modules + functions + imports", baseFraction + 0.04) {
             JsModuleCollector.collect(project, nextCtx)
         }
+        // P2 — routes + React components + RSC boundary. DirectiveCollector runs first
+        // so Page/Layout/SpecialFile/Component nodes get isClient; RENDERS is derived
+        // last, once imports + the component set are fully populated.
+        timed("use-client directives", baseFraction + 0.06) {
+            DirectiveCollector.collect(project, nextCtx)
+        }
+        timed("route tree", baseFraction + 0.08) {
+            RouteTreeCollector.collect(project, nextCtx)
+        }
+        timed("React components", baseFraction + 0.10) {
+            ReactComponentCollector.collect(project, nextCtx)
+        }
+        timed("RENDERS resolution", baseFraction + 0.12) {
+            RendersResolver.resolve(nextCtx)
+        }
 
         System.err.println("[onelens] Next.js collector timings:\n$timings")
 
         val snapshot: NextjsData = nextCtx.snapshot()
-        val nodeCount = snapshot.modules.size + snapshot.functions.size + snapshot.apiCalls.size
-        val edgeCount = snapshot.imports.size + snapshot.callsApi.size
+        val nodeCount = snapshot.modules.size + snapshot.functions.size + snapshot.apiCalls.size +
+            snapshot.routes.size + snapshot.pages.size + snapshot.layouts.size +
+            snapshot.specialFiles.size + snapshot.components.size
+        val edgeCount = snapshot.imports.size + snapshot.callsApi.size +
+            snapshot.hasPage.size + snapshot.hasLayout.size + snapshot.boundaryOf.size +
+            snapshot.childOf.size + snapshot.renders.size
 
         val subdoc = nextJson.encodeToJsonElement(NextjsData.serializer(), snapshot)
         return CollectorOutput(data = subdoc, nodeCount = nodeCount, edgeCount = edgeCount)

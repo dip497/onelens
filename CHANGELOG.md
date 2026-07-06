@@ -7,6 +7,28 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Next.js / React adapter · Phase 2 · routes + components + RSC (2026-07)
+
+- **Route tree** (`RouteTreeCollector`) — walks `app/` (best-effort `pages/`):
+  `Route` (App Router segment → URL, `(group)` stripped, `[param]`→`:param`,
+  `[...x]`→`*x`), `Page`, `Layout`, `SpecialFile` (loading/error/not-found/
+  global-error) nodes + `HAS_PAGE`/`HAS_LAYOUT`/`BOUNDARY_OF`/`CHILD_OF` edges.
+- **React components** (`ReactComponentCollector`) — exported functions/arrows
+  that render JSX (`JSXmlLiteralExpression` PSI + a textual guard) → `ReactComponent`
+  nodes. Non-function PascalCase consts (config objects / lookup maps) are excluded.
+- **RSC boundary** (`DirectiveCollector`) — module-level `"use client"` sets
+  `isClient` on pages/layouts/components; `isServer = !isClient` (App Router default).
+- **RENDERS composition** (`RendersResolver`) — `(Page|Layout|Component) -[:RENDERS]->
+  Component` derived from JSX tags resolved through the import graph (extensionless
+  path matching; same-package/relative/`@/`-alias). Cross-package `@scope/*` resolution
+  is deferred (needs workspace-alias mapping).
+- Python: `_load_nextjs` maps the new arrays into `Route`/`Page`/`Layout`/
+  `SpecialFile`/`ReactComponent` + the four edge types; `schema.py` gains RANGE +
+  FTS indexes; `queries.py`/`analysis.py` gain `reactcomponent`/`page`/`route`
+  search; `code_miner` embeds component + page bodies; `mcp_server` status/docs updated.
+- Verified E2E on `manageark-web`: 24 Route / 24 Page / 4 Layout / 6 SpecialFile /
+  50 ReactComponent (26 client) / 11 RENDERS, all queryable in FalkorDB.
+
 ### Added — Next.js / React adapter · Phase 1 (2026-07)
 
 - **`NextjsAdapter`** — a third `FrameworkAdapter` peer (alongside Spring Boot +

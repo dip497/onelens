@@ -37,6 +37,15 @@ NODE_SCHEMA = {
     # binding; a composite RANGE index keeps that lookup O(log N) per row.
     # Without it, tens-of-thousands of rows degrade to full JsFunction scans.
     "JsFunction_name_file": "CREATE INDEX FOR (n:JsFunction) ON (n.name, n.filePath)",
+    # Next.js (P2) — App Router route tree + React components. PK RANGE index
+    # per label so the loader's label-indexed edge MATCHes hit the index
+    # (6000x full-scan penalty otherwise). Route already carries a `name`
+    # index for the Vue path; the Next path keys on `urlPath`, so both coexist.
+    "Route_urlPath": "CREATE INDEX FOR (n:Route) ON (n.urlPath)",
+    "Page": "CREATE INDEX FOR (n:Page) ON (n.fqn)",
+    "Layout": "CREATE INDEX FOR (n:Layout) ON (n.fqn)",
+    "SpecialFile": "CREATE INDEX FOR (n:SpecialFile) ON (n.fqn)",
+    "ReactComponent": "CREATE INDEX FOR (n:ReactComponent) ON (n.fqn)",
 }
 
 # Full-text search indexes — FalkorDB CALL procedure syntax.
@@ -108,6 +117,21 @@ FULLTEXT_SCHEMA = {
         "CALL db.idx.fulltext.createNodeIndex("
         "'JsModule', {field: 'filePath', weight: 10.0})"
     ),
+    # Next.js (P2) — ReactComponent mirrors the Vue Component weighting
+    # (name 10x / filePath 5x / body 1x); Page indexes fqn + body.
+    "ReactComponent_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'ReactComponent',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'filePath', weight: 5.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "Page_fqn": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'Page',"
+        " {field: 'fqn', weight: 10.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
 }
 
 # Relationship types — no DDL needed for FalkorDB/Neo4j (edges are schemaless)
@@ -130,4 +154,10 @@ REL_SCHEMA = {
     "HANDLES": "// Method -[:HANDLES]-> Endpoint",
     # Modules
     "MODULE_DEPENDS": "// Module -[:MODULE_DEPENDS]-> Module (scope)",
+    # Next.js (P2) — App Router route tree + RSC render graph
+    "HAS_PAGE": "// Route -[:HAS_PAGE]-> Page",
+    "HAS_LAYOUT": "// Route -[:HAS_LAYOUT]-> Layout",
+    "BOUNDARY_OF": "// SpecialFile -[:BOUNDARY_OF]-> Route (loading/error/not-found/...)",
+    "CHILD_OF": "// Route -[:CHILD_OF]-> Route (nearest ancestor route)",
+    "RENDERS": "// Page|Layout|ReactComponent -[:RENDERS]-> ReactComponent",
 }

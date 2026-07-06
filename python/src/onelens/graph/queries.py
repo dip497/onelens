@@ -186,10 +186,26 @@ def search(term: str, node_type: str = "") -> tuple[str, dict]:
         # Prefix matches ChromaDB drawer-id convention (`<type>:<key>`) so
         # retrieval._fetch_locations_batch's prefix-partition lookup resolves
         # FTS hits. Without the prefix, location + snippet both drop silently.
+        # `coalesce` spans both frontends: Vue routes key on `name`, Next.js
+        # App Router routes key on `urlPath` — same `Route` label, distinct PK.
         cypher = f"""
             CALL db.idx.fulltext.queryNodes('Route', '{safe_term}') YIELD node
-            RETURN 'Route' AS type, ('route:' + node.name) AS fqn,
-                   node.path AS name, node.filePath AS file, '' AS kind
+            RETURN 'Route' AS type,
+                   ('route:' + coalesce(node.urlPath, node.name)) AS fqn,
+                   coalesce(node.path, node.urlPath) AS name,
+                   node.filePath AS file, '' AS kind
+        """
+    elif node_type == "reactcomponent":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ReactComponent', '{safe_term}') YIELD node
+            RETURN 'ReactComponent' AS type, ('reactcomponent:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "page":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Page', '{safe_term}') YIELD node
+            RETURN 'Page' AS type, ('page:' + node.fqn) AS fqn,
+                   node.fqn AS name, node.filePath AS file, '' AS kind
         """
     elif node_type == "apicall":
         cypher = f"""

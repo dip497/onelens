@@ -184,6 +184,13 @@ class CodeMiner:
             stats["vue_composables"] = self._mine_vue_composables(data["vue3"])
             stats["vue_stores"] = self._mine_vue_stores(data["vue3"])
 
+        # Next.js (P2) — ReactComponent + Page bodies. Same additive pattern
+        # as Vue; drawers share the unified metadata schema (wing/room/hall/
+        # fqn/type/importance/filed_at).
+        if data.get("nextjs"):
+            stats["next_components"] = self._mine_next_components(data["nextjs"])
+            stats["next_pages"] = self._mine_next_pages(data["nextjs"])
+
         total_time = time.time() - t0
         total_drawers = sum(stats.values())
         print(f"\nDone! {total_drawers} drawers in {total_time:.1f}s "
@@ -1026,4 +1033,88 @@ class CodeMiner:
 
         elapsed = time.time() - t_start
         print(f"  Stores done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    def _mine_next_components(self, nextjs: dict) -> int:
+        items = [c for c in nextjs.get("components", []) if c.get("fqn")]
+        existing = self._get_existing_ids("reactcomponent:")
+        items = [c for c in items if f"reactcomponent:{c['fqn']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(items)} Next.js components ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for comp in items:
+            fqn = comp["fqn"]
+            name = comp.get("name", "")
+            fp = comp.get("filePath", "")
+            body = _strip_js_imports((comp.get("body") or "").strip())
+            if not body:
+                continue
+            doc = f"// Component: {name}\n// File: {fp}\n{body}"
+            drawer_id = f"reactcomponent:{fqn}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "reactcomponent",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Next.js components done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    def _mine_next_pages(self, nextjs: dict) -> int:
+        items = [p for p in nextjs.get("pages", []) if p.get("fqn")]
+        existing = self._get_existing_ids("page:")
+        items = [p for p in items if f"page:{p['fqn']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(items)} Next.js pages ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for page in items:
+            fqn = page["fqn"]
+            fp = page.get("filePath", "")
+            url = page.get("urlPath", "")
+            body = _strip_js_imports((page.get("body") or "").strip())
+            if not body:
+                continue
+            doc = f"// Page: {url}\n// File: {fp}\n{body}"
+            drawer_id = f"page:{fqn}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "page",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Next.js pages done: {done} in {elapsed:.1f}s", flush=True)
         return done

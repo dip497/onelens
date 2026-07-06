@@ -197,7 +197,118 @@ data class NextjsData(
     val imports: List<ImportsEdge> = emptyList(),
     val apiCalls: List<ApiCallData> = emptyList(),
     val callsApi: List<CallsApiEdge> = emptyList(),
+    // --- P2: routes + React components + RSC boundary ---
+    val routes: List<NextRouteData> = emptyList(),
+    val pages: List<PageData> = emptyList(),
+    val layouts: List<LayoutData> = emptyList(),
+    val specialFiles: List<SpecialFileData> = emptyList(),
+    val components: List<ReactComponentData> = emptyList(),
+    val hasPage: List<HasPageEdge> = emptyList(),
+    val hasLayout: List<HasLayoutEdge> = emptyList(),
+    val boundaryOf: List<BoundaryOfEdge> = emptyList(),
+    val childOf: List<ChildOfEdge> = emptyList(),
+    val renders: List<RendersEdge> = emptyList(),
 )
+
+/**
+ * A Next.js App Router route directory. PK = [urlPath]. Named `NextRouteData` (not
+ * `RouteData`) to avoid colliding with the Vue router's [RouteData]; the serialized
+ * field name in [NextjsData] is still `routes`, so the Python side is unaffected.
+ *
+ * `urlPath` is computed by the collector: route groups `(group)` are stripped,
+ * `[param]` → `:param`, `[...slug]`/`[[...slug]]` → `*slug`, parallel `@slot`
+ * segments dropped. The app root is `/`.
+ */
+@Serializable
+data class NextRouteData(
+    val urlPath: String,               // e.g. "/admin/persons/:id"  (PK)
+    val segmentDir: String,            // repo-relative dir under app/
+    val dynamic: Boolean = false,
+    val paramNames: List<String> = emptyList(),
+    val group: String? = null,         // e.g. "(app)"; null if none
+    val isRoot: Boolean = false,       // true for "/"
+)
+
+/** `page.(tsx|jsx|ts|js)` default export. Route -[:HAS_PAGE]-> Page. PK = [fqn]. */
+@Serializable
+data class PageData(
+    val fqn: String,                   // "<filePath>::default"
+    val filePath: String,
+    val urlPath: String,
+    val isAsync: Boolean = false,
+    val isClient: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,          // <=2000 chars
+    val isTest: Boolean = false,
+)
+
+/** `layout.*` default export. Route -[:HAS_LAYOUT]-> Layout. PK = [fqn]. */
+@Serializable
+data class LayoutData(
+    val fqn: String,
+    val filePath: String,
+    val urlPath: String,
+    val isRoot: Boolean = false,
+    val isClient: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,
+    val isTest: Boolean = false,
+)
+
+/** `loading|error|not-found|global-error|template` file. SpecialFile -[:BOUNDARY_OF]-> Route. PK = [fqn]. */
+@Serializable
+data class SpecialFileData(
+    val fqn: String,
+    val filePath: String,
+    val urlPath: String,
+    val kind: String,                  // loading|error|not-found|global-error|template
+    val isClient: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+)
+
+/**
+ * An exported function / arrow whose body renders JSX. PK = [fqn] ("<filePath>::<name>").
+ * `isServer = !isClient` — App Router default is a server component; a component is
+ * client iff its module carries a "use client" directive (transitive propagation
+ * deferred to P3).
+ */
+@Serializable
+data class ReactComponentData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val isDefaultExport: Boolean = false,
+    val isClient: Boolean = false,
+    val isServer: Boolean = true,
+    val kind: String = "function",     // function|arrow
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,          // <=2000 chars
+    val isTest: Boolean = false,
+)
+
+/** Route -[:HAS_PAGE]-> Page. */
+@Serializable
+data class HasPageEdge(val urlPath: String, val pageFqn: String)
+
+/** Route -[:HAS_LAYOUT]-> Layout. */
+@Serializable
+data class HasLayoutEdge(val urlPath: String, val layoutFqn: String)
+
+/** SpecialFile -[:BOUNDARY_OF]-> Route. */
+@Serializable
+data class BoundaryOfEdge(val specialFqn: String, val urlPath: String)
+
+/** Route -[:CHILD_OF]-> Route (nearest ancestor route dir). */
+@Serializable
+data class ChildOfEdge(val childUrlPath: String, val parentUrlPath: String)
+
+/** (Page|Layout|ReactComponent) -[:RENDERS]-> ReactComponent. */
+@Serializable
+data class RendersEdge(val sourceFqn: String, val targetFqn: String)
 
 /**
  * Every `.js` / `.ts` / `.vue` source file that participates in the import

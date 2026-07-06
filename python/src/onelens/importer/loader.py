@@ -1046,6 +1046,105 @@ class GraphLoader:
                 src_var="src",
             )
 
+        # --- P2: App Router routes / pages / layouts / special files + React
+        # components + the RSC-boundary edge set. Additive — pre-P2 exports
+        # carry none of these arrays, so every batch is a no-op there.
+        # Nodes first (PK-indexed), then edges whose label-indexed MATCH hits
+        # the RANGE index (loader documents the 6000x full-scan penalty).
+        routes = [dict(r, wing=wing) for r in nextjs.get("routes", []) or []]
+        self._batch_nodes(progress, "Next Routes", routes, "Route", "urlPath", [
+            "segmentDir", "dynamic", "paramNames", "group", "isRoot", "wing",
+        ])
+
+        pages = [dict(p, wing=wing) for p in nextjs.get("pages", []) or []]
+        self._batch_nodes(progress, "Next Pages", pages, "Page", "fqn", [
+            "filePath", "urlPath", "isAsync", "isClient",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        layouts = [dict(l, wing=wing) for l in nextjs.get("layouts", []) or []]
+        self._batch_nodes(progress, "Next Layouts", layouts, "Layout", "fqn", [
+            "filePath", "urlPath", "isRoot", "isClient",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        special_files = [dict(s, wing=wing) for s in nextjs.get("specialFiles", []) or []]
+        self._batch_nodes(progress, "Next SpecialFiles", special_files, "SpecialFile", "fqn", [
+            "filePath", "urlPath", "kind", "isClient",
+            "lineStart", "lineEnd", "wing",
+        ])
+
+        components = [dict(c, wing=wing) for c in nextjs.get("components", []) or []]
+        self._batch_nodes(progress, "Next Components", components, "ReactComponent", "fqn", [
+            "name", "filePath", "isDefaultExport", "isClient", "isServer",
+            "kind", "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        # HAS_PAGE (Route → Page)
+        has_page = [{"urlPath": e.get("urlPath", ""), "pageFqn": e.get("pageFqn", "")}
+                    for e in nextjs.get("hasPage", []) or []]
+        if has_page:
+            self._batch_edges_simple(
+                progress, "HAS_PAGE", has_page,
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MATCH (p:Page {wing: $wing, fqn: e.pageFqn})",
+                "MERGE (r)-[:HAS_PAGE]->(p)",
+                wing=wing, src_var="r",
+            )
+
+        # HAS_LAYOUT (Route → Layout)
+        has_layout = [{"urlPath": e.get("urlPath", ""), "layoutFqn": e.get("layoutFqn", "")}
+                      for e in nextjs.get("hasLayout", []) or []]
+        if has_layout:
+            self._batch_edges_simple(
+                progress, "HAS_LAYOUT", has_layout,
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MATCH (l:Layout {wing: $wing, fqn: e.layoutFqn})",
+                "MERGE (r)-[:HAS_LAYOUT]->(l)",
+                wing=wing, src_var="r",
+            )
+
+        # BOUNDARY_OF (SpecialFile → Route)
+        boundary_of = [{"specialFqn": e.get("specialFqn", ""), "urlPath": e.get("urlPath", "")}
+                       for e in nextjs.get("boundaryOf", []) or []]
+        if boundary_of:
+            self._batch_edges_simple(
+                progress, "BOUNDARY_OF", boundary_of,
+                "MATCH (s:SpecialFile {wing: $wing, fqn: e.specialFqn})",
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MERGE (s)-[:BOUNDARY_OF]->(r)",
+                wing=wing, src_var="s",
+            )
+
+        # CHILD_OF (Route → Route) — child route to nearest ancestor route.
+        child_of = [{"childUrlPath": e.get("childUrlPath", ""),
+                     "parentUrlPath": e.get("parentUrlPath", "")}
+                    for e in nextjs.get("childOf", []) or []]
+        if child_of:
+            self._batch_edges_simple(
+                progress, "CHILD_OF", child_of,
+                "MATCH (c:Route {wing: $wing, urlPath: e.childUrlPath})",
+                "MATCH (p:Route {wing: $wing, urlPath: e.parentUrlPath})",
+                "MERGE (c)-[:CHILD_OF]->(p)",
+                wing=wing, src_var="c",
+            )
+
+        # RENDERS ((Page|Layout|ReactComponent) → ReactComponent). Source label
+        # is not tagged in the contract, so emit once per candidate source
+        # label — the two non-matching passes drop silently (HAS_STATEMENT
+        # dual-label pattern). Target is always a ReactComponent.
+        renders = [{"sourceFqn": e.get("sourceFqn", ""), "targetFqn": e.get("targetFqn", "")}
+                   for e in nextjs.get("renders", []) or []]
+        if renders:
+            for src_label in ("Page", "Layout", "ReactComponent"):
+                self._batch_edges_simple(
+                    progress, f"RENDERS ({src_label})", renders,
+                    f"MATCH (s:{src_label} {{wing: $wing, fqn: e.sourceFqn}})",
+                    "MATCH (t:ReactComponent {wing: $wing, fqn: e.targetFqn})",
+                    "MERGE (s)-[:RENDERS]->(t)",
+                    wing=wing, src_var="s",
+                )
+
         # Bridge pass — cross-wing HITS between Next ApiCall and Spring Endpoint.
         try:
             from onelens.importer import bridge_http
