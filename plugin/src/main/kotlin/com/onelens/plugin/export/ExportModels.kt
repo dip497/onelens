@@ -208,7 +208,114 @@ data class NextjsData(
     val boundaryOf: List<BoundaryOfEdge> = emptyList(),
     val childOf: List<ChildOfEdge> = emptyList(),
     val renders: List<RendersEdge> = emptyList(),
+    // --- P3: server actions, route handlers, hooks, context, middleware ---
+    val serverActions: List<ServerActionData> = emptyList(),
+    val routeHandlers: List<RouteHandlerData> = emptyList(),
+    val endpoints: List<NextEndpointData> = emptyList(),
+    val customHooks: List<CustomHookData> = emptyList(),
+    val hooks: List<HookData> = emptyList(),
+    val contextProviders: List<ContextProviderData> = emptyList(),
+    val middlewares: List<MiddlewareData> = emptyList(),
+    val handles: List<HandlesEdge> = emptyList(),
+    val exposedBy: List<ExposedByEdge> = emptyList(),
+    val usesHook: List<UsesHookEdge> = emptyList(),
+    val providesContext: List<ProvidesContextEdge> = emptyList(),
+    val intercepts: List<InterceptsEdge> = emptyList(),
 )
+
+/** A React Server Action. `scope` = "module" (whole file "use server") | "inline". PK = [fqn]. */
+@Serializable
+data class ServerActionData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val scope: String,                 // "module" | "inline"
+    val isAsync: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,          // <=2000 chars
+)
+
+/** A `route.*` named HTTP-method export. Endpoint -[:HANDLES]-> RouteHandler. PK = [fqn]. */
+@Serializable
+data class RouteHandlerData(
+    val fqn: String,                   // "<filePath>::<METHOD>"
+    val filePath: String,
+    val httpMethod: String,            // GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS
+    val urlPath: String,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,
+)
+
+/**
+ * REST endpoint surfaced by a route handler. REUSES the `Endpoint` label on the
+ * Python side (same PK format as Spring) so the cross-stack HITS bridge works.
+ * Named `NextEndpointData` only to avoid a Kotlin symbol clash. PK = [fqn].
+ */
+@Serializable
+data class NextEndpointData(
+    val fqn: String,                   // "<METHOD>:<urlPath>"
+    val method: String,
+    val path: String,
+)
+
+/** An exported `use*` hook definition. PK = [fqn]. */
+@Serializable
+data class CustomHookData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val isAsync: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,
+)
+
+/** A distinct hook by name. `origin` = "react" | "library" | "custom". PK = [name]. */
+@Serializable
+data class HookData(
+    val name: String,
+    val origin: String,
+)
+
+/** A `createContext(...)` assigned to a top-level variable. PK = [fqn]. */
+@Serializable
+data class ContextProviderData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+)
+
+/** A `middleware.(ts|js)` module. PK = [fqn]. */
+@Serializable
+data class MiddlewareData(
+    val fqn: String,                   // "<filePath>::middleware"
+    val filePath: String,
+    val matchers: List<String> = emptyList(),
+)
+
+/** Endpoint -[:HANDLES]-> RouteHandler. */
+@Serializable
+data class HandlesEdge(val endpointFqn: String, val handlerFqn: String)
+
+/** ServerAction -[:EXPOSED_BY]-> (Page|ReactComponent). */
+@Serializable
+data class ExposedByEdge(val actionFqn: String, val ownerFqn: String)
+
+/** (Page|Layout|ReactComponent|CustomHook) -[:USES_HOOK]-> Hook. */
+@Serializable
+data class UsesHookEdge(val sourceFqn: String, val hookName: String)
+
+/** (ReactComponent|JsModule) -[:PROVIDES_CONTEXT]-> ContextProvider. */
+@Serializable
+data class ProvidesContextEdge(val sourceFqn: String, val contextFqn: String)
+
+/** Middleware -[:INTERCEPTS]-> Route. */
+@Serializable
+data class InterceptsEdge(val middlewareFqn: String, val urlPath: String)
 
 /**
  * A Next.js App Router route directory. PK = [urlPath]. Named `NextRouteData` (not

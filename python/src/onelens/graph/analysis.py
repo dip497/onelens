@@ -45,6 +45,8 @@ def search_code(db: GraphDB, term: str, node_type: str = "") -> list[dict]:
         "jsmodule", "jsfunction",
         # Next.js (P2) — App Router (`route` above is shared with Vue)
         "reactcomponent", "page",
+        # Next.js (P3) — server actions / route handlers / hooks / context
+        "serveraction", "routehandler", "customhook", "hook", "contextprovider",
     ]
 
     for nt in types_to_search:

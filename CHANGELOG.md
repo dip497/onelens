@@ -7,6 +7,29 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Next.js / React adapter · Phase 3 · actions, handlers, hooks, context (2026-07)
+
+- **Server actions** — module-level and **inline** `"use server"` (directive as the first
+  statement of a function body) → `ServerAction` + `EXPOSED_BY` to the enclosing page/component.
+- **Route handlers** — `route.*` under `app/` exporting `GET`/`POST`/… → `RouteHandler` +
+  a reused `Endpoint` node + `HANDLES`, so Next REST surfaces bridge to the Spring graph.
+- **Hooks** — `use*` call sites → `Hook` nodes classified `react` / `library` / `custom`,
+  plus `CustomHook` definitions; `USES_HOOK` from the enclosing page/layout/component/hook.
+- **Context providers** — top-level `createContext(...)` → `ContextProvider` + `PROVIDES_CONTEXT`
+  (replaces the Vue Pinia-store collector, which has no React analogue).
+- **Middleware** — `middleware.ts` + `config.matcher` → `Middleware` + `INTERCEPTS` to routes.
+- **`ky` / bare `fetch(url, {method})` detection** in the shared `ApiCallCollector` (additive;
+  Vue unaffected) — Next `apiCalls` went 0 → 16 on the validation repo.
+- **Cross-package RENDERS** — `WorkspaceAliasResolver` maps `@scope/pkg` → package dir via
+  `pnpm-workspace.yaml` / `workspaces`, so `<Badge/>` imported from another workspace package
+  resolves (RENDERS 11 → 15).
+- Python: `_load_nextjs` maps the 6 new labels + 5 new edges; `Endpoint` MERGEs on the shared
+  `id` PK so Spring endpoints are matched, never clobbered. schema/FTS, search branches,
+  `_mine_server_actions` / `_mine_custom_hooks`, and `mcp_server` docs updated.
+- Verified E2E on `manageark-web`: 40 Hook / 8 ContextProvider / 16 ApiCall / 2 CustomHook /
+  1 inline ServerAction; 43 USES_HOOK, 15 RENDERS, 8 PROVIDES_CONTEXT. Route handlers and
+  middleware are zero-target-safe on a repo that has none.
+
 ### Added — Next.js / React adapter · Phase 2 · routes + components + RSC (2026-07)
 
 - **Route tree** (`RouteTreeCollector`) — walks `app/` (best-effort `pages/`):

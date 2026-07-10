@@ -155,6 +155,9 @@ _KNOWN_LABELS = [
     "JsModule", "JsFunction",
     # Next.js (P2) — `Route`/`ApiCall`/`JsModule`/`JsFunction` shared above
     "Page", "Layout", "SpecialFile", "ReactComponent",
+    # Next.js (P3) — `Endpoint` shared with Spring above
+    "ServerAction", "RouteHandler", "CustomHook", "Hook",
+    "ContextProvider", "Middleware",
     # Memory (palace graph)
     "Wing", "Room", "Hall", "Drawer", "Concept",
 ]
@@ -341,7 +344,10 @@ def onelens_query(
 
     Next.js (App Router): Route {urlPath, segmentDir, dynamic, isRoot},
     Page {fqn, filePath, urlPath, isClient, body}, Layout {fqn, filePath, isRoot, isClient},
-    SpecialFile {fqn, filePath, kind, isClient}, ReactComponent {fqn, name, filePath, isClient, body}
+    SpecialFile {fqn, filePath, kind, isClient}, ReactComponent {fqn, name, filePath, isClient, body},
+    ServerAction {fqn, name, filePath, scope, isAsync, body}, RouteHandler {fqn, httpMethod, urlPath, body},
+    CustomHook {fqn, name, filePath, body}, Hook {name, origin},
+    ContextProvider {fqn, name, filePath}, Middleware {fqn, filePath, matchers}
 
     ## Graph schema — edges
 
@@ -356,6 +362,9 @@ def onelens_query(
     HAS_PAGE (Route→Page), HAS_LAYOUT (Route→Layout),
     BOUNDARY_OF (SpecialFile→Route), CHILD_OF (Route→Route),
     RENDERS (Page/Layout/ReactComponent→ReactComponent),
+    HANDLES (Endpoint→RouteHandler — Next.js route.ts), EXPOSED_BY (ServerAction→Page/ReactComponent),
+    USES_HOOK (Page/Layout/ReactComponent/CustomHook→Hook),
+    PROVIDES_CONTEXT (ReactComponent/JsModule→ContextProvider), INTERCEPTS (Middleware→Route),
     HITS (ApiCall→Endpoint — cross-stack: Vue API call matches Spring endpoint)
 
     ## FalkorDB Cypher rules
@@ -413,7 +422,8 @@ def onelens_search(
     Empty string "" = search all types. Otherwise:
     Java/Spring: "class", "method", "endpoint", "springbean", "field"
     Vue 3: "component", "store", "composable", "route", "apicall", "jsfunction", "jsmodule"
-    Next.js: "reactcomponent", "page", "route" (route shared with Vue)
+    Next.js: "reactcomponent", "page", "route" (route shared with Vue),
+        "serveraction", "routehandler", "customhook", "hook", "contextprovider"
 
     ## Scoring
 

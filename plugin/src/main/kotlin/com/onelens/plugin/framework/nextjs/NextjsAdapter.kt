@@ -12,10 +12,16 @@ import com.onelens.plugin.framework.jscommon.JsModuleCollector
 import com.onelens.plugin.framework.jscommon.ModuleNameBinder
 import com.onelens.plugin.framework.jscommon.SymlinkResolver
 import com.onelens.plugin.framework.jscommon.ViteAliasResolver
+import com.onelens.plugin.framework.jscommon.WorkspaceAliasResolver
+import com.onelens.plugin.framework.nextjs.collectors.ContextProviderCollector
 import com.onelens.plugin.framework.nextjs.collectors.DirectiveCollector
+import com.onelens.plugin.framework.nextjs.collectors.HookCollector
+import com.onelens.plugin.framework.nextjs.collectors.MiddlewareCollector
 import com.onelens.plugin.framework.nextjs.collectors.ReactComponentCollector
 import com.onelens.plugin.framework.nextjs.collectors.RendersResolver
+import com.onelens.plugin.framework.nextjs.collectors.RouteHandlerCollector
 import com.onelens.plugin.framework.nextjs.collectors.RouteTreeCollector
+import com.onelens.plugin.framework.nextjs.collectors.ServerActionCollector
 import com.onelens.plugin.settings.OneLensSettings
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -132,8 +138,31 @@ class NextjsCollector : Collector {
         timed("React components", baseFraction + 0.10) {
             ReactComponentCollector.collect(project, nextCtx)
         }
-        timed("RENDERS resolution", baseFraction + 0.12) {
-            RendersResolver.resolve(nextCtx)
+        // P3 — server actions, route handlers, context, hooks, middleware.
+        timed("server actions", baseFraction + 0.12) {
+            ServerActionCollector.collect(project, nextCtx)
+        }
+        timed("route handlers", baseFraction + 0.13) {
+            RouteHandlerCollector.collect(project, nextCtx)
+        }
+        timed("context providers", baseFraction + 0.14) {
+            ContextProviderCollector.collect(project, nextCtx)
+        }
+        timed("hooks", baseFraction + 0.15) {
+            HookCollector.collect(project, nextCtx)
+        }
+        timed("middleware", baseFraction + 0.16) {
+            MiddlewareCollector.collect(project, nextCtx)
+        }
+        // RENDERS last, after the cross-package workspace alias map is built so
+        // `<Badge/>` imported from another workspace package resolves.
+        val pkgAliases = try {
+            WorkspaceAliasResolver.buildAliasMap(base)
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+        timed("RENDERS resolution", baseFraction + 0.18) {
+            RendersResolver.resolve(nextCtx, pkgAliases)
         }
 
         System.err.println("[onelens] Next.js collector timings:\n$timings")
@@ -141,10 +170,15 @@ class NextjsCollector : Collector {
         val snapshot: NextjsData = nextCtx.snapshot()
         val nodeCount = snapshot.modules.size + snapshot.functions.size + snapshot.apiCalls.size +
             snapshot.routes.size + snapshot.pages.size + snapshot.layouts.size +
-            snapshot.specialFiles.size + snapshot.components.size
+            snapshot.specialFiles.size + snapshot.components.size +
+            snapshot.serverActions.size + snapshot.routeHandlers.size + snapshot.endpoints.size +
+            snapshot.customHooks.size + snapshot.hooks.size + snapshot.contextProviders.size +
+            snapshot.middlewares.size
         val edgeCount = snapshot.imports.size + snapshot.callsApi.size +
             snapshot.hasPage.size + snapshot.hasLayout.size + snapshot.boundaryOf.size +
-            snapshot.childOf.size + snapshot.renders.size
+            snapshot.childOf.size + snapshot.renders.size +
+            snapshot.handles.size + snapshot.exposedBy.size + snapshot.usesHook.size +
+            snapshot.providesContext.size + snapshot.intercepts.size
 
         val subdoc = nextJson.encodeToJsonElement(NextjsData.serializer(), snapshot)
         return CollectorOutput(data = subdoc, nodeCount = nodeCount, edgeCount = edgeCount)

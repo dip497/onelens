@@ -1145,6 +1145,132 @@ class GraphLoader:
                     wing=wing, src_var="s",
                 )
 
+        # --- P3: server actions / route handlers / hooks / context / middleware.
+        # Additive — pre-P3 exports carry none of these arrays, so every batch is
+        # a no-op there. Zero-target-safe: a repo with no route handlers or
+        # middleware simply emits empty lists (contract: RouteHandler / Middleware
+        # collectors emit nothing rather than crash). Nodes first (PK-indexed),
+        # then edges whose label-indexed MATCH hits the RANGE index.
+        server_actions = [dict(s, wing=wing) for s in nextjs.get("serverActions", []) or []]
+        self._batch_nodes(progress, "Next ServerActions", server_actions, "ServerAction", "fqn", [
+            "name", "filePath", "scope", "isAsync",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
+        route_handlers = [dict(r, wing=wing) for r in nextjs.get("routeHandlers", []) or []]
+        self._batch_nodes(progress, "Next RouteHandlers", route_handlers, "RouteHandler", "fqn", [
+            "filePath", "httpMethod", "urlPath",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
+        # Endpoint — REUSE the Spring Endpoint label. The export carries `fqn`
+        # ("<METHOD>:<urlPath>") which is the same identity Spring stores in `id`,
+        # so we MERGE on `id` (the indexed PK) and only SET method/path. A Spring
+        # Endpoint sharing the path is matched, not clobbered — only the two Next
+        # props are written; Spring's httpMethod/handler stay put.
+        endpoints = [{"id": e.get("fqn", ""), "method": e.get("method", ""),
+                      "path": e.get("path", ""), "wing": wing}
+                     for e in nextjs.get("endpoints", []) or []]
+        self._batch_nodes(progress, "Next Endpoints", endpoints, "Endpoint", "id", [
+            "method", "path", "wing",
+        ])
+
+        custom_hooks = [dict(c, wing=wing) for c in nextjs.get("customHooks", []) or []]
+        self._batch_nodes(progress, "Next CustomHooks", custom_hooks, "CustomHook", "fqn", [
+            "name", "filePath", "isAsync",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
+        hooks = [dict(h, wing=wing) for h in nextjs.get("hooks", []) or []]
+        self._batch_nodes(progress, "Next Hooks", hooks, "Hook", "name", [
+            "origin", "wing",
+        ])
+
+        context_providers = [dict(c, wing=wing) for c in nextjs.get("contextProviders", []) or []]
+        self._batch_nodes(progress, "Next ContextProviders", context_providers, "ContextProvider", "fqn", [
+            "name", "filePath", "lineStart", "lineEnd", "wing",
+        ])
+
+        middlewares = [dict(m, wing=wing) for m in nextjs.get("middlewares", []) or []]
+        self._batch_nodes(progress, "Next Middlewares", middlewares, "Middleware", "fqn", [
+            "filePath", "matchers", "wing",
+        ])
+
+        # HANDLES (Endpoint → RouteHandler)
+        handles = [{"endpointFqn": e.get("endpointFqn", ""), "handlerFqn": e.get("handlerFqn", "")}
+                   for e in nextjs.get("handles", []) or []]
+        if handles:
+            self._batch_edges_simple(
+                progress, "HANDLES", handles,
+                "MATCH (s:Endpoint {wing: $wing, id: e.endpointFqn})",
+                "MATCH (h:RouteHandler {wing: $wing, fqn: e.handlerFqn})",
+                "MERGE (s)-[:HANDLES]->(h)",
+                wing=wing, src_var="s",
+            )
+
+        # EXPOSED_BY (ServerAction → Page|ReactComponent). Owner label is not
+        # tagged, so emit once per candidate target label — the non-matching pass
+        # drops silently (same dual-label pattern RENDERS uses).
+        exposed_by = [{"actionFqn": e.get("actionFqn", ""), "ownerFqn": e.get("ownerFqn", "")}
+                      for e in nextjs.get("exposedBy", []) or []]
+        if exposed_by:
+            for owner_label in ("Page", "ReactComponent"):
+                self._batch_edges_simple(
+                    progress, f"EXPOSED_BY ({owner_label})", exposed_by,
+                    "MATCH (a:ServerAction {wing: $wing, fqn: e.actionFqn})",
+                    f"MATCH (o:{owner_label} {{wing: $wing, fqn: e.ownerFqn}})",
+                    "MERGE (a)-[:EXPOSED_BY]->(o)",
+                    wing=wing, src_var="a",
+                )
+
+        # USES_HOOK ((Page|Layout|ReactComponent|CustomHook) → Hook). Source label
+        # not tagged — multi-pass over every candidate, non-matching passes drop.
+        uses_hook = [{"sourceFqn": e.get("sourceFqn", ""), "hookName": e.get("hookName", "")}
+                     for e in nextjs.get("usesHook", []) or []]
+        if uses_hook:
+            for src_label in ("Page", "Layout", "ReactComponent", "CustomHook"):
+                self._batch_edges_simple(
+                    progress, f"USES_HOOK ({src_label})", uses_hook,
+                    f"MATCH (s:{src_label} {{wing: $wing, fqn: e.sourceFqn}})",
+                    "MATCH (h:Hook {wing: $wing, name: e.hookName})",
+                    "MERGE (s)-[:USES_HOOK]->(h)",
+                    wing=wing, src_var="s",
+                )
+
+        # PROVIDES_CONTEXT ((ReactComponent|JsModule) → ContextProvider). Source
+        # is a component (keyed fqn) or the module holding the createContext site
+        # (JsModule keyed filePath) — the sourceFqn carries whichever identity, so
+        # try both label/key combos; the non-matching pass drops silently.
+        provides_context = [{"sourceFqn": e.get("sourceFqn", ""), "contextFqn": e.get("contextFqn", "")}
+                            for e in nextjs.get("providesContext", []) or []]
+        if provides_context:
+            self._batch_edges_simple(
+                progress, "PROVIDES_CONTEXT (ReactComponent)", provides_context,
+                "MATCH (s:ReactComponent {wing: $wing, fqn: e.sourceFqn})",
+                "MATCH (c:ContextProvider {wing: $wing, fqn: e.contextFqn})",
+                "MERGE (s)-[:PROVIDES_CONTEXT]->(c)",
+                wing=wing, src_var="s",
+            )
+            self._batch_edges_simple(
+                progress, "PROVIDES_CONTEXT (JsModule)", provides_context,
+                "MATCH (s:JsModule {wing: $wing, filePath: e.sourceFqn})",
+                "MATCH (c:ContextProvider {wing: $wing, fqn: e.contextFqn})",
+                "MERGE (s)-[:PROVIDES_CONTEXT]->(c)",
+                wing=wing, src_var="s",
+            )
+
+        # INTERCEPTS (Middleware → Route)
+        intercepts = [{"middlewareFqn": e.get("middlewareFqn", ""), "urlPath": e.get("urlPath", "")}
+                      for e in nextjs.get("intercepts", []) or []]
+        if intercepts:
+            self._batch_edges_simple(
+                progress, "INTERCEPTS", intercepts,
+                "MATCH (m:Middleware {wing: $wing, fqn: e.middlewareFqn})",
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MERGE (m)-[:INTERCEPTS]->(r)",
+                wing=wing, src_var="m",
+            )
+
         # Bridge pass — cross-wing HITS between Next ApiCall and Spring Endpoint.
         try:
             from onelens.importer import bridge_http

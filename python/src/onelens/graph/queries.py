@@ -226,6 +226,36 @@ def search(term: str, node_type: str = "") -> tuple[str, dict]:
             RETURN 'JsFunction' AS type, ('jsfunction:' + node.fqn) AS fqn,
                    node.name AS name, node.filePath AS file, '' AS kind
         """
+    elif node_type == "serveraction":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ServerAction', '{safe_term}') YIELD node
+            RETURN 'ServerAction' AS type, ('serveraction:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, node.scope AS kind
+        """
+    elif node_type == "routehandler":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('RouteHandler', '{safe_term}') YIELD node
+            RETURN 'RouteHandler' AS type, ('routehandler:' + node.fqn) AS fqn,
+                   node.urlPath AS name, node.filePath AS file, node.httpMethod AS kind
+        """
+    elif node_type == "customhook":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('CustomHook', '{safe_term}') YIELD node
+            RETURN 'CustomHook' AS type, ('customhook:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "hook":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Hook', '{safe_term}') YIELD node
+            RETURN 'Hook' AS type, ('hook:' + node.name) AS fqn,
+                   node.name AS name, '' AS file, node.origin AS kind
+        """
+    elif node_type == "contextprovider":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ContextProvider', '{safe_term}') YIELD node
+            RETURN 'ContextProvider' AS type, ('contextprovider:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
     else:
         # Default: search classes (caller should loop for multi-type)
         cypher = f"""

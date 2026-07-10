@@ -29,9 +29,11 @@ Last updated: 2026-06.
 | N8 | **P2** — routes (App Router segment→URL), Page/Layout/SpecialFile, React components, RSC client/server boundary, RENDERS composition + new labels/schema/search/miner | ✅ | `framework/nextjs/collectors/{RouteTree,ReactComponent,Directive,RendersResolver,NextPsiUtil}`; `loader.py::_load_nextjs`, `schema.py`, `queries.py`, `code_miner.py` |
 | N8v | P2 verified E2E on `manageark-web` — 24 Route / 24 Page / 4 Layout / 6 SpecialFile / 50 ReactComponent (26 client) / 11 RENDERS, all queryable | ✅ | — |
 | N12 | RENDERS cross-package resolution — `@scope/*` pnpm-workspace component imports resolve to file paths (P2 only does same-package/relative/`@/`) | ⬜ | P3 — workspace-alias map in `ViteAliasResolver` |
-| N9 | **P3** — server actions, route handlers, hooks (origin-classified), Context providers, middleware | ⬜ | planned |
-| N10 | **P4** — Next delta (first frontend wired into delta): `apply_delta` + cascade delete + Next-scoped delta export routing | ⬜ | planned |
-| N11 | `ky` / `fetch` in `CLIENT_NAMES` so App-Router data calls surface as `ApiCall` (why P1 `apiCalls=0`) | ⬜ | P2/P3 — `ApiCallCollector.CLIENT_NAMES` |
+| N9 | **P3** — server actions (module + inline), route handlers (+Endpoint/HANDLES), hooks (origin-classified) + custom hooks, Context providers, middleware | ✅ | `framework/nextjs/collectors/{ServerAction,RouteHandler,Hook,ContextProvider,Middleware}Collector` |
+| N9v | P3 verified E2E on `manageark-web` — 40 Hook / 8 ContextProvider / 16 ApiCall / 2 CustomHook / 1 ServerAction (inline); 43 USES_HOOK, 15 RENDERS, 8 PROVIDES_CONTEXT. RouteHandler + Middleware zero-target-safe | ✅ | — |
+| N10 | **P4** — Next delta (first frontend wired into delta): `apply_delta` + cascade delete + Next-scoped delta export routing | 🟡 | in progress |
+| N11 | `ky` / `fetch` in `CLIENT_NAMES` so App-Router data calls surface as `ApiCall` (P1 had `apiCalls=0` → now 16) | ✅ | `jscommon/ApiCallCollector` (bare `fetch(url,{method})` + `ky`) |
+| N13 | `CALLS_API` joins only 2/16 ApiCalls — module-level / arrow callers aren't emitted as `JsFunction`, so the caller-fqn join drops | ⬜ | follow-up — `JsModuleCollector` caller coverage |
 
 ## Embedder profiles · low-end CPU UX (2026-05-07 → 2026-05-08)
 

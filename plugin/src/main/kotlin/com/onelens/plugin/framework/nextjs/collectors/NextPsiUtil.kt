@@ -1,6 +1,7 @@
 package com.onelens.plugin.framework.nextjs.collectors
 
 import com.intellij.lang.javascript.psi.JSFunction
+import com.intellij.lang.javascript.psi.JSVariable
 import com.intellij.lang.javascript.psi.JSXmlLiteralExpression
 import com.intellij.openapi.editor.Document
 import com.intellij.psi.PsiElement
@@ -59,4 +60,91 @@ internal object NextPsiUtil {
 
     /** Function source text, truncated to [MAX_BODY_CHARS]. */
     fun bodyText(fn: JSFunction): String = fn.text.take(MAX_BODY_CHARS)
+
+    /** True when no JSFunction lies between [element] and the file — i.e. a module-level declaration. */
+    fun isTopLevel(element: PsiElement): Boolean {
+        var parent: PsiElement? = element.parent
+        while (parent != null && parent !is com.intellij.psi.PsiFile) {
+            if (parent is JSFunction && parent !== element) return false
+            parent = parent.parent
+        }
+        return true
+    }
+
+    /** Textual `export …` probe up the ancestor chain (robust to JS-plugin PSI variations). */
+    fun isExported(element: PsiElement): Boolean {
+        var cursor: PsiElement? = element
+        while (cursor != null && cursor !is com.intellij.psi.PsiFile) {
+            val txt = cursor.text.orEmpty().trimStart()
+            if (txt.startsWith("export ") || txt.startsWith("export\n") ||
+                txt.startsWith("export{") || txt.startsWith("export*") ||
+                txt.startsWith("export default ")
+            ) return true
+            cursor = cursor.parent
+        }
+        return false
+    }
+
+    /** Declared name of a function: its own name, else the name of the `const X = () => …` it initialises. */
+    fun functionName(fn: JSFunction): String? =
+        fn.name ?: PsiTreeUtil.getParentOfType(fn, JSVariable::class.java, true)?.name
+
+    /**
+     * Fqn ("<relative>::<name>") of the nearest enclosing declared symbol that is in
+     * [known]. Walks up JSFunction / JSVariable ancestors; falls back to
+     * "<relative>::default" when that is a known symbol (default-export page/component).
+     */
+    fun enclosingSymbolFqn(element: PsiElement, relative: String, known: Set<String>): String? {
+        var cursor: PsiElement? = element.parent
+        while (cursor != null) {
+            val name = when (cursor) {
+                is JSFunction -> functionName(cursor)
+                is JSVariable -> cursor.name
+                else -> null
+            }
+            if (name != null) {
+                val fqn = "$relative::$name"
+                if (fqn in known) return fqn
+            }
+            cursor = cursor.parent
+        }
+        return "$relative::default".takeIf { it in known }
+    }
+
+    /** Result of mapping an App-Router segment chain to a REST-style URL. */
+    data class UrlResult(val urlPath: String, val paramNames: List<String>, val group: String?)
+
+    /**
+     * Maps App-Router directory segments (below `app/`) to a URL path. Route groups
+     * `(group)` are stripped, parallel `@slot` segments dropped, `[param]` → `:param`,
+     * `[...slug]`/`[[...slug]]` → `*slug`. Empty chain → "/". Shared by
+     * [RouteTreeCollector] and [RouteHandlerCollector].
+     */
+    fun computeUrl(segments: List<String>): UrlResult {
+        val filtered = mutableListOf<String>()
+        val params = mutableListOf<String>()
+        var group: String? = null
+        for (seg in segments) {
+            when {
+                seg.isEmpty() -> {}
+                seg.startsWith("(") && seg.endsWith(")") -> group = seg
+                seg.startsWith("@") -> {} // parallel route slot — dropped from path
+                seg.startsWith("[[...") && seg.endsWith("]]") -> {
+                    val name = seg.removePrefix("[[...").removeSuffix("]]")
+                    params += name; filtered += "*$name"
+                }
+                seg.startsWith("[...") && seg.endsWith("]") -> {
+                    val name = seg.removePrefix("[...").removeSuffix("]")
+                    params += name; filtered += "*$name"
+                }
+                seg.startsWith("[") && seg.endsWith("]") -> {
+                    val name = seg.removePrefix("[").removeSuffix("]")
+                    params += name; filtered += ":$name"
+                }
+                else -> filtered += seg
+            }
+        }
+        val url = if (filtered.isEmpty()) "/" else "/" + filtered.joinToString("/")
+        return UrlResult(url, params, group)
+    }
 }

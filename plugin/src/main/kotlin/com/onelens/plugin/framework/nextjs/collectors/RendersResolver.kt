@@ -31,7 +31,7 @@ object RendersResolver {
         return JS_EXT.replace(fqn.substring(0, sep), "") + fqn.substring(sep)
     }
 
-    fun resolve(ctx: NextjsContext) {
+    fun resolve(ctx: NextjsContext, pkgAliases: Map<String, String> = emptyMap()) {
         if (ctx.components.isEmpty()) return
         val componentFqns = ctx.components.mapTo(HashSet()) { it.fqn }
         // Second index keyed on the extensionless fqn, because `ImportsEdge.targetModule`
@@ -43,7 +43,7 @@ object RendersResolver {
         for (site in ctx.renderSites) {
             val imports = importsBySource[site.filePath].orEmpty()
             for (tag in site.jsxTagNames) {
-                val target = resolveTag(tag, site.filePath, imports, componentFqns, byExtless) ?: continue
+                val target = resolveTag(tag, site.filePath, imports, componentFqns, byExtless, pkgAliases) ?: continue
                 if (target == site.sourceFqn) continue
                 if (seen.add(site.sourceFqn to target)) {
                     ctx.renders += RendersEdge(sourceFqn = site.sourceFqn, targetFqn = target)
@@ -59,6 +59,7 @@ object RendersResolver {
         imports: List<ImportsEdge>,
         componentFqns: Set<String>,
         byExtless: Map<String, String>,
+        pkgAliases: Map<String, String>,
     ): String? {
         val edge = imports.firstOrNull { (it.localAlias ?: it.importedName) == tag }
         if (edge != null) {
@@ -69,10 +70,35 @@ object RendersResolver {
             val mod = edge.targetModule
             byExtless["$mod::$tag"]?.let { return it }
             byExtless["$mod::${edge.importedName}"]?.let { return it }
+            // Cross-package: `targetModule` is the bare specifier `@scope/pkg[/sub]`.
+            // Map it through the workspace alias map to a base-relative module path.
+            for (cand in workspaceModules(mod, pkgAliases)) {
+                byExtless["$cand::$tag"]?.let { return it }
+                byExtless["$cand::${edge.importedName}"]?.let { return it }
+            }
         }
         // Same-file component (renders another export defined in the same module) —
         // both sides carry the file extension here, so a direct match is correct.
         if ("$filePath::$tag" in componentFqns) return "$filePath::$tag"
         return null
+    }
+
+    /**
+     * Candidate extensionless module paths a cross-package specifier could resolve to:
+     * `@scope/pkg/sub` → `<pkgDir>/src/sub` then `<pkgDir>/sub`; bare `@scope/pkg` →
+     * `<pkgDir>/src/index` then `<pkgDir>/index`.
+     */
+    private fun workspaceModules(spec: String, pkgAliases: Map<String, String>): List<String> {
+        for ((pkg, dir) in pkgAliases) {
+            when {
+                spec == pkg -> return listOf("$dir/src/index", "$dir/index")
+                spec.startsWith("$pkg/") -> {
+                    val sub = spec.removePrefix("$pkg/")
+                    // ponytail: heuristic src/ probe — not full package.json "exports" resolution.
+                    return listOf("$dir/src/$sub", "$dir/$sub")
+                }
+            }
+        }
+        return emptyList()
     }
 }

@@ -94,7 +94,7 @@ object RouteTreeCollector {
         for ((relDir, entries) in appDirs) {
             ProgressManager.checkCanceled()
             val segs = segmentsByDir[relDir] ?: emptyList()
-            val url = computeUrl(segs)
+            val url = NextPsiUtil.computeUrl(segs)
             childUrlByDir[relDir] = url.urlPath
             if (!routesByUrl.containsKey(url.urlPath)) {
                 routesByUrl[url.urlPath] = NextRouteData(
@@ -214,7 +214,7 @@ object RouteTreeCollector {
             // Build url segments: dir segments + filename (dropping `index`).
             val dirSegs = after.subList(0, after.size - 1)
             val fileSeg = if (base == "index") emptyList() else listOf(base)
-            val url = computeUrl(dirSegs + fileSeg)
+            val url = NextPsiUtil.computeUrl(dirSegs + fileSeg)
             if (url.urlPath in seenUrls) continue
             seenUrls += url.urlPath
             ctx.routes += NextRouteData(
@@ -242,37 +242,7 @@ object RouteTreeCollector {
         }
     }
 
-    // ---- url computation ----
-
-    private data class UrlResult(val urlPath: String, val paramNames: List<String>, val group: String?)
-
-    private fun computeUrl(segments: List<String>): UrlResult {
-        val filtered = mutableListOf<String>()
-        val params = mutableListOf<String>()
-        var group: String? = null
-        for (seg in segments) {
-            when {
-                seg.isEmpty() -> {}
-                seg.startsWith("(") && seg.endsWith(")") -> group = seg
-                seg.startsWith("@") -> {} // parallel route slot — dropped from path
-                seg.startsWith("[[...") && seg.endsWith("]]") -> {
-                    val name = seg.removePrefix("[[...").removeSuffix("]]")
-                    params += name; filtered += "*$name"
-                }
-                seg.startsWith("[...") && seg.endsWith("]") -> {
-                    val name = seg.removePrefix("[...").removeSuffix("]")
-                    params += name; filtered += "*$name"
-                }
-                seg.startsWith("[") && seg.endsWith("]") -> {
-                    val name = seg.removePrefix("[").removeSuffix("]")
-                    params += name; filtered += ":$name"
-                }
-                else -> filtered += seg
-            }
-        }
-        val url = if (filtered.isEmpty()) "/" else "/" + filtered.joinToString("/")
-        return UrlResult(url, params, group)
-    }
+    // ---- url computation (shared helper: NextPsiUtil.computeUrl) ----
 
     private fun parentDir(dir: String): String? {
         val idx = dir.lastIndexOf('/')

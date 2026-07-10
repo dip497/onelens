@@ -35,7 +35,15 @@ import java.nio.file.Paths
 object ApiCallCollector {
     private val LOG = logger<ApiCallCollector>()
     private val HTTP_METHODS = setOf("get", "post", "put", "patch", "delete")
-    private val CLIENT_NAMES = setOf("api", "axios", "\$http", "http", "Api", "httpClient", "_client")
+    private val CLIENT_NAMES = setOf(
+        "api", "axios", "\$http", "http", "Api", "httpClient", "_client",
+        "ky", "apiFetch", "request",
+    )
+    // Bare calls (no qualifier) that are themselves HTTP requests: `fetch(url, {method})`,
+    // `ky(url)`, `apiFetch(url)`, `request(url)`. Method defaults to GET unless a second-arg
+    // object literal carries `method: "X"`.
+    private val BARE_FETCH_NAMES = setOf("fetch", "ky", "apiFetch", "request")
+    private val METHOD_OPT_RE = Regex("""method\s*:\s*['"]([A-Za-z]+)['"]""")
 
     fun collect(project: Project, ctx: JsCommonSink) {
         if (DumbService.isDumb(project)) return
@@ -58,7 +66,8 @@ object ApiCallCollector {
             } catch (_: Throwable) { "" }
             val maybeHttp = CLIENT_NAMES.any { header.contains("$it.") } ||
                 header.contains("axios(") || header.contains("from 'axios'") ||
-                header.contains("from \"axios\"")
+                header.contains("from \"axios\"") ||
+                header.contains("ky") || header.contains("fetch(") || header.contains("apiFetch")
             if (!maybeHttp) continue
 
             val calls = ReadAction.compute<List<ApiCallData>, Throwable> {
@@ -85,22 +94,32 @@ object ApiCallCollector {
         val allCalls = ctx.findAll<JSCallExpression>(file)
         for (call in allCalls) {
             val callee = call.methodExpression as? JSReferenceExpression ?: continue
-            val methodName = callee.referenceName?.lowercase() ?: continue
-            if (methodName !in HTTP_METHODS) continue
+            val refName = callee.referenceName ?: continue
+            val qualifierNode = callee.qualifier
 
-            // Qualifier must look like a known HTTP client.
-            val qualifier = callee.qualifier?.text?.substringAfterLast('.') ?: continue
-            if (qualifier !in CLIENT_NAMES && qualifier.lowercase() !in CLIENT_NAMES) continue
+            val method: String = if (qualifierNode == null) {
+                // Bare call — `fetch(url, {method})` / `ky(url)` / `apiFetch(url)`.
+                if (refName !in BARE_FETCH_NAMES) continue
+                val args = call.argumentList?.arguments ?: continue
+                if (args.isEmpty()) continue
+                args.getOrNull(1)?.let { METHOD_OPT_RE.find(it.text)?.groupValues?.get(1)?.uppercase() } ?: "GET"
+            } else {
+                // Qualified call — `client.verb(url)`.
+                val verb = refName.lowercase()
+                if (verb !in HTTP_METHODS) continue
+                val qualifier = qualifierNode.text.substringAfterLast('.')
+                if (qualifier !in CLIENT_NAMES && qualifier.lowercase() !in CLIENT_NAMES) continue
+                verb.uppercase()
+            }
 
             val args = call.argumentList?.arguments ?: continue
             if (args.isEmpty()) continue
-            val firstArg = args[0]
-            val urlText = firstArg.text.trim()
+            val urlText = args[0].text.trim()
             val (path, parametric, binding) = classifyUrl(urlText)
 
             val enclosing = enclosingFunctionFqn(call, relative)
             out += ApiCallData(
-                method = methodName.uppercase(),
+                method = method,
                 path = path,
                 parametric = parametric,
                 binding = binding,

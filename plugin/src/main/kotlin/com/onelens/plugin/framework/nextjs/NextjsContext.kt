@@ -28,6 +28,20 @@ class NextjsContext(
     val childOf: MutableList<ChildOfEdge> = mutableListOf()
     val renders: MutableList<RendersEdge> = mutableListOf()
 
+    // --- P3: server actions, route handlers, hooks, context, middleware ---
+    val serverActions: MutableList<ServerActionData> = mutableListOf()
+    val routeHandlers: MutableList<RouteHandlerData> = mutableListOf()
+    val endpoints: MutableList<NextEndpointData> = mutableListOf()
+    val customHooks: MutableList<CustomHookData> = mutableListOf()
+    val hooks: MutableList<HookData> = mutableListOf()
+    val contextProviders: MutableList<ContextProviderData> = mutableListOf()
+    val middlewares: MutableList<MiddlewareData> = mutableListOf()
+    val handles: MutableList<HandlesEdge> = mutableListOf()
+    val exposedBy: MutableList<ExposedByEdge> = mutableListOf()
+    val usesHook: MutableList<UsesHookEdge> = mutableListOf()
+    val providesContext: MutableList<ProvidesContextEdge> = mutableListOf()
+    val intercepts: MutableList<InterceptsEdge> = mutableListOf()
+
     /** Transient (not serialized): relative filePaths of modules with a "use client" directive. */
     val clientModules: MutableSet<String> = mutableSetOf()
 
@@ -49,6 +63,11 @@ class NextjsContext(
         specialFiles = specialFiles.toList(), components = components.toList(),
         hasPage = hasPage.toList(), hasLayout = hasLayout.toList(),
         boundaryOf = boundaryOf.toList(), childOf = childOf.toList(), renders = renders.toList(),
+        serverActions = serverActions.toList(), routeHandlers = routeHandlers.toList(),
+        endpoints = endpoints.toList(), customHooks = customHooks.toList(), hooks = hooks.toList(),
+        contextProviders = contextProviders.toList(), middlewares = middlewares.toList(),
+        handles = handles.toList(), exposedBy = exposedBy.toList(), usesHook = usesHook.toList(),
+        providesContext = providesContext.toList(), intercepts = intercepts.toList(),
     )
     override fun relativize(abs: Path): String = try {
         projectBase.relativize(abs).toString().replace('\\', '/')

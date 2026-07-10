@@ -46,6 +46,15 @@ NODE_SCHEMA = {
     "Layout": "CREATE INDEX FOR (n:Layout) ON (n.fqn)",
     "SpecialFile": "CREATE INDEX FOR (n:SpecialFile) ON (n.fqn)",
     "ReactComponent": "CREATE INDEX FOR (n:ReactComponent) ON (n.fqn)",
+    # Next.js (P3) — server actions / route handlers / hooks / context / middleware.
+    # PK RANGE index per label so the loader's label-indexed edge MATCHes hit the
+    # index. Endpoint reuses the Spring `id` index (already declared) — not repeated.
+    "ServerAction": "CREATE INDEX FOR (n:ServerAction) ON (n.fqn)",
+    "RouteHandler": "CREATE INDEX FOR (n:RouteHandler) ON (n.fqn)",
+    "CustomHook": "CREATE INDEX FOR (n:CustomHook) ON (n.fqn)",
+    "Hook": "CREATE INDEX FOR (n:Hook) ON (n.name)",
+    "ContextProvider": "CREATE INDEX FOR (n:ContextProvider) ON (n.fqn)",
+    "Middleware": "CREATE INDEX FOR (n:Middleware) ON (n.fqn)",
 }
 
 # Full-text search indexes — FalkorDB CALL procedure syntax.
@@ -132,6 +141,26 @@ FULLTEXT_SCHEMA = {
         " {field: 'fqn', weight: 10.0},"
         " {field: 'body', weight: 1.0})"
     ),
+    # Next.js (P3) — server actions / custom hooks / route handlers. Name weighted
+    # highest; body catches in-code terms. RouteHandler has no `name`, so key on fqn.
+    "ServerAction_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'ServerAction',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "CustomHook_name": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'CustomHook',"
+        " {field: 'name', weight: 10.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
+    "RouteHandler_fqn": (
+        "CALL db.idx.fulltext.createNodeIndex("
+        "'RouteHandler',"
+        " {field: 'fqn', weight: 10.0},"
+        " {field: 'body', weight: 1.0})"
+    ),
 }
 
 # Relationship types — no DDL needed for FalkorDB/Neo4j (edges are schemaless)
@@ -160,4 +189,10 @@ REL_SCHEMA = {
     "BOUNDARY_OF": "// SpecialFile -[:BOUNDARY_OF]-> Route (loading/error/not-found/...)",
     "CHILD_OF": "// Route -[:CHILD_OF]-> Route (nearest ancestor route)",
     "RENDERS": "// Page|Layout|ReactComponent -[:RENDERS]-> ReactComponent",
+    # Next.js (P3) — server actions / route handlers / hooks / context / middleware
+    "HANDLES_NEXT": "// Endpoint -[:HANDLES]-> RouteHandler (Next.js route.ts export)",
+    "EXPOSED_BY": "// ServerAction -[:EXPOSED_BY]-> Page|ReactComponent",
+    "USES_HOOK": "// Page|Layout|ReactComponent|CustomHook -[:USES_HOOK]-> Hook",
+    "PROVIDES_CONTEXT": "// ReactComponent|JsModule -[:PROVIDES_CONTEXT]-> ContextProvider",
+    "INTERCEPTS": "// Middleware -[:INTERCEPTS]-> Route",
 }
