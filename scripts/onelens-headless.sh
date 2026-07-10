@@ -162,12 +162,15 @@ export_project() {
     # Generous gates: big Maven projects index slowly; resolve can take a while.
     export ONELENS_INDEX_TIMEOUT_SEC="${ONELENS_INDEX_TIMEOUT_SEC:-1200}"
     export ONELENS_RESOLVE_TIMEOUT_SEC="${ONELENS_RESOLVE_TIMEOUT_SEC:-2400}"
+    # ONELENS_DELTA=true → git-diff-scoped incremental re-collect (Java only;
+    # falls back to full if the last-export marker is missing / branch moved).
     ./gradlew headlessExport \
       -PonelensProject="$proj" \
       -PonelensOutput="$EXPORT_DIR" \
       -PonelensXmx="${ONELENS_XMX:-6g}" --console=plain
   )
-  local json; json=$(ls -t "$EXPORT_DIR"/*-full-*.json | head -1)
+  # A delta run may still emit a *-full-* JSON on fallback — pick the newest of both.
+  local json; json=$(ls -t "$EXPORT_DIR"/*-full-*.json "$EXPORT_DIR"/*-delta-*.json 2>/dev/null | head -1)
   ok "export written: $json ($(du -h "$json" | cut -f1))"
   echo "$json"
 }
@@ -186,6 +189,27 @@ import_graph() {
   ok "imported into graph '$graph'"
 }
 
+# ── resync: incremental (delta) re-export + import of an existing graph ──────
+# usage: resync <project-dir> <graph-name> [--frontend]
+#
+# Same graph name as the original index — delta is keyed on it
+# (~/.onelens/graphs/<graph>/.onelens-lastexport). First-ever run on a graph has
+# no marker → falls back to full automatically. Delta re-collection is Java-only
+# (DeltaTracker filters to .java); a frontend project has no delta path, so
+# --frontend forces a full re-export (correct, just not incremental).
+resync() {
+  local proj="${1:?project dir}"; local graph="${2:?graph name}"; local flag="${3:-}"
+  if [ "$flag" = "--frontend" ]; then
+    warn "frontend project — delta is Java-only; doing a FULL re-export"
+    local json; json=$(export_project "$proj" --frontend | tail -1)
+  else
+    local json; json=$(ONELENS_DELTA=true export_project "$proj" | tail -1)
+  fi
+  import_graph "$json" "$graph"
+  verify "$graph"
+  ok "resync DONE ($graph)"
+}
+
 # ── verify ──────────────────────────────────────────────────────────────────
 verify() {
   local graph="$1"
@@ -201,13 +225,16 @@ onelens-headless.sh — headless OneLens on a no-IDE server
 
   $0 preflight
   $0 engine
-  $0 all <project-dir> <graph-name> [--frontend]      # full flow
+  $0 all <project-dir> <graph-name> [--frontend]      # full flow (new index)
+  $0 resync <project-dir> <graph-name> [--frontend]   # delta re-sync (Java; else full)
   $0 export <project-dir> [--frontend]
   $0 import <export.json> <graph-name>
   $0 verify <graph-name>
 
 Backend (Maven/Spring):   $0 all /opt/myapp-server     myapp
 Frontend (Vue/npm):       $0 all /opt/myapp-frontend   myapp-frontend --frontend
+Re-sync after edits:      $0 resync /opt/myapp-server  myapp
+New graph for a branch:   $0 all /opt/myapp-server     myapp-feature-x
 
 Required: ONELENS_LICENSE_KEY=/path/to/your/idea.key (you place the key on the
 server — it is a credential). See the KEY TRICK section at the top of this file.
@@ -221,6 +248,7 @@ case "$cmd" in
   engine)    engine ;;
   export)    export_project "$@" >/dev/null ;;
   import)    import_graph "$@" ;;
+  resync)    resync "$@" ;;
   verify)    verify "$@" ;;
   all)
     proj="${1:?project dir}"; graph="${2:?graph name}"; flag="${3:-}"
