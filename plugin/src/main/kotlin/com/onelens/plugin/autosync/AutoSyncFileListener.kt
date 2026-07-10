@@ -8,6 +8,7 @@ import com.intellij.openapi.vfs.newvfs.events.VFileDeleteEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileMoveEvent
 import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent
+import com.onelens.plugin.export.delta.DeltaTracker
 import com.onelens.plugin.framework.workspace.WorkspaceLoader
 
 /**
@@ -53,7 +54,7 @@ class AutoSyncFileListener : BulkFileListener {
     }
 
     private fun handleModify(file: VirtualFile) {
-        if (!file.name.endsWith(".java")) return
+        if (!DeltaTracker.isTracked(file.name)) return
         if (EXCLUDED_DIRS.any { file.path.contains(it) }) return
         val project = ProjectLocator.getInstance().guessProjectForFile(file) ?: return
         val service = project.getService(AutoSyncService::class.java) ?: return
@@ -68,7 +69,7 @@ class AutoSyncFileListener : BulkFileListener {
 
     private fun handleDelete(file: VirtualFile?, oldPath: String? = null) {
         val path = oldPath ?: file?.path ?: return
-        if (!path.endsWith(".java")) return
+        if (!DeltaTracker.isTracked(path)) return
         if (EXCLUDED_DIRS.any { path.contains(it) }) return
         // Deleted file: no VirtualFile remaining → resolve project via parent.
         val project = file?.let { ProjectLocator.getInstance().guessProjectForFile(it) }

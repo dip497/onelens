@@ -1675,3 +1675,43 @@ frontend ever incrementally re-synced (Vue still full-only), so the export-side
 Also revisit if a second React meta-framework (Remix/TanStack Start) lands — the
 route-tree synthesiser should then generalise rather than fork again.
 
+## ADR-037 · 2026-07 · Next delta = re-collect + replace-subgraph, not scoped collection
+
+**Decision.** Incremental sync for Next.js does NOT introduce a scoped-delta
+`Collector` SPI. Instead: (a) the export side widens change *detection* past
+`.java` and re-collects the **whole** `nextjs` section on every delta; (b) the
+import side **replaces the Next subgraph wholesale** for that wing
+(`DeltaLoader._replace_nextjs`) rather than diffing per file.
+
+**Context.** The `Collector` SPI has only a full-pass `collect(ctx)`; adding
+`collect(ctx, changedFiles)` and routing changed files through `detect()` is the
+"proper" language-agnostic delta (see `delta-language-agnostic.md`). But measured
+on a real Next monorepo the Next collectors run in **~3 s**, while the export as a
+whole takes ~3.5 min — the cost is IntelliJ *indexing*, not collection. A scoped
+collector would save ~3 s and add a whole SPI. The import side likewise: the Next
+subgraph is ~500 nodes and re-imports in ~1.5 s, so a wing-scoped
+`DETACH DELETE` + re-insert is cheaper to write and impossible to get subtly wrong
+than per-file cascade bookkeeping.
+
+**Alternatives.** (1) Scoped-delta Collector SPI — rejected for now: large refactor,
+~3 s payoff. (2) Per-file cascade delete on import — rejected: needs a file→nodes
+map and a deleted-file list on the frontend side; the wholesale replace is correct
+by construction. (3) Leave Next full-export-only — rejected: a `.tsx` edit silently
+left the graph stale, which is the bug users actually hit.
+
+**Consequences / ceilings.** Shared JS labels (`JsModule`, `JsFunction`, `ApiCall`)
+are only wing-deleted when the graph is Next-only (`"nextjs" in adapters and "vue3"
+not in`); on a mixed Vue+Next graph the replace MERGE-upserts and warns, so stale JS
+modules can linger — the upgrade is a `source` stamp per adapter. `Endpoint` is never
+wing-deleted (Spring shares the label and PK).
+
+**Also fixed here.** The delta doc carried no `workspace` header, so the importer
+stamped `wing = graph_name` while a full import stamped `wing = workspace.graphId`.
+Wing-scoped replaces then deleted nothing and re-inserted under a second wing. This
+had been silently corrupting **Java/Spring** delta too (`Endpoint.wing`, which the
+cross-stack `HITS` bridge filters on). `DeltaDocument` now mirrors the full header.
+
+**Revisit when.** Collection time (not indexing) dominates an export — e.g. a
+frontend with 50k+ modules — or when Vue is also wired into delta and the shared-JS
+label ownership needs a real `source` discriminator.
+

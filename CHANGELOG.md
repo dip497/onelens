@@ -7,6 +7,43 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Next.js / React adapter · Phase 4 · delta export side (2026-07)
+
+- **Next.js is the first frontend wired into delta.** `DeltaTracker` no longer filters
+  git-diff to `.java` (now `java/kt/ts/tsx/js/jsx/mjs/vue` via `isTracked`), and
+  `AutoSyncFileListener` fires a debounced sync on `.tsx` saves — editing a component no
+  longer reports "NoChanges" and leaves the graph stale.
+- `DeltaExportService` emits a full `nextjs` section on delta. ponytail: a full Next
+  re-collect is ~3 s (the slow part of an export is IntelliJ indexing, not collection), so
+  no scoped-delta Collector SPI was built. Upgrade when collection time dominates.
+
+### Fixed — delta `wing` stamp mismatch (2026-07)
+
+- A delta export carried no `workspace` header, so the importer resolved `wing = graph_name`
+  while a full import resolved `wing = workspace.graphId`. Wing-scoped replaces then deleted
+  nothing and re-inserted under a second wing — a component removed from the source survived
+  the delta. `DeltaDocument` now mirrors the full export's `workspace` header.
+  This also repairs **Java/Spring** delta, whose `Endpoint.wing` drifted the same way (the
+  cross-stack `HITS` bridge filters on `Endpoint.wing IS NOT NULL`).
+
+### Added — Next.js / React adapter · Phase 4 · delta import (2026-07)
+
+- **`DeltaLoader._replace_nextjs`** — incremental imports now update the Next.js
+  subgraph instead of leaving it stale. The delta's `nextjs` section is a full
+  re-collect (cheap on the Kotlin side), so the loader replaces it wholesale:
+  wing-scoped `DETACH DELETE` of the Next-exclusive labels (Route, Page, Layout,
+  SpecialFile, ReactComponent, ServerAction, RouteHandler, CustomHook, Hook,
+  ContextProvider, Middleware) then re-runs the existing `GraphLoader._load_nextjs`
+  mapping. Fixes stale `ReactComponent`/`Route`/etc. that previously survived a
+  delta and forced a `--clear`.
+- Shared-with-Vue labels (`JsModule`, `JsFunction`, `ApiCall`) are deleted only
+  when the graph is Next-only (`nextjs` in adapters, `vue3` absent). On a mixed
+  Vue+Next graph the loader MERGE-upserts them and logs a warning that stale
+  shared JS nodes may linger (known ceiling — needs a per-node `source` stamp).
+- Under `--context`, the Next ChromaDB drawers (`reactcomponent:`, `page:`,
+  `serveraction:`, `customhook:`) are purged by prefix and re-mined, so semantic
+  retrieval tracks the delta.
+
 ### Added — Next.js / React adapter · Phase 3 · actions, handlers, hooks, context (2026-07)
 
 - **Server actions** — module-level and **inline** `"use server"` (directive as the first
