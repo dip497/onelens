@@ -38,7 +38,11 @@ import java.nio.file.Paths
 object ReactComponentCollector {
     private val LOG = logger<ReactComponentCollector>()
     private val EXTS = setOf("tsx", "jsx", "ts", "js")
-    private val JSX_TEXT_HINT = Regex("""</|/>|<[A-Z]""")
+    // Real-JSX evidence only: a closing tag (`</`) or a self-closing tag (`/>`).
+    // The old `<[A-Z]` alternative matched TypeScript generics — `new Map<String, Foo>()`,
+    // `useState<User>()`, `React.FC<Props>` — so any PascalCase-named exported function in
+    // a .ts file (where the JSX PSI is absent) was emitted as a phantom ReactComponent.
+    private val JSX_TEXT_HINT = NextPsiUtil.JSX_MARKER
 
     fun collect(project: Project, ctx: NextjsContext) {
         if (DumbService.isDumb(project)) {
@@ -49,7 +53,7 @@ object ReactComponentCollector {
         val scope = ctx.workspace.scope(project)
         val files = smartRead(project) {
             types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
-                .filterNot { JsFileTypes.isVendorPath(it.path) }
+                .filterNot { JsFileTypes.isVendorFile(it, ctx) }
                 .filter { (it.extension?.lowercase() ?: "") in EXTS }
         }
         val psiManager = PsiManager.getInstance(project)

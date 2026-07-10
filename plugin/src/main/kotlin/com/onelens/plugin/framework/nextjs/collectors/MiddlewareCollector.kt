@@ -38,7 +38,7 @@ object MiddlewareCollector {
         val scope = ctx.workspace.scope(project)
         val files = smartRead(project) {
             types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
-                .filterNot { JsFileTypes.isVendorPath(it.path) }
+                .filterNot { JsFileTypes.isVendorFile(it, ctx) }
                 .filter { it.nameWithoutExtension == "middleware" && (it.extension?.lowercase() ?: "") in EXTS }
         }
         if (files.isEmpty()) return

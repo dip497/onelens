@@ -22,7 +22,14 @@ import com.onelens.plugin.framework.workspace.WorkspaceLoader
 class AutoSyncFileListener : BulkFileListener {
 
     // Skip changes in build output / generated directories
-    private val EXCLUDED_DIRS = setOf("/build/", "/target/", "/out/", "/.gradle/", "/.idea/")
+    // `node_modules` / `.next` / `dist` matter now that isTracked() accepts JS/TS
+    // extensions: a single `npm install` writes thousands of tracked .js files and
+    // would otherwise schedule a debounced delta sync (+ full Spring re-scan) for each.
+    // `.java` never lived in node_modules, so this was unreachable before.
+    private val EXCLUDED_DIRS = setOf(
+        "/build/", "/target/", "/out/", "/.gradle/", "/.idea/",
+        "/node_modules/", "/.next/", "/.nuxt/", "/.turbo/", "/dist/", "/coverage/",
+    )
 
     override fun after(events: MutableList<out VFileEvent>) {
         for (event in events) {

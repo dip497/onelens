@@ -38,6 +38,38 @@ Last updated: 2026-06.
 | N11 | `ky` / `fetch` in `CLIENT_NAMES` so App-Router data calls surface as `ApiCall` (P1 had `apiCalls=0` → now 16) | ✅ | `jscommon/ApiCallCollector` (bare `fetch(url,{method})` + `ky`) |
 | N13 | `CALLS_API` joins only 2/16 ApiCalls — module-level / arrow callers aren't emitted as `JsFunction`, so the caller-fqn join drops | ⬜ | follow-up — `JsModuleCollector` caller coverage |
 
+### Phase N — post-merge code review (high effort, 2026-07)
+
+Fixed in `<review-fix>`:
+
+| ID | Finding | Status |
+|---|---------|--------|
+| NR1 | `isVendorPath` took the ABSOLUTE path → a checkout under `~/out/` or `/builds/dist/` silently emitted an EMPTY JS subgraph. Now `isVendorFile(vf, sink)` relativizes first | ✅ |
+| NR2 | `next_only` mixed-graph guard was dead — delta export never emitted `"vue3"`, so a Next delta `DETACH DELETE`d Vue's shared JsModule/JsFunction/ApiCall | ✅ |
+| NR3 | `SpringLoader.apply_delta` did a global unfiltered `MATCH (e:Endpoint) DETACH DELETE e`; now that Next reuses `Endpoint`, a single-wing delta wiped other wings' endpoints. Wing-scoped | ✅ |
+| NR4 | `AutoSyncFileListener.EXCLUDED_DIRS` lacked `node_modules`/`.next`/`dist` → one `npm install` storms the debounced sync | ✅ |
+| NR5 | `rendersJsx`'s `<[A-Z]` textual probe matched TS generics (`Map<String,Foo>`) → phantom `ReactComponent` nodes | ✅ |
+| NR6 | `jsxTagNames` ran its regex unconditionally (not as a fallback) → bogus `RENDERS` from `useQuery<TodoList>()` | ✅ |
+| NR7 | `isAsync` substring-matched, so `function asyncLoad()` was stamped `isAsync=true` | ✅ |
+| NR8 | Zero tests for ~2,200 lines. Added `NextjsPureLogicTest` (13 pure-logic cases, no platform fixture) pinning computeUrl / isVendorPath / JSX_MARKER / isTracked | ✅ |
+
+Open (logged, not fixed):
+
+| ID | Finding | Status |
+|---|---------|--------|
+| NR9 | Next `Endpoint` is never wing-deleted on delta → a removed route handler leaves an orphan Endpoint forever | ⬜ |
+| NR10 | `Endpoint` MERGEs on `id` only; in a multi-wing graph a Next endpoint sharing a path with a Spring one overwrites its `wing`, and `bridge_http`'s `a.wing <> e.wing` guard then silently drops the HITS edge | ⬜ |
+| NR11 | `Hook` PK is `name` (global). Two frontends in one graph share the node; a wing-scoped delete on one destroys the other's `USES_HOOK` edges | ⬜ |
+| NR12 | Chroma delta purge assumes the collection is per-wing; two apps under one `--graph` purge each other's Next drawers | ⬜ |
+| NR13 | `_load_nextjs` uses a bare `m['filePath']` where siblings use `.get()` → KeyError aborts a half-written import | ⬜ |
+| NR14 | Multi-label edge passes (RENDERS/USES_HOOK/EXPOSED_BY) double-count when a `page.tsx` default export is both a `Page` and a `ReactComponent` with the same fqn | ⬜ |
+| NR15 | `isExported` only walks ancestors → `function Card(){}; export default Card;` is invisible. Latent: 0 occurrences in the validation repo | ⬜ |
+| NR16 | Anonymous inline server action gets fqn `<file>::default`, colliding with the Page's PK in the same file | ⬜ |
+| NR17 | Pages-router pass skips any path containing a segment named `app` (drops a legit `pages/app/settings.tsx`); `segs.indexOf("app")` takes the first match | ⬜ |
+| NR18 | `cli_generated.py` not regenerated after `mcp_server.py` changed — CLAUDE.md names the MCP server the CLI's source of truth | ⬜ |
+| NR19 | 11 collectors each re-run `FileTypeIndex.getFiles` + vendor filter over the same file set; enumerate once on the context | ⬜ |
+| NR20 | `_load_nextjs` duplicates ~130 lines of `_load_vue3`'s JS-common mapping (extensionless import resolution exists twice) | ⬜ |
+
 ## Embedder profiles · low-end CPU UX (2026-05-07 → 2026-05-08)
 
 | # | Feature | Status | Where |

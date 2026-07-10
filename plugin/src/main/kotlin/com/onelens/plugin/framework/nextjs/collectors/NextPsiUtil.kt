@@ -47,16 +47,34 @@ internal object NextPsiUtil {
             val head = jsx.name?.substringBefore('.')?.trim() ?: continue
             if (isPascalCase(head)) out += head
         }
-        for (m in JSX_TAG_RE.findAll(element.text)) {
+        if (out.isNotEmpty()) return out
+        // FALLBACK ONLY — when the JSX PSI is stub-elided. Running this unconditionally
+        // fabricated tags from type arguments (`useQuery<TodoList>()` → "TodoList") and
+        // string literals, producing RENDERS edges to components that are never rendered.
+        // `</` or `/>` must be present for the text to contain real JSX at all; generics
+        // (`Map<K, V>`, `React.FC<Props>`) contain neither.
+        val text = element.text
+        if (!JSX_MARKER.containsMatchIn(text)) return out
+        for (m in JSX_TAG_RE.findAll(text)) {
             val head = m.groupValues[1].substringBefore('.').trim()
             if (isPascalCase(head)) out += head
         }
         return out
     }
 
-    /** `async` modifier of a JSFunction, robust to arrow / expression forms. */
+    /** Real-JSX evidence: a closing tag or a self-closing tag. Generics have neither. */
+    internal val JSX_MARKER = Regex("""</|/>""")
+
+    /**
+     * `async` modifier of a JSFunction. Ask the PSI FIRST — the textual probe is only a
+     * fallback for expression forms the PSI flag misses. Testing text first made any
+     * function whose NAME contains "async" (`asyncLoad`, `useAsyncData`) report async.
+     */
     fun isAsync(fn: JSFunction): Boolean =
-        fn.text.substringBefore("(").contains("async") || fn.isAsync
+        fn.isAsync || ASYNC_KEYWORD.containsMatchIn(fn.text.substringBefore("("))
+
+    /** `async` as a standalone keyword, not a substring of an identifier. */
+    private val ASYNC_KEYWORD = Regex("""(^|[^A-Za-z0-9_$])async([^A-Za-z0-9_$]|$)""")
 
     /** Function source text, truncated to [MAX_BODY_CHARS]. */
     fun bodyText(fn: JSFunction): String = fn.text.take(MAX_BODY_CHARS)

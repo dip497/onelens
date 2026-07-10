@@ -48,7 +48,7 @@ object ServerActionCollector {
         val scope = ctx.workspace.scope(project)
         val files = smartRead(project) {
             types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
-                .filterNot { JsFileTypes.isVendorPath(it.path) }
+                .filterNot { JsFileTypes.isVendorFile(it, ctx) }
         }
         val psiManager = PsiManager.getInstance(project)
         for (vf in files) {

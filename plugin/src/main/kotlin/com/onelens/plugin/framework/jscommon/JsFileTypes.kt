@@ -24,5 +24,18 @@ object JsFileTypes {
      */
     private val VENDOR_DIR = Regex("""(^|/)(node_modules|\.next|\.nuxt|\.turbo|\.svelte-kit|dist|out|coverage|\.output)/""")
 
-    fun isVendorPath(path: String): Boolean = VENDOR_DIR.containsMatchIn(path)
+    /**
+     * True when [path] lies inside a vendored / generated directory.
+     *
+     * MUST be given a PROJECT-RELATIVE path. Passing an absolute path matches ancestor
+     * directories outside the project — a repo checked out at `~/out/app` or a CI
+     * workspace under `/builds/dist/` would match on every file and silently emit an
+     * EMPTY JS/TS subgraph with no error. Use [isVendorFile] when you hold a
+     * VirtualFile + the sink.
+     */
+    fun isVendorPath(relativePath: String): Boolean = VENDOR_DIR.containsMatchIn(relativePath)
+
+    /** Relativizes against the sink's project base before the vendor check. */
+    fun isVendorFile(file: com.intellij.openapi.vfs.VirtualFile, sink: JsCommonSink): Boolean =
+        isVendorPath(sink.relativize(java.nio.file.Paths.get(file.path)))
 }

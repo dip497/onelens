@@ -234,6 +234,18 @@ object DeltaExportService {
         // while `nextjs` carries the change — a valid delta, not NoChanges.
         var nextData: NextjsData? = null
         val activeAdapters = mutableListOf("spring-boot")
+        // Report Vue when it is present even though delta does not (yet) collect it.
+        // The importer's `_replace_nextjs` uses `"vue3" not in adapters` to decide whether
+        // the SHARED JsModule/JsFunction/ApiCall labels are safe to wing-delete. Omitting
+        // "vue3" here made that guard unreachable, so a Next delta on a Vue+Next graph
+        // DETACH DELETEd Vue's JS subgraph. Never drop this without fixing the importer.
+        try {
+            if (com.onelens.plugin.framework.vue3.Vue3Adapter().detect(project)) {
+                activeAdapters.add("vue3")
+            }
+        } catch (e: Throwable) {
+            LOG.warn("Vue detection during delta failed; assuming no Vue: ${e.message}")
+        }
         try {
             if (NextjsAdapter().detect(project)) {
                 val nextCtx = CollectContext(

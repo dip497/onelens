@@ -56,7 +56,7 @@ object ModuleNameBinder {
         // strict "read access must be inside read action" guard.
         val allFiles = smartRead(project) {
             types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
-                .filterNot { JsFileTypes.isVendorPath(it.path) }
+                .filterNot { JsFileTypes.isVendorFile(it, ctx) }
         }
 
         // File → { varName → literal } cache, rebuilt lazily per file.
