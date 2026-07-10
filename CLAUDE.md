@@ -68,6 +68,23 @@ pip install -e ".[context]"
 Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`, `EnumConstant`
 Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`, `RETURNS`, `THROWS`, `HAS_PARAMETER`, `READS_FIELD`, `WRITES_FIELD`, `INSTANTIATES`
 
+Frontend — shared JS/TS (Vue 3 + Next.js adapters, from `framework/jscommon/`):
+`JsModule`, `JsFunction`, `ApiCall` + `IMPORTS`, `IMPORTS_FN`, `HAS_FUNCTION`, `CALLS_API`, `HITS`
+(`HITS` is the cross-stack bridge: a frontend `ApiCall` → the Spring `Endpoint` it hits.)
+
+Next.js / React (v1.3+, `framework/nextjs/`) — App Router modelled as first-class nodes:
+- `Route` (PK `urlPath`; `(group)` stripped, `[param]`→`:param`, `[...x]`→`*x`), `Page`, `Layout`,
+  `SpecialFile` (`kind` = loading/error/not-found/global-error/template)
+- `ReactComponent` (`isClient`/`isServer` — the RSC boundary, from a module-level `"use client"`)
+- `ServerAction` (`scope` = module | **inline** — a `"use server"` directive as the first statement
+  of a function body), `RouteHandler` (+ a reused `Endpoint` so Next REST bridges to Spring)
+- `Hook` (PK `name`; `origin` = react | library | custom), `CustomHook`, `ContextProvider`, `Middleware`
+- Edges: `HAS_PAGE`, `HAS_LAYOUT`, `BOUNDARY_OF`, `CHILD_OF`, `RENDERS` (component composition,
+  resolved through the import graph), `USES_HOOK`, `EXPOSED_BY`, `PROVIDES_CONTEXT`, `INTERCEPTS`
+- Vue's Pinia-store collector has no React analogue; `ContextProvider` replaces it.
+- Delta: Next re-collects its whole section (~3 s) and the importer replaces that subgraph
+  wing-scoped — see ADR-037. Vue is still full-export-only.
+
 Data-flow edges (Tier-1 enrichment, v1.2+) — from `DataFlowCollector`'s method-body PSI walk (`plugin/.../collectors/DataFlowCollector.kt`), 100% type-accurate (resolves `this.x` vs shadowing locals vs inherited fields):
 - `READS_FIELD` / `WRITES_FIELD {line}` (Method → Field) — "who reads `cache`", "who mutates `order.status`". Project fields only (external field access drops). Read/write split via PSI `isAccessedForWriting`.
 - `INSTANTIATES {line}` (Method → Class) — "who `new`s a `RestTemplate`" — the non-DI object-creation graph (complements `INJECTS`). Anonymous classes resolve to their named base.
