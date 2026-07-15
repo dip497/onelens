@@ -1163,12 +1163,17 @@ class GraphLoader:
             "lineStart", "lineEnd", "body", "wing",
         ])
 
-        # Endpoint — REUSE the Spring Endpoint label. The export carries `fqn`
-        # ("<METHOD>:<urlPath>") which is the same identity Spring stores in `id`,
-        # so we MERGE on `id` (the indexed PK) and only SET method/path. A Spring
-        # Endpoint sharing the path is matched, not clobbered — only the two Next
-        # props are written; Spring's httpMethod/handler stay put.
-        endpoints = [{"id": e.get("fqn", ""), "method": e.get("method", ""),
+        # Endpoint — a Next route-handler endpoint is DISTINCT from a Spring one even
+        # when the "<METHOD>:<urlPath>" string matches (different service, different
+        # wing). MERGE on the bare fqn would collapse the Next endpoint into the Spring
+        # node and OVERWRITE its `wing` (wing is in the SET list), which then breaks
+        # bridge_http's cross-wing `a.wing <> e.wing` HITS guard for BOTH wings. So the
+        # Next endpoint id is wing-qualified. bridge_http matches on `path`, so the
+        # cross-stack frontend->backend bridge is unaffected; Spring's (unqualified) id
+        # is never touched. HANDLES below uses the same qualified id.
+        def _next_ep_id(fqn: str) -> str:
+            return f"{fqn}@{wing}"
+        endpoints = [{"id": _next_ep_id(e.get("fqn", "")), "method": e.get("method", ""),
                       "path": e.get("path", ""), "wing": wing}
                      for e in nextjs.get("endpoints", []) or []]
         self._batch_nodes(progress, "Next Endpoints", endpoints, "Endpoint", "id", [
@@ -1196,8 +1201,8 @@ class GraphLoader:
             "filePath", "matchers", "wing",
         ])
 
-        # HANDLES (Endpoint → RouteHandler)
-        handles = [{"endpointFqn": e.get("endpointFqn", ""), "handlerFqn": e.get("handlerFqn", "")}
+        # HANDLES (Endpoint → RouteHandler) — match the wing-qualified Next endpoint id.
+        handles = [{"endpointFqn": _next_ep_id(e.get("endpointFqn", "")), "handlerFqn": e.get("handlerFqn", "")}
                    for e in nextjs.get("handles", []) or []]
         if handles:
             self._batch_edges_simple(

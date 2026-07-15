@@ -58,7 +58,7 @@ Open (logged, not fixed):
 | ID | Finding | Status |
 |---|---------|--------|
 | NR9 | Next `Endpoint` is never wing-deleted on delta → a removed route handler leaves an orphan Endpoint forever | ⬜ |
-| NR10 | `Endpoint` MERGEs on `id` only; in a multi-wing graph a Next endpoint sharing a path with a Spring one overwrites its `wing`, and `bridge_http`'s `a.wing <> e.wing` guard then silently drops the HITS edge | ⬜ |
+| NR10 | `Endpoint` MERGEd on `id` only; in a multi-wing graph a Next endpoint sharing a path with a Spring one overwrote its `wing`, silently dropping the HITS edge. Next endpoint id is now wing-qualified (`<fqn>@<wing>`); Spring's untouched, `bridge_http` matches on `path` so the bridge is unaffected. Verified: two distinct nodes, Spring wing preserved | ✅ |
 | NR11 | `Hook` PK is `name` (global). Two frontends in one graph share the node; a wing-scoped delete on one destroys the other's `USES_HOOK` edges | ⬜ |
 | NR12 | Chroma delta purge assumes the collection is per-wing; two apps under one `--graph` purge each other's Next drawers | ⬜ |
 | NR13 | `_load_nextjs` uses a bare `m['filePath']` where siblings use `.get()` → KeyError aborts a half-written import | ⬜ |
@@ -66,7 +66,7 @@ Open (logged, not fixed):
 | NR15 | `isExported` only walks ancestors → `function Card(){}; export default Card;` is invisible. Latent: 0 occurrences in the validation repo | ⬜ |
 | NR16 | Anonymous inline server action gets fqn `<file>::default`, colliding with the Page's PK in the same file | ⬜ |
 | NR17 | Pages-router pass skips any path containing a segment named `app` (drops a legit `pages/app/settings.tsx`); `segs.indexOf("app")` takes the first match | ⬜ |
-| NR18 | `cli_generated.py` not regenerated after `mcp_server.py` changed — CLAUDE.md names the MCP server the CLI's source of truth | ⬜ |
+| NR18 | `cli_generated.py` not regenerated after `mcp_server.py` changed — CLAUDE.md names the MCP server the CLI's source of truth. Regenerated via `scripts/regen_cli.sh`; Next.js schema now in `onelens query --help` + `SKILL.md` | ✅ |
 | NR19 | 11 collectors each re-run `FileTypeIndex.getFiles` + vendor filter over the same file set; enumerate once on the context | ⬜ |
 | NR20 | `_load_nextjs` duplicates ~130 lines of `_load_vue3`'s JS-common mapping (extensionless import resolution exists twice) | ⬜ |
 
