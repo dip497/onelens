@@ -63,7 +63,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Python: `_load_nextjs` maps the 6 new labels + 5 new edges; `Endpoint` MERGEs on the shared
   `id` PK so Spring endpoints are matched, never clobbered. schema/FTS, search branches,
   `_mine_server_actions` / `_mine_custom_hooks`, and `mcp_server` docs updated.
-- Verified E2E on `manageark-web`: 40 Hook / 8 ContextProvider / 16 ApiCall / 2 CustomHook /
+- Verified E2E on `the validation repo`: 40 Hook / 8 ContextProvider / 16 ApiCall / 2 CustomHook /
   1 inline ServerAction; 43 USES_HOOK, 15 RENDERS, 8 PROVIDES_CONTEXT. Route handlers and
   middleware are zero-target-safe on a repo that has none.
 
@@ -86,7 +86,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `SpecialFile`/`ReactComponent` + the four edge types; `schema.py` gains RANGE +
   FTS indexes; `queries.py`/`analysis.py` gain `reactcomponent`/`page`/`route`
   search; `code_miner` embeds component + page bodies; `mcp_server` status/docs updated.
-- Verified E2E on `manageark-web`: 24 Route / 24 Page / 4 Layout / 6 SpecialFile /
+- Verified E2E on `the validation repo`: 24 Route / 24 Page / 4 Layout / 6 SpecialFile /
   50 ReactComponent (26 client) / 11 RENDERS, all queryable in FalkorDB.
 
 ### Added — Next.js / React adapter · Phase 1 (2026-07)
@@ -104,14 +104,14 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   dependency). `.jsx`/`.tsx` added to the file-type scan.
 - **Vendored-dir exclusion** (`JsFileTypes.isVendorPath`) — `node_modules`,
   `.next`, `.turbo`, `dist`, `out`, … are dropped from every JS/TS enumeration.
-  A real `manageark-web` export went from 96 % `node_modules` noise (7,399
+  A real `the validation repo` export went from 96 % `node_modules` noise (7,399
   modules, 114 s) to 289 app/package modules in 3 s.
 - **Python `NextLoader._load_nextjs`** — maps the `nextjs` export section into the
   reused `JsModule` / `JsFunction` / `ApiCall` labels + `HAS_FUNCTION` /
   `IMPORTS` / `CALLS_API` edges, so trace/impact/search and the cross-stack
   `HITS` bridge (frontend call → Spring `Endpoint`) work with no schema change.
   `python/.../importer/loader.py`.
-- Verified end-to-end on `manageark-web`: 289 `JsModule` / 125 `JsFunction` /
+- Verified end-to-end on `the validation repo`: 289 `JsModule` / 125 `JsFunction` /
   325 `IMPORTS` queryable in FalkorDB. (P2 adds routes, React components, RSC
   boundary; P3 adds server actions / route handlers / hooks; P4 wires delta.)
 

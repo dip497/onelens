@@ -1,12 +1,12 @@
 # PLAN — Next.js / React FrameworkAdapter
 
-Status: **DRAFT — awaiting approval**. Target validation repo: `~/Desktop/manageark-web`
+Status: **DRAFT — awaiting approval**. Target validation repo: `~/Desktop/<next-app>`
 (Next 16, React 19, App Router, pnpm+turbo monorepo, 12 packages).
 
 ## Context
 
 OneLens today ships exactly two `FrameworkAdapter`s — `SpringBootAdapter` (Java) and
-`Vue3Adapter` (Vue SFC frontends). A **Next.js/React** frontend (e.g. `manageark-web`)
+`Vue3Adapter` (Vue SFC frontends). A **Next.js/React** frontend (e.g. `the validation repo`)
 has **no adapter**: pointed at it, the Vue collectors emit ~0 useful nodes and the graph
 is a shallow file list — no routes, no components, no client/server boundary, no
 frontend→backend call bridge. This plan adds a first-class `NextjsAdapter` as a peer,
@@ -17,7 +17,7 @@ Decisions locked with the user:
 - **Scope: comprehensive** — routes, RSC server/client boundary + propagation, server
   actions (module + inline), route handlers, hooks (origin-classified), Context
   providers, TanStack-Query bridge, middleware. Collectors that have no target in
-  `manageark-web` (0 route handlers, 0 module-level server actions) are still built,
+  `the validation repo` (0 route handlers, 0 module-level server actions) are still built,
   but must tolerate absence gracefully (emit nothing, never crash).
 - **Delta: wired now** — Next nodes participate in incremental `delta-import` + cascade
   delete. This makes Next.js the **first** frontend wired into the delta path (Vue is
@@ -199,7 +199,7 @@ guarded by extension, so it stays correct for `.tsx`.)
   `NextjsAdapter.detect()`, `NextjsCollector` running only the reused JsModule/ApiCall
   collectors over `.tsx/.jsx`, `ExportModels`+`ExportService`+`plugin.xml` wiring,
   `NextLoader.load_full` for JsModule/JsFunction/ApiCall/IMPORTS + HITS bridge.
-  *Exit:* export manageark-web headless → import → `onelens_status` shows JsModule/
+  *Exit:* export the validation repo headless → import → `onelens_status` shows JsModule/
   JsFunction/ApiCall counts + HITS edges to any Spring graph.
 - **P2 — Route tree + components + RSC boundary.** RouteTree/ReactComponent/Directive
   collectors; new labels + schema/FTS; loader mapping; `queries.search` + `analysis`
@@ -220,9 +220,9 @@ guarded by extension, so it stays correct for `.tsx`.)
   (a handful of `app/` route files, one `"use client"`, one inline `"use server"`,
   one `ky` call). Kotlin: collector tests asserting node/edge counts (test-author agent).
 - **End-to-end (real repo):**
-  `scripts/onelens-headless.sh all ~/Desktop/manageark-web manageark-web --frontend`
+  `scripts/onelens-headless.sh all ~/Desktop/<next-app> the validation repo --frontend`
   (frontend content-root path; delta uses `resync`). Then:
-  - `onelens_status --graph manageark-web` → non-zero Route/ReactComponent/ServerAction.
+  - `onelens_status --graph the validation repo` → non-zero Route/ReactComponent/ServerAction.
   - `onelens_query "MATCH (r:Route) RETURN count(r)"` ≈ 30 (page count).
   - `onelens_search "PersonRecordForm" --node-type reactcomponent`.
   - Client/server: `MATCH (c:ReactComponent {isClient:true}) RETURN count(c)` ≈ 26.
