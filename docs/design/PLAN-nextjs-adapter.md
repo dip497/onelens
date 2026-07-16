@@ -80,7 +80,7 @@ New edges: `HAS_PAGE`, `HAS_LAYOUT`, `BOUNDARY_OF`, `CHILD_OF`, `WRAPS`, `RENDER
 
 FQN conventions (keep identical to the JS side so edges interop):
 - symbol: `<repo-relative-path>::<exportName>`
-- route: URL path (`/admin/persons/:id`), groups stripped, `[x]`→`:x`, `[...x]`→`*x`
+- route: URL path (`/admin/users/:id`), groups stripped, `[x]`→`:x`, `[...x]`→`*x`
 - endpoint (route handler): `<METHOD>:<path>` (matches Spring `Endpoint` format → HITS)
 - ChromaDB drawer ids: `reactcomponent:<fqn>`, `route:<urlPath>`, `serveraction:<fqn>`,
   `routehandler:<METHOD>:<path>` (prefix convention is mandatory — retrieval snippet
@@ -224,7 +224,7 @@ guarded by extension, so it stays correct for `.tsx`.)
   (frontend content-root path; delta uses `resync`). Then:
   - `onelens_status --graph the validation repo` → non-zero Route/ReactComponent/ServerAction.
   - `onelens_query "MATCH (r:Route) RETURN count(r)"` ≈ 30 (page count).
-  - `onelens_search "PersonRecordForm" --node-type reactcomponent`.
+  - `onelens_search "UserProfileForm" --node-type reactcomponent`.
   - Client/server: `MATCH (c:ReactComponent {isClient:true}) RETURN count(c)` ≈ 26.
   - Cross-stack: `MATCH (a:ApiCall)-[:HITS]->(e:Endpoint) RETURN a,e` once a Spring graph
     for the gateway exists (or assert `CALLS_API` to external prefixes otherwise).
