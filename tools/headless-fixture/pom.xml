@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal Maven project for headless-export verification.
+     Role 1: SpringBootAdapter.detect() requires a build marker at root.
+     Role 2: src/main/java (Maven convention) is where Greeter/Counter live;
+     the Maven import on open registers it as a source root.
+     To force headless IntelliJ to auto-link the Maven project (otherwise it
+     shows an "unlinked project" notification and never indexes), set
+     external.system.link.unlinked.projects=AUTO via the sandbox
+     idea.properties (see headlessExport task) or open the project with the
+     -Dexternal.system.link.unlinked.projects=AUTO JVM flag. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.onelens</groupId>
+  <artifactId>headless-fixture</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <packaging>jar</packaging>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+</project>

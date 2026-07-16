@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# OneLens pre-commit hook.
+#
+# Enforces:
+#   1. No client / company-specific names leak into staged content
+#      (block list at `.claude/hooks/client-names.txt`).
+#   2. Plugin Kotlin compiles when plugin sources change
+#      (catches CLI-rename / adapter refactor regressions before CI).
+#   3. Reminder when plugin/python code changes without a matching
+#      `docs/PROGRESS.md` or `CHANGELOG.md` update (warning only).
+#
+# Install (one-time, per clone):
+#   git config core.hooksPath .githooks
+#
+# Bypass (emergency only):
+#   git commit --no-verify        # not recommended
+#
+# The hook is intentionally conservative — it fails on the first hard
+# violation and continues past warnings.
+set -euo pipefail
+
+RED=$'\e[31m'; YEL=$'\e[33m'; GRN=$'\e[32m'; CLR=$'\e[0m'
+die() { echo "${RED}pre-commit: $*${CLR}" >&2; exit 1; }
+warn() { echo "${YEL}pre-commit: $*${CLR}" >&2; }
+ok()  { echo "${GRN}pre-commit: $*${CLR}" >&2; }
+
+# 0. What's staged?
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [[ -z "$STAGED" ]]; then
+  ok "no staged files, skipping."
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# 1. Client-name block list check (mirrors the runtime hook).
+BLOCK_LIST=".claude/hooks/client-names.txt"
+if [[ -f "$BLOCK_LIST" ]]; then
+  # Build a single alternation regex from the list, skipping blanks + comments.
+  PATTERNS="$(grep -vE '^\s*(#|$)' "$BLOCK_LIST" || true)"
+  if [[ -n "$PATTERNS" ]]; then
+    # Scan staged diff only — existing gitignored files don't block commits.
+    # Use -z to handle newlines in filenames and patch context correctly.
+    HIT=""
+    while IFS= read -r pattern; do
+      [[ -z "$pattern" ]] && continue
+      if git diff --cached --no-color -U0 | grep -qiE "^\+.*${pattern}"; then
+        HIT="${HIT}  - ${pattern}"$'\n'
+      fi
+    done <<<"$PATTERNS"
+    if [[ -n "$HIT" ]]; then
+      die "staged diff introduces forbidden client name(s):
+$HIT
+Rewrite to a generic reference (see .claude/hooks/client-names.txt).
+To see exactly where, run:  git diff --cached | grep -niE '<name>'"
+    fi
+  fi
+fi
+ok "client-name check passed."
+
+# 2. Kotlin compile when plugin source changed.
+if echo "$STAGED" | grep -qE '^plugin/.*\.(kt|kts|xml|gradle\.kts|properties)$'; then
+  ok "plugin sources changed — running ./gradlew compileKotlin"
+  (cd plugin && ./gradlew compileKotlin -q 2>&1 | tail -20)
+  ok "plugin compiles."
+fi
+
+# 3. Tracker-drift warning (non-blocking).
+if echo "$STAGED" | grep -qE '^(plugin|python)/.*\.(kt|py)$'; then
+  if ! echo "$STAGED" | grep -qE '^(CHANGELOG\.md|docs/PROGRESS\.md|docs/DECISIONS\.md)$'; then
+    warn "plugin/python source changed but no CHANGELOG.md / docs/PROGRESS.md / docs/DECISIONS.md updates staged."
+    warn "if the change is too small to track, note it in the commit message; otherwise update the trackers first."
+    warn "(warning only — commit proceeds)"
+  fi
+fi
+
+ok "all checks passed."
+exit 0

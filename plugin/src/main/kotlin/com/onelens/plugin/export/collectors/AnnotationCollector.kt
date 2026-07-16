@@ -5,21 +5,34 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.export.AnnotationUsage
 import com.onelens.plugin.export.ClassData
+import com.onelens.plugin.framework.workspace.Workspace
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Collects all annotation usages across classes, methods, and fields.
  * Processes per-class in small ReadAction blocks.
+ *
+ * Each usage carries two attribute views:
+ * - `params` — legacy map of raw attribute text, kept so the pre-1.1 Python
+ *   importer keeps working unchanged.
+ * - `attributes` — JSON-encoded map of resolved values via [ExpressionResolver].
+ *   Arrays, class literals (as FQN), enum refs (as name), and nested annotations
+ *   are preserved structurally. Unresolvable values serialize as `<dynamic>`.
  */
 object AnnotationCollector {
 
     private val LOG = logger<AnnotationCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>): List<AnnotationUsage> {
+    private val JSON: Json = Json { encodeDefaults = true }
+
+    fun collect(project: Project, classes: List<ClassData>, workspace: Workspace): List<AnnotationUsage> {
         val facade = JavaPsiFacade.getInstance(project)
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = workspace.scope(project)
         val result = mutableListOf<AnnotationUsage>()
 
         for (classData in classes) {
@@ -55,11 +68,37 @@ object AnnotationCollector {
         if (modifierList == null) return
         for (annotation in modifierList.annotations) {
             val annotationFqn = annotation.qualifiedName ?: continue
+
             val params = mutableMapOf<String, String>()
+            val resolved = mutableMapOf<String, JsonElement>()
+            // `attrValues` mirrors `resolved` but only for primitive values —
+            // the loader promotes each key to an `attr_<key>` edge property
+            // for direct WHERE-clause queries (`WHERE r.attr_value = '/foo'`).
+            // Arrays, objects, nested annotations stay JSON-only in
+            // `attributes` since they don't fit in a scalar edge property.
+            val attrValues = mutableMapOf<String, String>()
             for (attr in annotation.parameterList.attributes) {
-                params[attr.name ?: "value"] = attr.value?.text ?: ""
+                val name = attr.name ?: "value"
+                params[name] = attr.value?.text ?: ""
+                val resolvedValue = ExpressionResolver.resolveAnnotationValue(attr.value)
+                resolved[name] = resolvedValue
+                if (resolvedValue is JsonPrimitive) {
+                    // `.content` strips JSON quotes for strings; is the canonical
+                    // literal for numbers/booleans (e.g. `42`, `true`).
+                    attrValues[name] = resolvedValue.content
+                }
+                // Arrays / objects intentionally not flattened — stay in JSON.
             }
-            result.add(AnnotationUsage(targetFqn, targetKind, annotationFqn, params))
+            val attributes = try {
+                JSON.encodeToString(JsonObject.serializer(), JsonObject(resolved))
+            } catch (_: Throwable) { "{}" }
+
+            result.add(
+                AnnotationUsage(
+                    targetFqn, targetKind, annotationFqn,
+                    params, attributes, attrValues,
+                )
+            )
         }
     }
 

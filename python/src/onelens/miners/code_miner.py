@@ -16,6 +16,16 @@ Performance (measured on RTX A2000 4GB, large Spring monorepo, 2026-04):
 import json
 import logging
 import time
+
+# Fast-path JSON parse — same pattern as the loader. code_miner reads the
+# same 500 MB+ export when `--context` is on, so the stdlib vs orjson gap
+# is ~8 s per sync.
+try:
+    import orjson as _orjson
+    _USE_ORJSON = True
+except ImportError:  # pragma: no cover
+    _orjson = None
+    _USE_ORJSON = False
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +45,35 @@ MAX_JAVADOC_CHARS = 500
 # Trivial method patterns — skip these (no semantic value, ~45% of codebase)
 _TRIVIAL_PREFIXES = ("get", "set", "is", "has", "can")
 _TRIVIAL_NAMES = {"toString", "hashCode", "equals", "clone", "finalize"}
+
+import re as _re_imports
+
+_JS_IMPORT_RE = _re_imports.compile(
+    r"^\s*import\s+(?:type\s+)?(?:[^;\n]+?)\s+from\s+['\"][^'\"]+['\"];?\s*$",
+    _re_imports.MULTILINE,
+)
+_JS_SIDE_IMPORT_RE = _re_imports.compile(
+    r"^\s*import\s+['\"][^'\"]+['\"];?\s*$", _re_imports.MULTILINE
+)
+
+
+def _strip_js_imports(src: str) -> str:
+    """Remove ES6 import statements from a Vue body before embedding.
+
+    Dogfood measurements (on a 2516-component Vue3 frontend corpus):
+      - raw body (no strip):   77% NaN rate from Qwen3 ONNX FP16
+      - stripped:              40% NaN rate
+    Both leak NaN due to the underlying Qwen3 ONNX CUDA FP16 precision
+    bug (HF Qwen3 discussion, ORT #11384/#15752), but stripping imports
+    nearly halves the failure rate by giving the encoder slightly more
+    varied, non-boilerplate tokens. Not a fix — a mitigation.
+    """
+    if not src:
+        return ""
+    out = _JS_IMPORT_RE.sub("", src)
+    out = _JS_SIDE_IMPORT_RE.sub("", out)
+    out = _re_imports.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 def _clean_javadoc(raw: str | None) -> str:
@@ -106,9 +145,14 @@ class CodeMiner:
 
         print(f"Loading JSON ({export_path.name})...", flush=True)
         t1 = time.time()
-        with open(export_path) as f:
-            data = json.load(f)
-        print(f"  JSON loaded in {time.time() - t1:.1f}s — "
+        with open(export_path, "rb") as f:
+            raw = f.read()
+        if _USE_ORJSON:
+            data = _orjson.loads(raw)
+        else:
+            data = json.loads(raw.decode("utf-8"))
+        print(f"  JSON loaded in {time.time() - t1:.1f}s "
+              f"[{'orjson' if _USE_ORJSON else 'stdlib'}] — "
               f"{len(data.get('methods', []))} methods, "
               f"{len(data.get('classes', []))} classes, "
               f"{len(data.get('callGraph', []))} call edges", flush=True)
@@ -131,6 +175,14 @@ class CodeMiner:
         stats["methods"] = self._mine_methods(data)
         stats["classes"] = self._mine_classes(data)
         stats["endpoints"] = self._mine_endpoints(data)
+
+        # Vue 3 — additive: only runs when the export carries a vue3 subdoc.
+        # Drawers share the metadata schema with Java nodes (wing/room/hall/fqn/
+        # type/importance/filed_at) so retrieval's wing+room filters work.
+        if data.get("vue3"):
+            stats["vue_components"] = self._mine_vue_components(data["vue3"])
+            stats["vue_composables"] = self._mine_vue_composables(data["vue3"])
+            stats["vue_stores"] = self._mine_vue_stores(data["vue3"])
 
         total_time = time.time() - t0
         total_drawers = sum(stats.values())
@@ -158,7 +210,11 @@ class CodeMiner:
             self._class_methods[cls_fqn].append(fqn)
 
         # Endpoints
-        spring = data.get("spring", {})
+        # `data.get("spring", {})` returns None when the key exists with an
+        # explicit null value (Vue-only exports where the Spring adapter is
+        # inactive). `or {}` normalizes to an empty dict so downstream
+        # `.get("endpoints")` doesn't AttributeError.
+        spring = data.get("spring") or {}
         for ep in spring.get("endpoints", []):
             handler = ep.get("handlerMethodFqn", "")
             http = ep.get("httpMethod", "")
@@ -441,7 +497,7 @@ class CodeMiner:
             }
 
         # Endpoints
-        for ep in data.get("spring", {}).get("endpoints", []):
+        for ep in (data.get("spring") or {}).get("endpoints", []):
             http = ep.get("httpMethod", "")
             path = ep.get("path", "")
             handler = ep.get("handlerMethodFqn", "")
@@ -769,7 +825,7 @@ class CodeMiner:
 
     def _mine_endpoints(self, data: dict) -> int:
         """Mine all REST endpoints into ChromaDB. Returns count."""
-        all_endpoints = data.get("spring", {}).get("endpoints", [])
+        all_endpoints = (data.get("spring") or {}).get("endpoints", [])
         existing = self._get_existing_ids("endpoint:")
 
         def _ep_id(ep):
@@ -825,4 +881,149 @@ class CodeMiner:
 
         elapsed = time.time() - t_start
         print(f"  Endpoints done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    # ── Vue 3 ─────────────────────────────────────────────────────────────
+    #
+    # Separate mining pass for Vue nodes. Kept small on purpose — just enough
+    # to let semantic retrieval find components/stores/composables by intent.
+    # The Kotlin side already truncated `body` fields to 2000 chars.
+
+    def _vue_room(self, file_path: str) -> str:
+        """Relative directory path used as the drawer's `room` metadata key."""
+        if not file_path:
+            return ""
+        norm = file_path.replace("\\", "/")
+        idx = norm.rfind("/")
+        return norm[:idx] if idx > 0 else ""
+
+    def _mine_vue_components(self, vue3: dict) -> int:
+        components = [c for c in vue3.get("components", []) if c.get("filePath")]
+        existing = self._get_existing_ids("component:")
+        components = [c for c in components if f"component:{c['filePath']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(components)} Vue components ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for comp in components:
+            fp = comp["filePath"]
+            name = comp.get("name", "")
+            body = _strip_js_imports((comp.get("body") or "").strip())
+            doc = f"// Component: {name}\n// File: {fp}\n{body}" if body else f"// Component: {name}\n// File: {fp}"
+            drawer_id = f"component:{fp}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "component",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Components done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    def _mine_vue_composables(self, vue3: dict) -> int:
+        items = [c for c in vue3.get("composables", []) if c.get("fqn")]
+        existing = self._get_existing_ids("composable:")
+        items = [c for c in items if f"composable:{c['fqn']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(items)} Vue composables ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for comp in items:
+            fqn = comp["fqn"]
+            name = comp.get("name", "")
+            fp = comp.get("filePath", "")
+            body = _strip_js_imports((comp.get("body") or "").strip())
+            doc = f"// Composable: {name}\n// File: {fp}\n{body}" if body else f"// Composable: {name}\n// File: {fp}"
+            drawer_id = f"composable:{fqn}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "composable",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Composables done: {done} in {elapsed:.1f}s", flush=True)
+        return done
+
+    def _mine_vue_stores(self, vue3: dict) -> int:
+        stores = [s for s in vue3.get("stores", []) if s.get("id")]
+        # Multiple files can declare `defineStore('id', ...)` with the same
+        # id (feature modules registering per-module substores under a
+        # shared name). ChromaDB rejects a batch containing duplicate ids,
+        # so dedupe by `store:<id>` here — first row wins.
+        seen_sid: set[str] = set()
+        deduped: list[dict] = []
+        for s in stores:
+            if s["id"] in seen_sid:
+                continue
+            seen_sid.add(s["id"])
+            deduped.append(s)
+        stores = deduped
+        existing = self._get_existing_ids("store:")
+        stores = [s for s in stores if f"store:{s['id']}" not in existing]
+        batch_size = getattr(self, "_actual_batch", BATCH_SIZE)
+        print(f"Mining {len(stores)} Vue stores ({len(existing)} already indexed)...", flush=True)
+
+        documents, ids, metadatas = [], [], []
+        done = 0
+        t_start = time.time()
+        for store in stores:
+            sid = store["id"]
+            name = store.get("name", "")
+            fp = store.get("filePath", "")
+            body = _strip_js_imports((store.get("body") or "").strip())
+            doc = f"// Store: {sid} (export {name})\n// File: {fp}\n{body}" if body else f"// Store: {sid} (export {name})\n// File: {fp}"
+            drawer_id = f"store:{sid}"
+            documents.append(doc)
+            ids.append(drawer_id)
+            metadatas.append({
+                "wing": self.graph_name,
+                "room": self._vue_room(fp),
+                "hall": HALL_CODE,
+                "fqn": drawer_id,
+                "type": "store",
+                "importance": 0.0,
+                "filed_at": datetime.now().isoformat(),
+            })
+            if len(documents) >= batch_size:
+                self._flush_batch(documents, ids, metadatas)
+                done += len(documents)
+                documents, ids, metadatas = [], [], []
+        if documents:
+            self._flush_batch(documents, ids, metadatas)
+            done += len(documents)
+
+        elapsed = time.time() - t_start
+        print(f"  Stores done: {done} in {elapsed:.1f}s", flush=True)
         return done

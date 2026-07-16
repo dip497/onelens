@@ -5,8 +5,8 @@
 OneLens runs **entirely on the user's machine** by design. The
 plugin reads source via IntelliJ PSI, the Python CLI reads
 exported JSON and writes to a local FalkorDB (port `17532`) and
-local ChromaDB. The embedding and rerank models (Qwen3 and mxbai)
-run locally on CPU or GPU.
+local ChromaDB. The embedding and rerank models (Jina-v2-base-code by default,
+plus mxbai-rerank-base) run locally on CPU or GPU.
 
 Surfaces that matter:
 

@@ -1,0 +1,10 @@
+<idea-plugin>
+    <!-- Vue 3 framework adapter.
+         Loaded only when org.jetbrains.plugins.vue is available (WebStorm or
+         any IDE with the Vue plugin installed). The Vue3Adapter will be
+         registered in Phase B once collectors exist. -->
+
+    <extensions defaultExtensionNs="com.onelens.plugin">
+        <frameworkAdapter implementation="com.onelens.plugin.framework.vue3.Vue3Adapter"/>
+    </extensions>
+</idea-plugin>

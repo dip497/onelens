@@ -1,61 +1,99 @@
 """
-mcp_server.py — FastMCP v3 server exposing all OneLens operations as tools.
+mcp_server.py — single unified FastMCP server for OneLens.
 
-This is the single source of truth for the CLI and for MCP agents. The
-companion CLI (`cli_generated.py`) is auto-generated from this server's tool
-schemas via `fastmcp generate-cli mcp_server.py cli_generated.py`.
+All tools live here under the `onelens_*` prefix. There is no longer a
+separate `onelens-palace` server — the palace business modules
+(`onelens.palace.kg`, `onelens.palace.drawers`, `onelens.palace.diary`, …)
+are imported directly and exposed here.
 
-Run the server (HTTP mode, serves both CLI and agents):
+Design rules:
+1. Single namespace. Every MCP tool is prefixed `onelens_`.
+2. No pure-Cypher wrappers. If a tool is ≤10 lines of Cypher, it belongs in
+   the skill as a documented pattern, not as a tool. Dedicated tools earn
+   their place by doing real computation the caller can't trivially do in
+   Cypher — embedding / rerank / time-bucket / cross-wing similarity.
+3. `onelens_status` is the wake-up primitive. Every session starts here. It
+   returns `capabilities` flags the skill's decision tree branches off of.
+4. `graph` is a first-class parameter on every data tool. Same tool works
+   on code graphs (`myapp`) and on the palace memory graph
+   (`onelens_palace_kg`).
+
+Run the server:
+    fastmcp run onelens.mcp_server:mcp                       # stdio
     fastmcp run onelens.mcp_server:mcp --transport http --port 8765
 
-Run as stdio (one-shot, used by generated CLI when no daemon is up):
-    fastmcp run onelens.mcp_server:mcp
-
-Warm-path note: models (Qwen3 embedder, mxbai reranker) and graph DB handles
-are cached at module level. In HTTP mode, first request triggers load; every
-subsequent request is ~200ms.
+Warm state (embedder + reranker + DB handles) is cached at module level so
+long-lived HTTP servers answer in ~200 ms after the first hit.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+# Max length of per-hit `snippet` in onelens_retrieve responses. ~5 lines
+# at 24 chars/line — enough to disambiguate hits without shipping full
+# method bodies. Agent uses Read tool at file_path+line range for full code.
+MAX_SNIPPET_CHARS = 600
+
 from fastmcp import FastMCP
+
+# Palace business modules are imported eagerly — they're small, no model
+# weights or sockets held at import time.
+from onelens.palace import diary as diary_mod
+from onelens.palace import drawers as drawers_mod
+from onelens.palace import kg as kg_mod
+from onelens.palace import tunnels as tunnels_mod
 
 logger = logging.getLogger(__name__)
 
 
+# ── Lifespan + warm state ────────────────────────────────────────────────────
+
+
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    """Warm embedder + reranker on startup when running as a long-lived daemon.
+    """Optional warm-up when daemonised; no-op in stdio one-shot mode.
 
-    Gated by ONELENS_WARM_ON_START=1 so one-shot stdio subprocesses (used by
-    the generated CLI per call) don't pay the ~30s load tax for structural
-    commands that never touch embeddings. The daemon (`onelens daemon start`)
-    sets this env so `retrieve` / `search --semantic` are warm.
+    Gated by ONELENS_WARM_ON_START=1 so per-CLI-command stdio subprocesses
+    don't pay the ~30s embedder load for structural queries that don't use
+    it. The `onelens daemon start` command sets the env var.
     """
     if os.environ.get("ONELENS_WARM_ON_START") == "1":
         import time
 
         t0 = time.time()
-        logger.info("Warming embedder + reranker...")
+        logger.info("Warming embedder + reranker…")
+        # Warm several batch shapes, not just batch=1. The local ORT path
+        # builds TRT engines per input shape and caches them at
+        # `~/.onelens/trt-cache/` — first encounter costs 30-90 s per shape.
+        # Production retrieval hits shape=1 (user query) and shape≈30 (top-K
+        # rerank). Priming both now puts the first real user query on a warm
+        # engine. For Modal / OpenAI the extra calls are harmless cheap HTTP.
+        WARMUP_EMBED_SHAPES = [1, 32]
+        WARMUP_RERANK_K = 30
         try:
-            from onelens.context.embedder import QwenEmbedder
+            from onelens.context.embed_backends import get_embedder
 
-            _STATE["embedder"] = QwenEmbedder()
-            _STATE["embedder"].encode(["warmup"])
+            embedder = get_embedder()
+            _STATE["embedder"] = embedder
+            for n in WARMUP_EMBED_SHAPES:
+                embedder.encode(["public User findById(Long id)"] * n)
         except Exception as e:
             logger.warning("Embedder warmup failed: %s", e)
         try:
-            from onelens.context.reranker import get_default_reranker
-            from onelens.context.retrieval import RetrievalHit
+            from onelens.context.embed_backends import get_reranker
 
-            reranker = get_default_reranker()
-            reranker.rerank("warmup", [RetrievalHit(fqn="x", type="method", score=0.0, snippet="t")], top_k=1)
+            reranker = get_reranker()
+            reranker.score(
+                "how does authentication work",
+                ["public User authenticateUser(String u, String p)"] * WARMUP_RERANK_K,
+            )
             _STATE["reranker"] = reranker
         except Exception as e:
             logger.warning("Reranker warmup failed: %s", e)
@@ -66,11 +104,7 @@ async def lifespan(server: FastMCP):
 
 mcp = FastMCP("onelens", lifespan=lifespan)
 
-# ── Module-level warm state ──────────────────────────────────────────────────
-
-_STATE: dict[str, Any] = {
-    "db_handles": {},  # (backend, graph, db_path) -> GraphDB
-}
+_STATE: dict[str, Any] = {"db_handles": {}}  # (backend, graph, db_path) → GraphDB
 
 
 def _get_db(backend: str, graph: str, db_path: str):
@@ -89,9 +123,7 @@ def _get_db(backend: str, graph: str, db_path: str):
             graph_name=graph,
         )
     elif backend == "falkordb":
-        db = create_backend(
-            backend, host="localhost", port=17532, graph_name=graph
-        )
+        db = create_backend(backend, host="localhost", port=17532, graph_name=graph)
     elif backend == "neo4j":
         db = create_backend(backend, uri="bolt://localhost:7687")
     else:
@@ -104,43 +136,444 @@ def _get_db(backend: str, graph: str, db_path: str):
     return db
 
 
-# ── Import / graph lifecycle ─────────────────────────────────────────────────
+# The labels `onelens_status` probes. Order matters only for readability of
+# the returned counts dict; derived flags use explicit key lookups.
+_KNOWN_LABELS = [
+    # Core code nodes
+    "Class", "Method", "Field", "EnumConstant", "Annotation", "Module",
+    # Apps + packages
+    "App", "Package",
+    # Spring / JPA
+    "SpringBean", "SpringAutoConfig", "Endpoint",
+    "JpaEntity", "JpaColumn", "JpaRepository",
+    # SQL surface
+    "SqlQuery", "Migration", "SqlStatement",
+    # Tests
+    "TestCase",
+    # Vue3
+    "Component", "Composable", "Store", "Route", "ApiCall",
+    "JsModule", "JsFunction",
+    # Memory (palace graph)
+    "Wing", "Room", "Hall", "Drawer", "Concept",
+]
+
+
+def _probe_count(db, label: str) -> int:
+    try:
+        r = db.query(f"MATCH (n:{label}) RETURN count(n) AS cnt")
+        return int(r[0]["cnt"]) if r else 0
+    except Exception:
+        return 0
+
+
+def _probe_edge_counts(db) -> dict[str, int]:
+    """Return {edge_type: count} across the whole graph, sorted desc by count."""
+    try:
+        rows = db.query("MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS cnt")
+        pairs = [(row["t"], int(row["cnt"])) for row in rows]
+        pairs.sort(key=lambda p: p[1], reverse=True)
+        return dict(pairs)
+    except Exception:
+        return {}
+
+
+# ── 0. Init / first-run setup ────────────────────────────────────────────────
 
 
 @mcp.tool
-def import_graph(
+def onelens_init(
+    graph: str = "onelens",
+    backend: Literal["falkordb", "falkordblite"] = "falkordblite",
+    export_path: str | None = None,
+) -> dict:
+    """One-command setup: create the graph, import an export (if provided),
+    and verify the installation.
+
+    If [export_path] is provided, imports the JSON (full or delta — auto-detected)
+    into the specified graph. If not provided, just creates an empty graph and
+    returns status.
+
+    This is the fastest path from "just installed" to "querying my codebase":
+    ```
+    onelens call-tool onelens_init \\
+      --export-path /tmp/exports/myproject-full.json \\
+      --graph myproject
+    ```
+    """
+    result: dict[str, Any] = {"graph": graph, "backend": backend}
+
+    if export_path:
+        # Delegate to onelens_import (auto-detects full vs delta).
+        imp = onelens_import(
+            export_path=export_path, graph=graph, backend=backend,
+            context=False, clear=True,
+        )
+        result["import"] = imp
+        result["mode"] = imp.get("mode", "unknown")
+    else:
+        # Just touch the graph so it exists.
+        db = _get_db(backend, graph, "~/.onelens/graphs")
+        result["message"] = f"Graph '{graph}' ready (empty). Import an export to populate."
+
+    # Return status.
+    status = onelens_status(graph=graph, backend=backend)
+    result["status"] = status
+    return result
+
+
+# ── 1. Wake-up ───────────────────────────────────────────────────────────────
+
+
+@mcp.tool
+def onelens_status(
+    graph: str = "onelens",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
+    db_path: str = "~/.onelens/graphs",
+) -> dict:
+    """Session wake-up. First tool to call in every session.
+
+    Returns capabilities + node counts so the skill's decision tree knows
+    which subsequent tools to invoke (semantic retrieve vs FTS search,
+    SQL-surface queries vs code-only, …). Works on any graph — code
+    graphs, Vue3 graphs, and the palace memory graph alike.
+    """
+    db = _get_db(backend, graph, db_path)
+    counts = {lbl: _probe_count(db, lbl) for lbl in _KNOWN_LABELS}
+    counts = {k: v for k, v in counts.items() if v > 0}  # drop empty labels from payload
+    edge_counts = _probe_edge_counts(db)  # {type: count}, sorted desc
+
+    # Semantic layer probe — ChromaDB drawer for this wing must exist.
+    has_semantic = False
+    try:
+        from onelens.context.config import OneLensContextConfig
+
+        cfg = OneLensContextConfig()
+        ctx_path = Path(cfg.context_path(graph))
+        # ChromaDB dir has a `chroma.sqlite3` when initialised.
+        if (ctx_path / "chroma.sqlite3").exists():
+            has_semantic = True
+    except Exception:
+        has_semantic = False
+
+    capabilities = {
+        "has_structural": counts.get("Class", 0) + counts.get("Method", 0) > 0,
+        "has_semantic": has_semantic,
+        "has_spring": counts.get("SpringBean", 0) > 0,
+        "has_jpa": counts.get("JpaEntity", 0) > 0,
+        "has_sql": counts.get("SqlQuery", 0) + counts.get("Migration", 0) > 0,
+        "has_tests": counts.get("TestCase", 0) > 0,
+        "has_vue3": counts.get("Component", 0) > 0,
+        "has_memory": counts.get("Drawer", 0) + counts.get("Concept", 0) > 0,
+        "has_apps": counts.get("App", 0) > 0,
+    }
+
+    total = sum(counts.values())
+    payload: dict = {
+        "protocol": "onelens/v1",
+        "graph": graph,
+        "backend": backend,
+        "capabilities": capabilities,
+        "counts": counts,
+        "edge_counts": edge_counts,
+        "total_nodes": total,
+        "total_edges": sum(edge_counts.values()),
+    }
+    # When the requested graph is empty (or the user guessed wrong), surface the
+    # full list of indexed graphs on disk so the caller can pick the right one
+    # instead of inventing names.
+    if total == 0:
+        payload["available_graphs"] = _list_indexed_graphs(db_path)
+    return payload
+
+
+def _list_indexed_graphs(db_path: str) -> list[dict]:
+    """Enumerate indexed graph dirs with populated rdb files (falkordblite)."""
+    root = Path(db_path).expanduser()
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        rdb = child / f"{child.name}.rdb"
+        try:
+            size = rdb.stat().st_size if rdb.exists() else 0
+        except OSError:
+            size = 0
+        # 2 KB redislite stub → skip. Populated graphs are MB+.
+        if size > 10_000:
+            out.append({"graph": child.name, "rdb_bytes": size})
+    return out
+
+
+# ── 2. Universal Cypher ──────────────────────────────────────────────────────
+
+
+@mcp.tool
+def onelens_query(
+    cypher: str,
+    graph: str = "onelens",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
+    db_path: str = "~/.onelens/graphs",
+    limit: int = 100,
+) -> list[dict]:
+    """Run raw Cypher queries against the code knowledge graph for graph traversal.
+
+    Use this for: impact analysis ("what breaks if I change X?"), execution
+    traces ("trace /api/users"), dependency chains ("who injects AuthService?"),
+    dead code detection, cross-stack queries (Vue to Spring via HITS edges),
+    entry-point enumeration, and any question about relationships between nodes.
+
+    ## Graph schema — nodes
+
+    Java/Spring: Class {fqn, name, kind, filePath, superClass, packageName},
+    Method {fqn, name, classFqn, returnType, body, visibility, isStatic, isConstructor, external},
+    Field {fqn, name, type}, Endpoint {path, httpMethod}, SpringBean {name, classFqn, scope},
+    Module {name}, Package {name}, Annotation {fqn, name}
+
+    Vue 3: Component {fqn, name, filePath, props, emits, isTest},
+    Store {fqn, name, id, state, getters, actions, isTest},
+    Composable {fqn, name, body}, Route {name, path, fullPath},
+    ApiCall {method, path, callerFqn}, JsFunction {fqn, name, filePath, body},
+    JsModule {filePath, name}
+
+    ## Graph schema — edges
+
+    CALLS (Method→Method), HAS_METHOD (Class→Method), HAS_FIELD (Class→Field),
+    EXTENDS (Class→Class), IMPLEMENTS (Class→Class), OVERRIDES (Method→Method),
+    HANDLES (Class→Endpoint), INJECTS (Class→SpringBean),
+    ANNOTATED_WITH (Class/Method→Annotation), READS_FIELD (Method→Field),
+    WRITES_FIELD (Method→Field), INSTANTIATES (Method→Class),
+    USES_STORE (Component→Store), USES_COMPOSABLE (Component→Composable),
+    CALLS_API (Component→ApiCall), DISPATCHES (Route→Component),
+    IMPORTS (JsModule→JsModule/JsFunction),
+    HITS (ApiCall→Endpoint — cross-stack: Vue API call matches Spring endpoint)
+
+    ## FalkorDB Cypher rules
+
+    - No `=~` regex. Use CONTAINS, STARTS WITH, ENDS WITH.
+    - No variable-length paths (`[:CALLS*1..3]`). Use explicit hops.
+    - Properties are camelCase: fqn, filePath, classFqn, returnType.
+    - Always include LIMIT. Filter `WHERE n.external IS NULL` for project code only.
+
+    ## Common patterns
+
+    Impact: `MATCH (caller:Method)-[:CALLS]->(t:Method) WHERE t.classFqn CONTAINS 'UserService' RETURN caller.fqn`
+    Trace: `MATCH (e:Endpoint {path:'/api/users'})<-[:HANDLES]-(c) MATCH (c)-[:HAS_METHOD]->(m)-[:CALLS]->(callee) RETURN callee.name`
+    Cross-stack: `MATCH (comp:Component)-[:CALLS_API]->(a:ApiCall)-[:HITS]->(e:Endpoint) RETURN comp.name, e.path`
+    Dead code: `MATCH (m:Method) WHERE m.external IS NULL AND NOT ()-[:CALLS]->(m) RETURN m.fqn`
+    """
+    db = _get_db(backend, graph, db_path)
+    result = db.query(cypher) or []
+    return [
+        {k: (v if isinstance(v, (str, int, float, bool, type(None))) else str(v))
+         for k, v in row.items()}
+        for row in result[:limit]
+    ]
+
+
+# ── 3. Full-text search ──────────────────────────────────────────────────────
+
+
+@mcp.tool
+def onelens_search(
+    query: str,
+    graph: str = "onelens",
+    node_type: str = "",
+    n_results: int = 20,
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
+    db_path: str = "~/.onelens/graphs",
+) -> list[dict]:
+    """Search the code knowledge graph using RediSearch full-text syntax.
+
+    Searches across ALL node types (Java classes/methods/endpoints, Vue
+    components/stores/composables/routes, JS functions/modules) when node_type
+    is empty, or filters to one type when specified.
+
+    ## Search syntax (RediSearch)
+
+    - Prefix: `auth*` (matches authenticate, authorize, authentication)
+    - Fuzzy: `%passwor%` (matches password, passwd, passw0rd)
+    - Union: `login|signin|authenticate` (any term)
+    - Phrase: `"password encryption"` (exact contiguous)
+    - Intersection: `password encryption` (both terms, any field)
+    - Wildcard: `*` (match all — use with node_type to list everything)
+
+    ## node_type values
+
+    Empty string "" = search all types. Otherwise:
+    Java/Spring: "class", "method", "endpoint", "springbean", "field"
+    Vue 3: "component", "store", "composable", "route", "apicall", "jsfunction", "jsmodule"
+
+    ## Scoring
+
+    Results ranked by BM25: name (10x) > javadoc/path/id (3-8x) > body (1x).
+
+    ## Return format
+
+    Each result: {type, fqn, name, file} — compact, no full bodies.
+    Use Read tool on file to see source code.
+
+    ## Examples
+
+    onelens_search("UserService", node_type="class") — find specific class
+    onelens_search("auth*") — all auth-related methods
+    onelens_search("password encryption") — methods mentioning both words
+    onelens_search("ticket*", node_type="component") — Vue components for tickets
+    onelens_search("*", node_type="store") — list all Pinia stores
+    """
+    from onelens.graph.analysis import search_code
+
+    db = _get_db(backend, graph, db_path)
+    return search_code(db, query, node_type)[:n_results]
+
+
+# ── 4. Hybrid retrieval (kept for backward compat — prefer onelens_search) ──
+
+
+@mcp.tool
+def onelens_retrieve(
+    query: str,
+    graph: str = "onelens",
+    n_results: int = 10,
+    fanout: int = 50,
+    rerank: bool = True,
+    rerank_pool: int = 100,
+    project_root: str = "",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
+    db_path: str = "~/.onelens/graphs",
+) -> list[dict]:
+    """**Primary tool for natural-language search over the code graph.**
+    Hybrid FTS + semantic embedding + optional cross-encoder rerank.
+
+    Returns a **compact** ranked list — enough to navigate, not full bodies.
+    The agent then uses the built-in `Read` tool on `file_path` at the
+    returned line range to see the actual code. Keeps responses small
+    (each hit ≈ 30-50 tokens) so many candidates fit in a single call.
+
+    ## Use this when
+
+    - You don't know exact file locations yet.
+    - The question is conceptual: *"how does X work"*, *"where is Y handled"*,
+      *"which class does Z"*, *"what logs SLA breaches"*.
+    - You want cross-cutting code that spans multiple layers (REST → service
+      → repository).
+
+    ## Use something else when
+
+    - Exact name / FQN / pattern search → `onelens_search` (cheaper FTS).
+    - Call-graph, impact, polymorphism, inheritance → `onelens_query` (Cypher).
+    - Reading one specific method by FQN → `onelens_query`, then `Read` on the
+      returned file_path.
+
+    ## Query tips
+
+    - 5-15 tokens. One action verb + one domain term minimum.
+    - Describe *what the code does*, not keywords alone.
+    - **Good:** `"REST endpoint that creates a ticket"`,
+      `"JPA query that joins users and roles"`,
+      `"how remote deployment gets cancelled"`.
+    - **Bad:** `"ticket"` (too short), `"Foo class"` (use `onelens_search`),
+      a full paragraph (signal gets diluted).
+
+    ## Gated on has_semantic
+
+    Check `onelens_status.capabilities.has_semantic` first. If false, the
+    collection isn't embedded yet — fall back to `onelens_search` until a
+    sync with `context=true` has run.
+
+    ## Result shape (compact)
+
+    Each hit returns:
+    - `fqn`: fully-qualified name
+    - `file_path`, `line_start`, `line_end`: navigable location
+    - `snippet`: first ~5 lines of the method body (enough to disambiguate)
+    - `score`: RRF score from FTS + semantic fusion
+    - `rerank_score`: cross-encoder score (0-1) when `rerank=true`
+    - `rank_fts`, `rank_semantic`: original per-signal ranks
+    - `type`: `method` | `class` | `endpoint`
+
+    **Full method bodies are NOT returned.** Use the built-in `Read` tool
+    with `file_path` + line range when you need the code. This keeps the
+    per-call token footprint small (~250 tokens for 8 hits vs ~3000 with
+    bodies).
+    """
+    from onelens.context.config import OneLensContextConfig
+    from onelens.context.retrieval import hybrid_retrieve
+
+    if not project_root:
+        project_root = os.environ.get("ONELENS_PROJECT_ROOT", "")
+
+    config = OneLensContextConfig()
+    db = _get_db(backend, graph, db_path)
+    hits = hybrid_retrieve(
+        query,
+        graph=graph,
+        db=db,
+        context_path=config.context_path(graph),
+        n_results=n_results,
+        fanout=fanout,
+        include_snippets=True,    # snippet is the whole point — always on
+        include_neighbors=False,  # compact mode; use `onelens_query` for graph
+        rerank=rerank,
+        rerank_pool=rerank_pool,
+        project_root=project_root,
+    )
+    return [
+        {
+            "fqn": h.fqn, "type": h.type,
+            "score": h.score, "rerank_score": h.rerank_score,
+            "file_path": h.file_path, "line_start": h.line_start, "line_end": h.line_end,
+            "snippet": (h.snippet or "")[:MAX_SNIPPET_CHARS],
+            "rank_fts": h.rank_fts, "rank_semantic": h.rank_semantic,
+        }
+        for h in hits
+    ]
+
+
+# ── 5. Imports (writes — rarely called by agents) ────────────────────────────
+
+
+@mcp.tool
+def onelens_import(
     export_path: str,
     graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
     db_path: str = "~/.onelens/graphs",
     clear: bool = False,
     context: bool = False,
 ) -> dict:
-    """Import an export JSON (auto-detects full vs delta) into the knowledge graph.
+    """Import an export JSON (auto-detects full vs delta).
 
-    Set context=True to also index methods/classes into ChromaDB for semantic search.
+    `context=True` also runs the ChromaDB semantic mining pass so
+    `onelens_retrieve` works afterwards.
     """
-    import json
+    import json as _json
+
+    try:
+        import orjson as _orjson
+        _use_orjson = True
+    except ImportError:
+        _orjson = None
+        _use_orjson = False
 
     path = Path(export_path).expanduser()
-    with open(path) as f:
-        header = json.load(f)
+    with open(path, "rb") as f:
+        raw = f.read()
+    header = _orjson.loads(raw) if _use_orjson else _json.loads(raw.decode("utf-8"))
     export_type = header.get("exportType", "full")
-
     db = _get_db(backend, graph, db_path)
 
-    if export_type == "delta":
-        from onelens.importer.delta_loader import DeltaLoader
+    # Redirect stdout to stderr — FastMCP stdio uses stdout as the JSON-RPC
+    # channel, so any `print` / `rich.Progress` in the loader pollutes it.
+    with contextlib.redirect_stdout(sys.stderr):
+        if export_type == "delta":
+            from onelens.importer.delta_loader import DeltaLoader
 
-        loader = DeltaLoader(db)
-        # Delta path delegates context mining to the loader itself — it knows
-        # how to cascade-delete removed drawers and upsert only the changed
-        # methods/classes via CodeMiner's deterministic IDs. Calling
-        # CodeMiner.mine(path) here would be wrong: `mine` expects a full
-        # export JSON shape, not a delta.
-        stats = loader.apply_delta(path, graph_name=graph, context=context)
-        result = {"mode": "delta", "stats": stats}
-    else:
+            loader = DeltaLoader(db)
+            stats = loader.apply_delta(path, graph_name=graph, context=context)
+            return {"mode": "delta", "stats": stats}
+
         from onelens.importer.loader import GraphLoader
 
         loader = GraphLoader(db)
@@ -153,331 +586,397 @@ def import_graph(
             from onelens.miners.code_miner import CodeMiner
 
             miner = CodeMiner(graph)
-            ctx_stats = miner.mine(path)
-            result["context"] = ctx_stats
+            result["context"] = miner.mine(path)
 
+        return result
+
+
+@mcp.tool
+def onelens_reindex_semantic(
+    graph: str = "onelens",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
+    db_path: str = "~/.onelens/graphs",
+) -> dict:
+    """Rebuild ChromaDB embeddings for an already-imported graph.
+
+    Skips the graph import step entirely. Use when:
+      - `Clean Up → Reset semantic` wiped ChromaDB and you don't want to
+        pay the full graph re-import cost (~5 min on big repos).
+      - You swapped the embedder (Jina ↔ OpenAI) and need to re-embed in
+        the new vector space; the graph itself is unchanged.
+
+    Finds the newest `<graph>-full-*.json` in `~/.onelens/exports/` and
+    replays `CodeMiner.mine()` against it. Requires `[context]` extras.
+    """
+    import glob as _glob
+    exports_dir = Path("~/.onelens/exports").expanduser()
+    matches = sorted(
+        _glob.glob(str(exports_dir / f"{graph}-full-*.json")),
+        key=lambda p: Path(p).stat().st_mtime,
+        reverse=True,
+    )
+    if not matches:
+        return {
+            "status": "error",
+            "reason": f"No full export found at {exports_dir}/{graph}-full-*.json. "
+                      "Run `onelens_import` first to produce one.",
+        }
+    export_path = matches[0]
+    from onelens.miners.code_miner import CodeMiner
+    miner = CodeMiner(graph_name=graph)
+    result = miner.mine(Path(export_path))
+    result["export_used"] = export_path
     return result
 
 
 @mcp.tool
-def delta_import(
+def onelens_delta_import(
     delta_path: str,
     graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
+    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",
     db_path: str = "~/.onelens/graphs",
+    context: bool = False,
 ) -> dict:
-    """Apply a delta export to an existing graph."""
+    """Apply a delta export explicitly (bypasses the auto-detect in onelens_import)."""
     from onelens.importer.delta_loader import DeltaLoader
 
     db = _get_db(backend, graph, db_path)
     loader = DeltaLoader(db)
-    return {"stats": loader.apply_delta(Path(delta_path).expanduser())}
-
-
-@mcp.tool
-def stats(
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-) -> dict:
-    """Return node counts per label for a graph."""
-    from onelens.graph.db import NODE_TYPES
-
-    db = _get_db(backend, graph, db_path)
-    counts: dict[str, int] = {}
-    for nt in NODE_TYPES:
-        try:
-            result = db.query(f"MATCH (n:{nt}) RETURN count(n) AS cnt")
-            counts[nt] = int(result[0]["cnt"]) if result else 0
-        except Exception:
-            counts[nt] = 0
-    return {"graph": graph, "nodes": counts, "total": sum(counts.values())}
-
-
-# ── Raw query ────────────────────────────────────────────────────────────────
-
-
-@mcp.tool
-def query(
-    cypher: str,
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-    limit: int = 100,
-) -> list[dict]:
-    """Run a raw Cypher query. Returns up to `limit` rows."""
-    db = _get_db(backend, graph, db_path)
-    result = db.query(cypher) or []
-    return [
-        {k: (v if isinstance(v, (str, int, float, bool, type(None))) else str(v)) for k, v in row.items()}
-        for row in result[:limit]
-    ]
-
-
-# ── Search (FTS + semantic) ──────────────────────────────────────────────────
-
-
-@mcp.tool
-def search(
-    term: str,
-    node_type: str = "",
-    semantic: bool = False,
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-    n_results: int = 50,
-) -> list[dict]:
-    """Search code by name (FTS, supports User*, %auth%1) or by meaning (semantic=True).
-
-    node_type: one of "class", "method", "endpoint", or "" for any.
-    Semantic requires the graph to have been imported with context=True (ChromaDB).
-    """
-    if semantic:
-        from onelens.context.config import OneLensContextConfig
-        from onelens.context.searcher import search_context
-
-        config = OneLensContextConfig()
-        out = search_context(
-            term,
-            config.context_path(graph),
-            wing=graph,
-            entity_type=node_type or None,
-            n_results=n_results,
+    with contextlib.redirect_stdout(sys.stderr):
+        stats = loader.apply_delta(
+            Path(delta_path).expanduser(), graph_name=graph, context=context
         )
-        return out.get("results", [])
-
-    from onelens.graph.analysis import search_code
-
-    db = _get_db(backend, graph, db_path)
-    return search_code(db, term, node_type)[:n_results]
+    return {"stats": stats}
 
 
-# ── Flow trace ───────────────────────────────────────────────────────────────
+# ── 6–14. Memory layer (palace) ──────────────────────────────────────────────
+# These wrap palace business modules. Their logic is non-Cypher (embedding,
+# similarity, time-bucketing, WAL-backed writes) so they stay dedicated tools.
 
 
 @mcp.tool
-def trace(
-    target: str,
-    entry_type: Literal["method", "endpoint"] = "method",
-    depth: int = 5,
-    http_method: str = "",
-    include_external: bool = False,
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-) -> list[dict]:
-    """Trace execution flow forward from an entry point.
-
-    target: method FQN or endpoint path. depth: 1-5.
-    """
-    from onelens.graph.analysis import get_endpoint_flow, get_flow_trace
-
-    db = _get_db(backend, graph, db_path)
-    if entry_type == "endpoint":
-        return get_endpoint_flow(db, target, http_method, depth, include_external)
-    return get_flow_trace(db, target, depth, include_external)
-
-
-@mcp.tool
-def entry_points(
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-) -> list[dict]:
-    """List all entry points (REST endpoints, @Scheduled methods, main())."""
-    from onelens.graph.analysis import get_entry_points
-
-    db = _get_db(backend, graph, db_path)
-    return get_entry_points(db)
-
-
-# ── Impact ───────────────────────────────────────────────────────────────────
-
-
-@mcp.tool
-def impact(
-    method_fqn: str,
-    depth: int = 5,
-    polymorphic: bool = True,
-    bean_filter: bool = True,
-    precise_only: bool = False,
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-) -> list[dict]:
-    """Find REST endpoints impacted if method_fqn changes.
-
-    polymorphic: walk OVERRIDES for interface/template-method dispatch (default on).
-    bean_filter: narrow polymorphic hits to controllers with a field of the target's type.
-    precise_only: show only endpoints reached via direct CALLS edges.
-    """
-    from onelens.graph.analysis import get_impacted_endpoints
-
-    db = _get_db(backend, graph, db_path)
-    results = get_impacted_endpoints(
-        db, method_fqn, depth, polymorphic=polymorphic, bean_type_filter=bean_filter
+def onelens_add_drawer(
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str | None = None,
+    added_by: str = "mcp",
+    hall: str = "hall_fact",
+    kind: str = "note",
+    importance: float = 1.0,
+    fqn: str | None = None,
+    force: bool = False,
+) -> dict:
+    """Store content in a wing/room drawer. Runs embedding + dedups unless force=True."""
+    return drawers_mod.add_drawer(
+        wing=wing, room=room, content=content,
+        source_file=source_file, added_by=added_by,
+        hall=hall, kind=kind, importance=importance, fqn=fqn, force=force,
     )
-    if precise_only:
-        results = [r for r in results if r.get("precision") == "precise"]
-    return results
-
-
-# ── Hybrid retrieve (the headline feature) ───────────────────────────────────
 
 
 @mcp.tool
-def retrieve(
-    query: str,
-    graph: str = "onelens",
-    n_results: int = 10,
-    fanout: int = 50,
-    include_snippets: bool = True,
-    include_neighbors: bool = False,
-    rerank: bool = True,
-    rerank_pool: int = 100,
-    project_root: str = "",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
+def onelens_delete_drawer(drawer_id: str) -> dict:
+    """Delete one drawer by id."""
+    return drawers_mod.delete_drawer(drawer_id)
+
+
+@mcp.tool
+def onelens_check_duplicate(
+    content: str,
+    threshold: float = 0.9,
+    wing: str | None = None,
+) -> dict:
+    """Semantic dedup check before `onelens_add_drawer`. Returns hits ≥ threshold."""
+    return drawers_mod.check_duplicate(content, threshold=threshold, wing=wing)
+
+
+@mcp.tool
+def onelens_kg_add(
+    subject: str,
+    predicate: str,
+    object: str,
+    valid_from: str | None = None,
+    confidence: float = 1.0,
+    source_closet: str | None = None,
+    ended: str | None = None,
+    wing: str = "global",
+) -> dict:
+    """Add a temporal fact triple. Dedupes by hash(s|p|o|valid_from)."""
+    return kg_mod.add(
+        subject, predicate, object,
+        valid_from=valid_from, confidence=confidence,
+        source_closet=source_closet, ended=ended, wing=wing,
+    )
+
+
+@mcp.tool
+def onelens_kg_invalidate(
+    fact_id: str,
+    ended_at: str | None = None,
+    reason: str = "",
+) -> dict:
+    """Close an existing fact by id (temporal retraction; history preserved)."""
+    return kg_mod.invalidate(fact_id, ended_at=ended_at, reason=reason)
+
+
+@mcp.tool
+def onelens_kg_timeline(
+    entity: str,
+    predicate: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[dict]:
-    """Hybrid FTS + semantic retrieval with source code snippets (Augment-parity).
+    """Time-bucketed view of facts touching an entity — see how knowledge evolved."""
+    return kg_mod.timeline(entity, predicate=predicate, since=since, until=until)
 
-    Returns top-K ranked hits with actual source code ready for an LLM to read.
-    Requires both FalkorDB (structural) and --context (ChromaDB) indexed.
-    project_root can be set via ONELENS_PROJECT_ROOT env if not passed.
+
+@mcp.tool
+def onelens_find_tunnels(
+    wing_a: str,
+    wing_b: str,
+    threshold: float = 0.7,
+    n_results: int = 20,
+) -> list[dict]:
+    """Cross-wing semantic similarity — concepts shared across repos / subsystems."""
+    return tunnels_mod.find_tunnels(
+        wing_a=wing_a, wing_b=wing_b, threshold=threshold, n_results=n_results,
+    )
+
+
+@mcp.tool
+def onelens_diary_write(
+    wing: str,
+    content: str,
+    author: str = "mcp",
+    date: str | None = None,
+) -> dict:
+    """Append a diary entry for `wing`. WAL-backed — crash-safe."""
+    return diary_mod.write(wing=wing, content=content, author=author, date=date)
+
+
+@mcp.tool
+def onelens_diary_read(
+    wing: str,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Read diary entries for a wing, optionally time-ranged."""
+    return diary_mod.read(wing=wing, since=since, until=until, limit=limit)
+
+
+# ── Release snapshots ───────────────────────────────────────────────────────
+
+
+@mcp.tool
+def onelens_snapshot_publish(
+    graph: str,
+    tag: str,
+    repo: str | None = None,
+    include_embeddings: bool = False,
+    sign: bool = True,
+    backend: Literal["local", "github"] = "local",
+) -> dict:
+    """Bundle `<graph>` as `<graph>@<tag>` snapshot.
+
+    Writes an immutable tarball with bundle-internal `manifest.json`,
+    SHA256 checksum, and (when cosign is on PATH) a Sigstore signature.
+    `backend='github'` uploads to GitHub Release `<tag>` on `<repo>` and
+    maintains a `snapshots.json` index on the pinned `onelens-index` tag.
     """
-    import os
+    from onelens.snapshots import publisher as _pub
 
-    from onelens.context.config import OneLensContextConfig
-    from onelens.context.retrieval import hybrid_retrieve
-
-    if not project_root:
-        project_root = os.environ.get("ONELENS_PROJECT_ROOT", "")
-
-    config = OneLensContextConfig()
-    db = _get_db(backend, graph, db_path)
-
-    hits = hybrid_retrieve(
-        query,
+    res = _pub.publish(
         graph=graph,
-        db=db,
-        context_path=config.context_path(graph),
-        n_results=n_results,
-        fanout=fanout,
-        include_snippets=include_snippets,
-        include_neighbors=include_neighbors,
-        rerank=rerank,
-        rerank_pool=rerank_pool,
-        project_root=project_root,
+        tag=tag,
+        repo=repo,
+        include_embeddings=include_embeddings,
+        sign=sign,
+        backend=backend,
     )
-
-    return [
-        {
-            "fqn": h.fqn,
-            "type": h.type,
-            "score": h.score,
-            "rerank_score": h.rerank_score,
-            "file_path": h.file_path,
-            "line_start": h.line_start,
-            "line_end": h.line_end,
-            "snippet": h.snippet,
-            "context_text": h.context_text,
-            "rank_fts": h.rank_fts,
-            "rank_semantic": h.rank_semantic,
-            "callers": h.callers,
-            "callees": h.callees,
-        }
-        for h in hits
-    ]
-
-
-# ── Context subgroup (ChromaDB / memory stack) ───────────────────────────────
+    return {
+        "bundle_path": str(res.bundle_path),
+        "sha256": res.sha256,
+        "signed": res.signed,
+        "uploaded_url": res.uploaded_url,
+        "manifest": res.manifest,
+        "warnings": res.warnings,
+    }
 
 
 @mcp.tool
-def context_import(export_path: str, graph: str = "onelens") -> dict:
-    """Index a JSON export into ChromaDB for semantic search (standalone, no FalkorDB)."""
-    from onelens.miners.code_miner import CodeMiner
+def onelens_snapshots_list(graph: str, repo: str) -> dict:
+    """List release snapshots available for `<graph>` in GitHub `<repo>`.
 
-    miner = CodeMiner(graph)
-    return miner.mine(Path(export_path).expanduser())
-
-
-@mcp.tool
-def context_search(
-    query: str,
-    graph: str = "onelens",
-    entity_type: str = "",
-    room: str = "",
-    n_results: int = 10,
-) -> list[dict]:
-    """Pure semantic search over ChromaDB (no FalkorDB).
-
-    entity_type: one of "method", "class", "endpoint", or "" for any.
-    room: Java package name filter, or "" for none.
+    Reads the `snapshots.json` asset on the pinned `onelens-index` tag —
+    one HTTPS GET, no pagination. Returns an empty list when the repo has
+    never published a snapshot.
     """
-    from onelens.context.config import OneLensContextConfig
-    from onelens.context.searcher import search_context
+    from onelens.snapshots import consumer as _cons
 
-    config = OneLensContextConfig()
-    out = search_context(
-        query,
-        config.context_path(graph),
-        wing=graph,
-        room=room or None,
-        entity_type=entity_type or None,
-        n_results=n_results,
-    )
-    return out.get("results", [])
+    infos = _cons.list_remote(graph, repo)
+    return {
+        "graph": graph,
+        "repo": repo,
+        "snapshots": [i.__dict__ for i in infos],
+    }
 
 
 @mcp.tool
-def context_wakeup(
-    graph: str = "onelens",
-    backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordb",
-    db_path: str = "~/.onelens/graphs",
-) -> str:
-    """Generate L0+L1 context (~900 tokens) for AI system prompt injection."""
-    from onelens.context.layers import ContextStack
+def onelens_snapshots_pull(
+    graph: str,
+    tag: str,
+    repo: str,
+    verify: bool = True,
+) -> dict:
+    """Download, verify, and install a release snapshot as `<graph>@<tag>`.
 
-    try:
-        db = _get_db(backend, graph, db_path)
-    except Exception:
-        db = None
-    stack = ContextStack(graph, db=db)
-    return stack.wake_up()
-
-
-@mcp.tool
-def context_recall(
-    graph: str = "onelens",
-    room: str = "",
-    entity_type: str = "",
-    n_results: int = 10,
-) -> str:
-    """L2 filtered retrieval by package (room) or entity type.
-
-    entity_type: "method", "class", "endpoint", or "" for any.
+    Authoritative SHA256 comes from the `snapshots.json` index, falling
+    back to the `.sha256` sidecar. Optionally cosign-verifies when the
+    `.sig` asset is present. Restored graph appears in subsequent
+    `onelens_status` calls under `--graph <graph>@<tag>`.
     """
-    from onelens.context.layers import ContextStack
+    from onelens.snapshots import consumer as _cons
 
-    stack = ContextStack(graph)
-    return stack.recall(
-        room=room or None,
-        entity_type=entity_type or None,
-        n_results=n_results,
-    )
+    return _cons.pull(graph=graph, tag=tag, repo=repo, verify=verify)
 
 
 @mcp.tool
-def context_stats(graph: str = "onelens") -> dict:
-    """Show context graph (ChromaDB) statistics."""
-    from onelens.context.layers import ContextStack
+def onelens_snapshot_promote(graph: str, tag: str, commit_sha: str | None = None) -> dict:
+    """Seed the live graph from an installed `<graph>@<tag>` snapshot.
 
-    stack = ContextStack(graph)
-    return stack.status()
+    Copies the snapshot rdb + context dir into the live-graph slot,
+    renames the internal FalkorDB Lite graph key back to `<graph>`, and
+    writes `~/.onelens/graphs/<graph>/.onelens-baseline` so the next
+    delta sync uses the snapshot's commit SHA as the diff base
+    (avoiding a full reindex when onboarding from a release snapshot).
+
+    Marker is one-shot — DeltaTracker consumes and deletes it on the
+    next sync. Prerequisite: the snapshot is installed (via
+    `onelens_snapshots_pull --repo local`).
+    """
+    from onelens.snapshots import seed as _seed
+
+    return _seed.promote(graph=graph, tag=tag, commit_sha=commit_sha)
 
 
 # ── Entry point for `fastmcp run` and `python -m onelens.mcp_server` ─────────
 
+
+_ONELENS_HOME = Path(os.environ.get("ONELENS_HOME") or (Path.home() / ".onelens"))
+_LOCK_PATH = _ONELENS_HOME / "mcp.lock"
+_PORT_PATH = _ONELENS_HOME / "mcp.port"
+
+
+def _acquire_singleton_lock():
+    """Take an exclusive lock on `~/.onelens/mcp.lock`. Returns the held
+    file handle on success (caller must keep a reference for the process
+    lifetime — kernel auto-releases on exit, including SIGKILL). Returns
+    None if another `onelens mcp serve` already holds the lock.
+
+    Cross-platform: fcntl on POSIX, msvcrt.locking on Windows. Both are
+    kernel-enforced so a crashed prior instance can't leave a stale lock —
+    the OS releases the byte range when the file descriptor is closed.
+    """
+    _ONELENS_HOME.mkdir(parents=True, exist_ok=True)
+    fh = open(_LOCK_PATH, "w")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            # Lock the first byte; LK_NBLCK = non-blocking.
+            fh.write(" ")
+            fh.flush()
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.lockf(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    # Record PID for debuggers (`cat ~/.onelens/mcp.lock` shows owner).
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except OSError:
+        pass
+    return fh
+
+
+def _read_existing_port() -> int | None:
+    """Read the active port file written by the lock holder. Returns None
+    if the file is missing or unparseable — caller treats that as 'no
+    surviving instance to point at' and exits with an error."""
+    try:
+        text = _PORT_PATH.read_text().strip()
+        port = int(text)
+        return port if 1 <= port <= 65535 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_port_atomic(port: int) -> None:
+    """Atomic-replace `~/.onelens/mcp.port`. Concurrent reads either see
+    the old port or the new port, never a partial write."""
+    _PORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PORT_PATH.with_suffix(".port.tmp")
+    tmp.write_text(str(port))
+    os.replace(tmp, _PORT_PATH)
+
+
 if __name__ == "__main__":
-    mcp.run(show_banner=False)
+    # Dual-mode entry. Default (no args): stdio — matches what `fastmcp run`
+    # and `python -m onelens.mcp_server` have always done. `--http` flips to
+    # the Streamable HTTP transport that the plugin and remote MCP clients
+    # use as a warm, persistent server.
+    import argparse
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--http", action="store_true", help="run HTTP transport instead of stdio")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=29170)
+    ns, _ = p.parse_known_args()
+    if ns.http:
+        # Singleton guard — only one `onelens mcp serve --http` per user.
+        # Multi-IDE setups (two IntelliJ windows, plugin + Claude Code, …)
+        # converge on a single MCP child instead of each spawning their
+        # own and racing on VRAM, the port file, and the FalkorDB Lite
+        # data dir. fcntl/msvcrt locks are kernel-released on process
+        # death so we never have to clean up a stale lock manually.
+        _lock_fh = _acquire_singleton_lock()
+        if _lock_fh is None:
+            existing = _read_existing_port()
+            if existing is not None:
+                print(
+                    f"onelens mcp serve already running on http://127.0.0.1:{existing}/mcp",
+                    file=sys.stderr,
+                )
+                sys.exit(0)
+            print(
+                "onelens mcp serve: another instance holds ~/.onelens/mcp.lock "
+                "but no port file is readable — kill the holder or delete the lock.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Publish our port for plugin / Claude Code / external CLI discovery.
+        _write_port_atomic(ns.port)
+        try:
+            # `ONELENS_WARM_ON_START` is already honored by the lifespan above —
+            # plugin sets it so the server primes embed + rerank engines before
+            # the first tool call lands.
+            mcp.run(transport="http", host=ns.host, port=ns.port, show_banner=False)
+        finally:
+            # Best-effort cleanup. flock is auto-released when the process
+            # exits regardless, and the next instance overwrites the port
+            # file atomically — but tidying here keeps `ls ~/.onelens/`
+            # honest after a clean shutdown.
+            try:
+                if _PORT_PATH.is_file() and _PORT_PATH.read_text().strip() == str(ns.port):
+                    _PORT_PATH.unlink()
+            except OSError:
+                pass
+    else:
+        mcp.run(show_banner=False)

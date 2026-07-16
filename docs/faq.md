@@ -38,7 +38,7 @@ repo with separate licensing. Core is never rug-pulled.
 ### Do you collect telemetry?
 
 No, not by default, not ever unless the user explicitly opts in.
-Everything runs locally: FalkorDB, ChromaDB, Qwen3, mxbai.
+Everything runs locally: FalkorDB, ChromaDB, Jina-v2-base-code (default embedder), mxbai-rerank-base.
 
 ### Does it work on Kotlin?
 

@@ -6,6 +6,8 @@ import com.intellij.openapi.vcs.changes.ChangeListManager
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.onelens.plugin.export.ExportState
+import com.onelens.plugin.framework.workspace.Workspace
+import com.onelens.plugin.framework.workspace.WorkspaceLoader
 import java.io.File
 
 /**
@@ -33,23 +35,43 @@ object DeltaTracker {
 
     /**
      * Determine which Java files changed since the last export.
+     *
+     * Multi-root workspaces: git diff runs on the *primary* workspace root only.
+     * Secondary roots fall through to VFS timestamp / ChangeListManager signal
+     * (sufficient for single-user IDE editing; full multi-git delta is tracked
+     * in Phase C PROGRESS as a known limitation).
      */
     fun getChangedFiles(project: Project): ChangedFiles {
         val state = ExportState.getInstance(project)
-        val basePath = project.basePath ?: return fullReexport("No project base path")
+        val workspace = try {
+            WorkspaceLoader.load(project)
+        } catch (e: Exception) {
+            return fullReexport("Could not resolve workspace: ${e.message}")
+        }
+        val basePath = workspace.primaryRoot.toString()
 
-        // No previous export → full re-export needed
-        if (state.state.lastExportTimestamp == 0L) {
+        // Consume any Stage 1d baseline marker first — one-shot, read + delete
+        // before diff runs so SyncComplete race can't double-fire. If the
+        // marker carries a usable commitSha, it overrides the "No previous
+        // export" path entirely.
+        val seededHash = consumeBaselineMarker(workspace.graphId)
+
+        // No previous export AND no seed marker → full re-export needed.
+        if (state.state.lastExportTimestamp == 0L && seededHash == null) {
             return fullReexport("No previous export found")
         }
 
-        val lastGitHash = state.state.lastGitHash
+        val lastGitHash = seededHash ?: state.state.lastGitHash
         val lastTimestamp = state.state.lastExportTimestamp
 
         // Try git diff first (most accurate)
         if (lastGitHash.isNotEmpty()) {
             val gitResult = getGitChanges(basePath, lastGitHash)
             if (gitResult != null) {
+                // Diff base diverged (branch switch / rebase) → propagate the
+                // full-reexport signal instead of layering uncommitted changes
+                // on top of a meaningless empty diff.
+                if (gitResult.isFullReexport) return gitResult
                 // Also add uncommitted changes from ChangeListManager
                 val uncommitted = getUncommittedChanges(project, basePath)
                 val allModified = (gitResult.modified + uncommitted.modified).distinct()
@@ -93,10 +115,72 @@ object DeltaTracker {
     }
 
     /**
+     * Stage 1d — read + delete `~/.onelens/graphs/<graphId>/.onelens-baseline`
+     * so the next delta diffs from the snapshot's commit. One-shot: consumed
+     * at entry, not at exit. Race-safe (two concurrent syncs can't both use
+     * the same seed).
+     */
+    private fun consumeBaselineMarker(graphId: String): String? {
+        val marker = File(
+            System.getProperty("user.home"),
+            ".onelens/graphs/$graphId/.onelens-baseline",
+        )
+        if (!marker.isFile) return null
+        return try {
+            val text = marker.readText()
+            val commitRe = Regex("\"commitSha\"\\s*:\\s*\"([0-9a-f]{7,40})\"")
+            val schemaRe = Regex("\"schemaVersion\"\\s*:\\s*(\\d+)")
+            val commit = commitRe.find(text)?.groupValues?.get(1)
+            val schema = schemaRe.find(text)?.groupValues?.get(1)?.toIntOrNull()
+            if (commit == null) {
+                LOG.warn("baseline marker at ${marker.path} has no commitSha; ignoring")
+                marker.delete()
+                return null
+            }
+            if (schema != null && schema != CURRENT_SCHEMA_VERSION) {
+                LOG.warn("baseline marker schemaVersion=$schema ≠ plugin's $CURRENT_SCHEMA_VERSION; discarding seed")
+                marker.delete()
+                return null
+            }
+            val deleted = marker.delete()
+            LOG.info(
+                "Seeded baseline consumed: diff from ${commit.take(7)}..HEAD " +
+                    "(marker deleted: $deleted)"
+            )
+            commit
+        } catch (e: Exception) {
+            LOG.warn("baseline marker parse failed; ignoring", e)
+            marker.delete()
+            null
+        }
+    }
+
+    // Plugin's current snapshot schema version. Must match publisher.py's
+    // SCHEMA_VERSION — mismatch invalidates the seed marker.
+    private const val CURRENT_SCHEMA_VERSION = 3
+
+    /**
      * Use git diff to find changes since last export.
      */
     private fun getGitChanges(basePath: String, sinceHash: String): ChangedFiles? {
         return try {
+            // Guard: only diff when `sinceHash` is an ancestor of HEAD. After a
+            // branch switch, rebase, or history rewrite the stored hash may be
+            // on an abandoned line — `git diff <oldHash> HEAD` then emits the
+            // entire branch divergence as a single "delta" (huge + semantically
+            // wrong) or fails outright. Force a full re-export instead.
+            val ancestorProc = ProcessBuilder(
+                "git", "merge-base", "--is-ancestor", sinceHash, "HEAD"
+            )
+                .directory(File(basePath))
+                .redirectErrorStream(true)
+                .start()
+            val ancestorExit = ancestorProc.waitFor()
+            if (ancestorExit != 0) {
+                LOG.info("Last export hash $sinceHash is not an ancestor of HEAD (branch switch / rebase?) — forcing full re-export")
+                return fullReexport("Diff base diverged from HEAD")
+            }
+
             // Get modified/added files
             val diffProcess = ProcessBuilder(
                 "git", "diff", "--name-status", sinceHash, "HEAD"
@@ -118,18 +202,40 @@ object DeltaTracker {
 
             for (line in output.lines()) {
                 if (line.isBlank()) continue
-                val parts = line.split("\t", limit = 2)
+                // `git diff --name-status` row shapes:
+                //   "M\tpath"                  — modified
+                //   "A\tpath"                  — added
+                //   "D\tpath"                  — deleted
+                //   "R100\tfrom\tto"           — rename (3 cols!)
+                //   "C75\tfrom\tto"            — copy   (3 cols!)
+                // Old code split with limit=2 → renames produced
+                // `filePath = "from\tto"` (corrupt) and the old path was
+                // never marked deleted, so renamed classes orphaned in
+                // the graph. Parse 3-col rows explicitly.
+                val parts = line.split("\t")
                 if (parts.size < 2) continue
-
                 val status = parts[0].trim()
-                val filePath = parts[1].trim()
-
-                // Only track Java files
-                if (!filePath.endsWith(".java")) continue
 
                 when {
-                    status.startsWith("D") -> deleted.add(filePath)
-                    status.startsWith("A") || status.startsWith("M") || status.startsWith("R") -> modified.add(filePath)
+                    status.startsWith("D") -> {
+                        val p = parts[1].trim()
+                        if (p.endsWith(".java")) deleted.add(p)
+                    }
+                    status.startsWith("R") || status.startsWith("C") -> {
+                        // Rename / copy: parts[1] = from, parts[2] = to.
+                        // Treat from as deleted (so old FQN cleans up) +
+                        // to as modified (so new FQN gets emitted).
+                        if (parts.size >= 3) {
+                            val from = parts[1].trim()
+                            val to = parts[2].trim()
+                            if (from.endsWith(".java")) deleted.add(from)
+                            if (to.endsWith(".java")) modified.add(to)
+                        }
+                    }
+                    status.startsWith("A") || status.startsWith("M") -> {
+                        val p = parts[1].trim()
+                        if (p.endsWith(".java")) modified.add(p)
+                    }
                 }
             }
 

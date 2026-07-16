@@ -1,0 +1,6 @@
+<idea-plugin>
+    <!-- Git4Idea optional dependency — enables GitInfo (latestTag / branch / HEAD sha)
+         used by PublishSnapshotDialog to pre-fill the tag field. When Git4Idea is
+         absent (plain WebStorm install without Git plugin), plugin still loads;
+         GitInfo calls fall back to null. -->
+</idea-plugin>

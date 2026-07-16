@@ -2,9 +2,9 @@ package com.onelens.plugin.actions
 
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
-import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
@@ -15,6 +15,8 @@ import com.onelens.plugin.export.ExportService
 import com.onelens.plugin.export.ExportState
 import com.onelens.plugin.export.delta.DeltaExportService
 import com.onelens.plugin.export.delta.DeltaTracker
+import com.onelens.plugin.framework.workspace.Workspace
+import com.onelens.plugin.framework.workspace.WorkspaceLoader
 
 /**
  * Smart sync action — automatically decides between full export and delta.
@@ -28,7 +30,15 @@ import com.onelens.plugin.export.delta.DeltaTracker
  *
  * After export, auto-imports into graph DB via `onelens` CLI.
  */
-class ExportFullAction : AnAction() {
+/**
+ * [DumbAwareAction] so IntelliJ doesn't grey out the Sync Graph button during
+ * indexing. The action itself still bails cleanly if invoked mid-indexing (see
+ * the `DumbService.isDumb` guard in [actionPerformed]) and the deeper sync path
+ * calls `waitForSmartMode()` before running PSI-heavy collectors. Without
+ * `DumbAware`, non-DumbAware actions sometimes stay stuck-disabled after a
+ * failed click during indexing — the user reported exactly that.
+ */
+class ExportFullAction : DumbAwareAction() {
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
@@ -38,26 +48,59 @@ class ExportFullAction : AnAction() {
             return
         }
 
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Syncing Graph", true) {
+        val coordinator = com.onelens.plugin.export.SyncCoordinator.getInstance()
+        if (!coordinator.tryAcquire()) {
+            notify(project, "OneLens: A sync is already running. Stop it from the Background Tasks widget first.", NotificationType.WARNING)
+            return
+        }
+        // Wrap ProgressManager.run so a submission failure (rejected task,
+        // RuntimeException before run() starts) does not leak the
+        // coordinator slot — onFinished() only fires if the task actually
+        // executed, so a throw on submit would strand `running=true` until
+        // IDE restart.
+        val task = object : Task.Backgroundable(project, "OneLens: Syncing Graph", true) {
             override fun run(indicator: ProgressIndicator) {
                 indicator.isIndeterminate = false
                 val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                val config = ExportConfig()
+                val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+                val config = ExportConfig(
+                    buildSemanticIndex = settings.buildSemanticIndex,
+                    graphBackend = settings.graphBackend,
+                )
                 val state = ExportState.getInstance(project)
-                val basePath = project.basePath ?: return
+                // Workspace is authoritative; primary root carries the git hash
+                // we track for delta. Secondary roots = known C1.1 limitation.
+                val workspace = try {
+                    WorkspaceLoader.load(project)
+                } catch (_: Exception) { return }
+                val basePath = workspace.primaryRoot.toString()
 
                 // Decide: full or delta?
                 val hasPreviousExport = state.state.lastExportTimestamp > 0
                 val lastExportExists = state.state.lastExportPath.isNotEmpty() &&
                     java.io.File(state.state.lastExportPath).exists()
+                // Snapshot-as-seed (Stage 1d): if the user just promoted a
+                // snapshot, ~/.onelens/graphs/<graph>/.onelens-baseline
+                // is present. `hasPreviousExport` is false (the local
+                // state has never seen an export), but the seed commit
+                // IS a valid baseline — DeltaTracker.consumeBaselineMarker
+                // will read it. Skip the "first time → full" shortcut so
+                // the delta path can kick in. Otherwise every snapshot
+                // restore re-exports the entire codebase, defeating the
+                // whole point of the seed.
+                val baselineMarker = java.io.File(
+                    System.getProperty("user.home"),
+                    ".onelens/graphs/${workspace.graphId}/.onelens-baseline",
+                )
+                val hasSeed = baselineMarker.isFile
 
-                if (!hasPreviousExport || !lastExportExists) {
+                if (!hasSeed && (!hasPreviousExport || !lastExportExists)) {
                     // First time OR last export file missing → full export
                     state.state.lastExportTimestamp = 0  // reset stale state
                     state.state.lastGitHash = ""
                     state.state.fileHashes.clear()
                     indicator.text = "Full export — collecting all code intelligence..."
-                    doFullExport(service, project, config, basePath, indicator)
+                    doFullExport(service, project, workspace, config, indicator)
                     return
                 }
 
@@ -77,7 +120,7 @@ class ExportFullAction : AnAction() {
                         // Branch was reset/rebased/switched → full export
                         indicator.text = "Branch changed — full re-export..."
                         notify(project, "Branch changed since last export. Running full sync.", NotificationType.INFORMATION)
-                        doFullExport(service, project, config, basePath, indicator)
+                        doFullExport(service, project, workspace, config, indicator)
                         return
                     }
                 }
@@ -88,7 +131,7 @@ class ExportFullAction : AnAction() {
 
                 if (changedFiles.isFullReexport) {
                     indicator.text = "Full re-export needed..."
-                    doFullExport(service, project, config, basePath, indicator)
+                    doFullExport(service, project, workspace, config, indicator)
                     return
                 }
 
@@ -98,34 +141,47 @@ class ExportFullAction : AnAction() {
                 }
 
                 // Too many changes? Full export is faster
-                val totalProjectFiles = countJavaFiles(basePath)
+                val totalProjectFiles = workspace.roots.sumOf { countJavaFiles(it.path.toString()) }
                 if (totalProjectFiles > 0 && changedFiles.totalChanges.toFloat() / totalProjectFiles > 0.30) {
                     indicator.text = "${changedFiles.totalChanges} files changed (>30%) — full re-export..."
-                    doFullExport(service, project, config, basePath, indicator)
+                    doFullExport(service, project, workspace, config, indicator)
                     return
                 }
 
                 // Delta export
                 indicator.text = "Delta sync: ${changedFiles.totalChanges} files changed..."
-                doDeltaExport(project, config, basePath, indicator)
+                doDeltaExport(project, workspace, config, indicator)
             }
-        })
+            override fun onFinished() {
+                coordinator.release()
+            }
+            override fun onCancel() {
+                coordinator.killActive()
+                com.onelens.plugin.ui.OneLensEvents.publish(com.onelens.plugin.ui.OneLensEvent.Warn("Sync cancelled by user"))
+            }
+        }
+        try {
+            ProgressManager.getInstance().run(task)
+        } catch (t: Throwable) {
+            coordinator.release()
+            throw t
+        }
     }
 
     private fun doFullExport(
         service: ExportService,
         project: com.intellij.openapi.project.Project,
+        workspace: Workspace,
         config: ExportConfig,
-        basePath: String,
         indicator: ProgressIndicator
     ) {
         val result = service.exportFull(project, config, indicator)
 
-        // Store git hash
+        // Store git hash against the primary root + graph id from workspace.
         val state = ExportState.getInstance(project)
-        val gitHash = DeltaTracker.getCurrentGitHash(basePath)
+        val gitHash = DeltaTracker.getCurrentGitHash(workspace.primaryRoot.toString())
         if (gitHash.isNotEmpty()) state.state.lastGitHash = gitHash
-        state.state.lastGraphName = project.name
+        state.state.lastGraphName = workspace.graphId
 
         when (result) {
             is ExportService.ExportResult.Success -> {
@@ -149,17 +205,18 @@ class ExportFullAction : AnAction() {
 
     private fun doDeltaExport(
         project: com.intellij.openapi.project.Project,
+        workspace: Workspace,
         config: ExportConfig,
-        basePath: String,
         indicator: ProgressIndicator
     ) {
         val result = DeltaExportService.exportDelta(project, config)
 
         when (result) {
             is DeltaExportService.DeltaResult.Success -> {
-                // Auto-import delta
+                // Auto-import delta — use workspace.graphId so a multi-repo export
+                // lands in the same graph the full import created.
                 val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                val importResult = service.syncToGraph(result.path, project.name, config.copy(autoImport = true), isFull = false)
+                val importResult = service.syncToGraph(result.path, workspace.graphId, config.copy(autoImport = true), isFull = false, projectBasePath = project.basePath)
 
                 val stats = result.stats
                 notify(project,
@@ -173,7 +230,7 @@ class ExportFullAction : AnAction() {
             is DeltaExportService.DeltaResult.NeedFullExport -> {
                 indicator.text = "Delta not possible — running full export..."
                 val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                doFullExport(service, project, config, basePath, indicator)
+                doFullExport(service, project, workspace, config, indicator)
             }
             is DeltaExportService.DeltaResult.NoChanges -> {
                 notify(project, "OneLens: Already up to date.", NotificationType.INFORMATION)

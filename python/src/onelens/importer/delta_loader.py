@@ -1,10 +1,24 @@
 """Delta (incremental) import into any Cypher-compatible graph DB."""
 
-import json
 import logging
 from pathlib import Path
 
+try:
+    import orjson as _json  # type: ignore[import-not-found]
+    _USE_ORJSON = True
+except ImportError:  # pragma: no cover
+    import json as _json  # type: ignore[no-redef]
+    _USE_ORJSON = False
+
 from onelens.graph.db import GraphDB
+from onelens.importer.graph_writer import GraphWriter
+from onelens.importer.loaders.annotations import AnnotationLoader
+from onelens.importer.loaders.enums import EnumLoader
+from onelens.importer.loaders.jpa import JpaLoader
+from onelens.importer.loaders.spring import SpringLoader
+from onelens.importer.loaders.tests import TestLoader
+from onelens.importer.loaders.type_flow import TypeFlowLoader
+from onelens.importer.loaders.data_flow import DataFlowLoader
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +28,7 @@ BATCH_SIZE = 500
 class DeltaLoader:
     def __init__(self, db: GraphDB):
         self.db = db
+        self.writer = GraphWriter(db)
 
     def apply_delta(self, delta_path: Path, graph_name: str | None = None,
                     context: bool = False) -> dict:
@@ -28,8 +43,9 @@ class DeltaLoader:
            provided. Uses CodeMiner's deterministic IDs — incremental re-embed
            is O(changed methods), not full re-mine.
         """
-        with open(delta_path) as f:
-            data = json.load(f)
+        with open(delta_path, "rb") as f:
+            raw = f.read()
+        data = _json.loads(raw) if _USE_ORJSON else _json.loads(raw.decode("utf-8"))
 
         deleted = data.get("deleted", {})
         upserted = data.get("upserted", {})
@@ -49,6 +65,13 @@ class DeltaLoader:
                 "UNWIND $batch AS fqn MATCH (f:Field {classFqn: fqn}) DETACH DELETE f",
                 {"batch": batch}
             )
+            # Cascade enum constants too — they're keyed by `enumFqn`, not
+            # inherited from the class, so Cypher won't touch them via the
+            # class DETACH DELETE above.
+            self.db.execute(
+                "UNWIND $batch AS fqn MATCH (e:EnumConstant {enumFqn: fqn}) DETACH DELETE e",
+                {"batch": batch}
+            )
         logger.info(f"Deleted {len(deleted_classes)} classes")
 
         # 2. Upsert classes (batched)
@@ -58,6 +81,9 @@ class DeltaLoader:
                 "fqn": c["fqn"], "name": c.get("name", ""),
                 "kind": c.get("kind", "CLASS"), "filePath": c.get("filePath", ""),
                 "packageName": c.get("packageName", ""), "superClass": c.get("superClass", ""),
+                # enclosingClass parity with full loader (loader.py:87-90) — a
+                # modified inner class would otherwise lose this prop on delta.
+                "enclosingClass": c.get("enclosingClass", ""),
                 "lineStart": c.get("lineStart", 0), "lineEnd": c.get("lineEnd", 0),
             } for c in batch]
             self.db.execute("""
@@ -65,11 +91,18 @@ class DeltaLoader:
                 MERGE (c:Class {fqn: item.fqn})
                 SET c.name = item.name, c.kind = item.kind, c.filePath = item.filePath,
                     c.packageName = item.packageName, c.superClass = item.superClass,
+                    c.enclosingClass = item.enclosingClass,
                     c.lineStart = item.lineStart, c.lineEnd = item.lineEnd
             """, {"batch": items})
 
         # 3. Upsert methods (batched)
         methods = upserted.get("methods", [])
+        # Tier-0 enrichment parity with the full loader — derive
+        # visibility/static/abstract/deprecated/paramCount/transactional/async
+        # so delta-upserted methods carry the same props as a full import.
+        from onelens.importer.graph_writer import _enrich_method
+        for _m in methods:
+            _enrich_method(_m)
         for batch in self._chunks(methods, BATCH_SIZE):
             items = [{
                 "fqn": m["fqn"], "name": m.get("name", ""),
@@ -78,6 +111,13 @@ class DeltaLoader:
                 "filePath": m.get("filePath", ""), "lineStart": m.get("lineStart", 0),
                 "lineEnd": m.get("lineEnd", 0),
                 "body": m.get("body") or "", "javadoc": m.get("javadoc") or "",
+                "visibility": m.get("visibility", "package"),
+                "isStatic": m.get("isStatic", False),
+                "isAbstract": m.get("isAbstract", False),
+                "isDeprecated": m.get("isDeprecated", False),
+                "paramCount": m.get("paramCount", 0),
+                "isTransactional": m.get("isTransactional", False),
+                "isAsync": m.get("isAsync", False),
             } for m in batch]
             self.db.execute("""
                 UNWIND $batch AS item
@@ -85,7 +125,11 @@ class DeltaLoader:
                 SET m.name = item.name, m.classFqn = item.classFqn, m.returnType = item.returnType,
                     m.isConstructor = item.isConstructor, m.filePath = item.filePath,
                     m.lineStart = item.lineStart, m.lineEnd = item.lineEnd,
-                    m.body = item.body, m.javadoc = item.javadoc
+                    m.body = item.body, m.javadoc = item.javadoc,
+                    m.visibility = item.visibility, m.isStatic = item.isStatic,
+                    m.isAbstract = item.isAbstract, m.isDeprecated = item.isDeprecated,
+                    m.paramCount = item.paramCount,
+                    m.isTransactional = item.isTransactional, m.isAsync = item.isAsync
             """, {"batch": items})
 
         # HAS_METHOD edges for upserted methods
@@ -119,6 +163,9 @@ class DeltaLoader:
                 MATCH (c:Class {fqn: edge.src}), (f:Field {fqn: edge.dst})
                 MERGE (c)-[:HAS_FIELD]->(f)
             """, {"batch": batch})
+
+        # 4b. Upsert enum constants (delegated to EnumLoader).
+        EnumLoader().apply_delta(self.writer, data, "")
 
         # 5. Create external stub nodes for call targets not in graph
         upserted_class_fqns = {c["fqn"] for c in classes}
@@ -195,8 +242,18 @@ class DeltaLoader:
                 MERGE (c)-[:HAS_METHOD]->(m)
             """, {"batch": batch})
 
-        # 6. Upsert call edges (delete old calls from affected methods first)
-        affected_callers = list({call["callerFqn"] for call in upserted.get("callGraph", [])})
+        # 6. Upsert call edges (delete old outbound calls first).
+        # Delete from EVERY upserted method, not just those that appear as a
+        # callerFqn in the delta (bug #6). A method whose body changed so it
+        # no longer calls anything drops out of `callGraph` entirely — if we
+        # only cleared `affected_callers` its stale outbound CALLS would
+        # survive forever (phantom edges full-import never has). Union the
+        # upserted-method set with the delta's callers so a method that
+        # stopped calling still gets its old edges purged.
+        affected_callers = list(
+            {m["fqn"] for m in methods}
+            | {call["callerFqn"] for call in upserted.get("callGraph", [])}
+        )
         for batch in self._chunks(affected_callers, BATCH_SIZE):
             self.db.execute("""
                 UNWIND $batch AS fqn
@@ -212,6 +269,20 @@ class DeltaLoader:
                 MATCH (a:Method {fqn: edge.src}), (b:Method {fqn: edge.dst})
                 MERGE (a)-[:CALLS {line: edge.line}]->(b)
             """, {"batch": batch})
+
+        # 6b. Tier-0 type-flow edges (RETURNS / THROWS / HAS_PARAMETER) parity
+        # with the full loader. Delete old ones from every upserted method then
+        # re-create, MERGE-ing target Class stubs so external types (JDK,
+        # libraries) resolve without a separate stub pass.
+        upserted_method_fqn_list = [m["fqn"] for m in methods]
+        TypeFlowLoader().apply_delta(self.writer, methods)
+
+        # 6c. Tier-1 data-flow edges (READS_FIELD / WRITES_FIELD / INSTANTIATES)
+        # parity with the full loader. Delete from every upserted method, then
+        # re-create. Field targets MATCH existing Field nodes (external field
+        # access drops — project data-flow only). INSTANTIATES MERGEs the
+        # target Class stub like the type-flow edges above.
+        DataFlowLoader().apply_delta(self.writer, upserted)
 
         # 7. Upsert inheritance edges (batched per type)
         for rel_type in ("EXTENDS", "IMPLEMENTS"):
@@ -234,6 +305,11 @@ class DeltaLoader:
                 MERGE (a)-[:OVERRIDES]->(b)
             """, {"batch": batch})
 
+        # 8b. Replace ANNOTATED_WITH edges on upserted targets (delegated to AnnotationLoader).
+        # graph_wing is derived below at step 9b; pass graph_name here since the
+        # AnnotationLoader only needs upserted, not the wing value.
+        AnnotationLoader().apply_delta(self.writer, upserted, graph_name or "")
+
         # 9. Ensure full-text search indexes exist (idempotent)
         from onelens.importer.schema import FULLTEXT_SCHEMA
         for ddl in FULLTEXT_SCHEMA.values():
@@ -246,13 +322,35 @@ class DeltaLoader:
         # and Modules. Spring wiring is cross-class — per-class diff would miss
         # new bean types referenced from unchanged callers. Re-scan cost is
         # bounded (indexed), re-insert is cheap (~few K rows).
+        # Resolve the wing the same way the full loader does (loader.py:146-151)
+        # so Spring nodes get the same `wing` stamp — the Vue↔Spring HTTP
+        # bridge filters `Endpoint.wing IS NOT NULL`, so an unstamped delta
+        # silently zeroes the cross-stack HITS edges (bug #5).
+        workspace_header = data.get("workspace") or {}
+        graph_wing = (
+            workspace_header.get("graphId")
+            or graph_name
+            or data.get("project", {}).get("name", "")
+            or "default"
+        )
+
         spring = data.get("spring")
         if spring is not None:
-            self._replace_spring(spring)
+            SpringLoader().apply_delta(self.writer, data, graph_wing)
 
         modules = data.get("modules")
         if modules is not None:
             self._replace_modules(modules)
+
+        # JPA + tests: full re-scan + replace-all (same rationale as Spring).
+        # MUST run after _replace_spring (MOCKS/SPIES target SpringBean) and
+        # after the CALLS upsert above (TESTS derives from direct CALLS).
+        jpa = data.get("jpa")
+        if jpa is not None:
+            JpaLoader().apply_delta(self.writer, data, graph_wing)
+
+        if "tests" in data or "mockBeans" in data or "spyBeans" in data:
+            TestLoader().apply_delta(self.writer, data, graph_wing)
 
         stats = data.get("stats", {})
 
@@ -314,86 +412,6 @@ class DeltaLoader:
 
         logger.info(f"Delta applied: {stats}")
         return stats
-
-    def _replace_spring(self, spring: dict) -> None:
-        """Drop all SpringBean/Endpoint/HANDLES/INJECTS, then re-insert.
-
-        Spring data is small (~2K beans on a 10K-class project) so a
-        full replace is simpler and more correct than per-class diff —
-        injections reference types on other classes, bean names can be
-        renamed, and annotations can be added/removed without the
-        annotated file showing up as "changed" if only a supertype
-        changed.
-        """
-        self.db.execute("MATCH (b:SpringBean) DETACH DELETE b")
-        self.db.execute("MATCH (e:Endpoint) DETACH DELETE e")
-
-        beans = spring.get("beans", []) or []
-        bean_items = [{
-            "name": b.get("name", ""), "classFqn": b.get("classFqn", ""),
-            "type": b.get("type", ""), "scope": b.get("scope", ""),
-            "profile": b.get("profile", ""),
-        } for b in beans if b.get("name")]
-        for batch in self._chunks(bean_items, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS item
-                CREATE (b:SpringBean {name: item.name})
-                SET b.classFqn = item.classFqn, b.type = item.type,
-                    b.scope = item.scope, b.profile = item.profile
-            """, {"batch": batch})
-
-        endpoints = spring.get("endpoints", []) or []
-        ep_items = []
-        handles = []
-        for ep in endpoints:
-            method = ep.get("httpMethod", "GET")
-            path = ep.get("path", "/")
-            ep_id = ep.get("id") or f"{method}:{path}"
-            ep_items.append({
-                "id": ep_id, "path": path, "httpMethod": method,
-                "controllerFqn": ep.get("controllerFqn", ""),
-                "handlerMethodFqn": ep.get("handlerMethodFqn", ""),
-            })
-            if ep.get("handlerMethodFqn"):
-                handles.append({"src": ep["handlerMethodFqn"], "dst": ep_id})
-
-        for batch in self._chunks(ep_items, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS item
-                CREATE (e:Endpoint {id: item.id})
-                SET e.path = item.path, e.httpMethod = item.httpMethod,
-                    e.controllerFqn = item.controllerFqn,
-                    e.handlerMethodFqn = item.handlerMethodFqn
-            """, {"batch": batch})
-
-        for batch in self._chunks(handles, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (m:Method {fqn: edge.src}), (e:Endpoint {id: edge.dst})
-                MERGE (m)-[:HANDLES]->(e)
-            """, {"batch": batch})
-
-        # INJECTS edges live between SpringBean nodes keyed by classFqn.
-        # DETACH DELETE above already dropped them; re-insert from the delta.
-        injections = spring.get("injections", []) or []
-        inj_items = [{
-            "src": inj.get("targetClassFqn", ""),
-            "dst": inj.get("injectedClassFqn", ""),
-            "field": inj.get("targetFieldOrParam", ""),
-            "type": inj.get("injectionType", ""),
-        } for inj in injections if inj.get("targetClassFqn") and inj.get("injectedClassFqn")]
-        for batch in self._chunks(inj_items, BATCH_SIZE):
-            self.db.execute("""
-                UNWIND $batch AS edge
-                MATCH (a:SpringBean {classFqn: edge.src}),
-                      (b:SpringBean {classFqn: edge.dst})
-                MERGE (a)-[:INJECTS {field: edge.field, type: edge.type}]->(b)
-            """, {"batch": batch})
-
-        logger.info(
-            "Spring replaced: %d beans, %d endpoints, %d injections",
-            len(bean_items), len(ep_items), len(inj_items),
-        )
 
     def _replace_modules(self, modules: list) -> None:
         """Drop all Module nodes, then re-insert."""

@@ -20,7 +20,15 @@ data class ExportConfig(
     val excludeLibraryClasses: Boolean = true,
     val autoImport: Boolean = true,
     val onelensSourcePath: String = "",
-    val graphBackend: String = "falkordb",       // falkordb (default, Docker) or falkordblite (embedded)
+    // Default flipped to falkordblite in v0.2: zero-Docker setup, bundled Redis
+    // ships inside the Python venv. Users who already have Docker running on
+    // :17532 can override to "falkordb" in settings; preflight will pick it up.
+    // Windows users must use "falkordb" (no bundled binaries for Windows).
+    val graphBackend: String = "falkordblite",
     val falkordbHost: String = "localhost",
     val falkordbPort: Int = 17532,
+    // Mirror of [OneLensSettings.State.buildSemanticIndex]. OFF by default to
+    // keep first-sync fast (~30 s). Flip ON to pass `--context` to
+    // `onelens import_graph` and build the ChromaDB layer.
+    val buildSemanticIndex: Boolean = false,
 )

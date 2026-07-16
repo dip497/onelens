@@ -15,14 +15,60 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
         var includeSpring: Boolean = true,
         var includeDiagnostics: Boolean = false,
         var excludeTestSources: Boolean = false,
-        // Auto-sync ON by default — users expect "install plugin → always fresh graph"
-        // without digging through Tools menu. Toggle off via Tools → OneLens.
-        var autoSyncEnabled: Boolean = true,
+        // Auto-sync OFF by default. On fresh installs, auto-sync can fire
+        // during IntelliJ's dumb-mode indexing pass (IndexNotReadyException)
+        // and overlap with the user's first manual Sync, producing empty or
+        // duplicate graphs with unexpected names. Opt-in: toggle on via Tools
+        // → OneLens → Enable Auto-Sync after the first manual sync succeeds.
+        var autoSyncEnabled: Boolean = false,
         var autoSyncDebounceMs: Int = 5000,
         // First-run flag — the startup activity checks this and shows a
         // one-time onboarding balloon on the first project open with the
         // plugin installed. Reset only by deleting onelens-settings.xml.
         var firstRunComplete: Boolean = false,
+        // Vue 3 adapter override. null = auto-detect (default); true/false force on/off.
+        // Stored as String so kotlinx-serialization-style nulls survive round-trip
+        // through IntelliJ's XmlSerializer, which treats Boolean? fields inconsistently.
+        var vueAdapterOverride: String = "auto",
+        // Build ChromaDB semantic index alongside the graph. OFF by default —
+        // graph-only is ~30 s full sync and covers structural queries (impact /
+        // trace / Cypher / search). Flip ON to spend ~20 min on Qwen3 embeddings
+        // and unlock natural-language retrieval (`onelens retrieve`).
+        var buildSemanticIndex: Boolean = false,
+        // Embedder backend, user-selectable from Settings → Tools → OneLens Semantic.
+        //   "local"  — default. ONNX runtime, CUDA / CPU autopick.
+        //   "openai" — any /v1/embeddings-compatible API (OpenAI, Voyage, Together,
+        //              Mistral, TEI). BYOK — the key lives in PasswordSafe, not XML.
+        // Modal is intentionally NOT exposed in the UI — it was the legacy dev
+        // default; set ONELENS_EMBED_BACKEND=modal manually if you need it.
+        var embedderBackend: String = "local",
+        // Local embedder profile — `balanced` (Jina-v2-base-code, default,
+        // 161M, GPU/CPU), `gemma` (EmbeddingGemma-300m, MTEB Code #1
+        // sub-500M, q4/q8 quants for tiny CPUs — drawer-compatible drop-in
+        // for Jina but requires re-mine), `tiny` (BGE-small 33M, fastest
+        // CPU, different dim — fresh drawers required). Read by the
+        // Python `LocalEmbedder` via the `ONELENS_LOCAL_EMBED_PROFILE`
+        // env. Switching INVALIDATES existing ChromaDB drawers — a hard
+        // error fires (EmbedderMismatchError) on the first retrieve until
+        // the user re-syncs with `--clear`.
+        var localEmbedderProfile: String = "balanced",
+        // ONNX quant variant. Only meaningful for repos that ship multiple
+        // (EmbeddingGemma, Qwen3). `q4` ≈ 150 MB on disk, ~1pt MTEB drop.
+        // `fp32` is the default. Read via `ONELENS_LOCAL_EMBED_QUANT`.
+        var localEmbedderQuant: String = "fp32",
+        // Set to true once the user clicks "Install TensorRT acceleration" on
+        // the Semantic settings screen. local_backend.py reads this indirectly:
+        // TRT is auto-enabled whenever `tensorrt-cu12` is importable, which only
+        // happens after the user clicks the install button.
+        var localEmbedderUseTRT: Boolean = false,
+        // OpenAI-compat BYOK — URL + model + dim. The API key itself lives in
+        // PasswordSafe (see OpenAiSecrets.kt), never in the XML settings file.
+        var openaiBaseUrl: String = "https://api.openai.com/v1",
+        var openaiEmbedModel: String = "text-embedding-3-small",
+        var openaiEmbedDim: Int = 1536,
+        // Graph backend: "falkordblite" (embedded, no Docker) or "falkordb" (Docker on :17532).
+        // Default flipped to lite in v0.2 for zero-setup UX. Windows users must pick "falkordb".
+        var graphBackend: String = "falkordblite",
     )
 
     private var state = State()
@@ -32,6 +78,17 @@ class OneLensSettings : PersistentStateComponent<OneLensSettings.State> {
     override fun loadState(state: State) {
         this.state = state
     }
+
+    /**
+     * Vue 3 adapter override as a Boolean (null = auto-detect). Thin accessor over
+     * [State.vueAdapterOverride] so callers don't have to parse the stored string.
+     */
+    val vueAdapterEnabled: Boolean?
+        get() = when (state.vueAdapterOverride.lowercase()) {
+            "on", "true", "yes" -> true
+            "off", "false", "no" -> false
+            else -> null
+        }
 
     companion object {
         fun getInstance(): OneLensSettings =

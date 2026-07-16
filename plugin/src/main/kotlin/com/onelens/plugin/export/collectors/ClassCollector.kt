@@ -5,10 +5,10 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.PsiShortNamesCache
 import com.onelens.plugin.export.AnnotationData
 import com.onelens.plugin.export.ClassData
+import com.onelens.plugin.framework.workspace.Workspace
 
 /**
  * Collects all classes, interfaces, enums, records, and annotation types from the project.
@@ -19,43 +19,63 @@ object ClassCollector {
 
     private val LOG = logger<ClassCollector>()
 
-    fun collect(project: Project): List<ClassData> {
+    fun collect(project: Project, workspace: Workspace): List<ClassData> {
         // Step 1: get all class names (quick ReadAction)
         val allNames = ReadAction.compute<Array<String>, Throwable> {
             PsiShortNamesCache.getInstance(project).allClassNames
         }
         LOG.info("Found ${allNames.size} unique class names")
 
-        val scope = GlobalSearchScope.projectScope(project)
-        val result = mutableListOf<ClassData>()
-        val seen = mutableSetOf<String>()
-        val basePath = project.basePath ?: ""
+        val scope = workspace.scope(project)
 
-        // Step 2: process each name in a small ReadAction (UI stays responsive)
-        for (name in allNames) {
-            ProgressManager.checkCanceled()
+        // Parallel per-name extraction — each class name is an independent
+        // PsiShortNamesCache lookup. On a 16-core machine the sequential loop
+        // took 60s; parallelizing targets ~8s.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val result = java.util.concurrent.ConcurrentLinkedQueue<ClassData>()
+        val seen = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-            val classes = ReadAction.compute<List<ClassData>, Throwable> {
-                val batch = mutableListOf<ClassData>()
-                val psiClasses = PsiShortNamesCache.getInstance(project).getClassesByName(name, scope)
+        try {
+            val futures = allNames.toList().chunked(maxOf(1, allNames.size / threads)).map { chunk ->
+                executor.submit<Unit> {
+                    for (name in chunk) {
+                        ProgressManager.checkCanceled()
+                        try {
+                            val classes = ReadAction.compute<List<ClassData>, Throwable> {
+                                val batch = mutableListOf<ClassData>()
+                                val psiClasses = PsiShortNamesCache.getInstance(project).getClassesByName(name, scope)
 
-                for (psiClass in psiClasses) {
-                    val fqn = psiClass.qualifiedName ?: continue
-                    if (psiClass.name == null) continue
-                    if (!seen.add(fqn)) continue
+                                for (psiClass in psiClasses) {
+                                    val fqn = psiClass.qualifiedName ?: continue
+                                    if (psiClass.name == null) continue
+                                    if (!seen.add(fqn)) continue
 
-                    val file = psiClass.containingFile?.virtualFile ?: continue
-                    val filePath = file.path.removePrefix(basePath).removePrefix("/")
+                                    val file = psiClass.containingFile?.virtualFile ?: continue
+                                    // Filter to workspace roots — prevents sibling-repo / library
+                                    // leakage when the scope union is permissive for type resolution.
+                                    if (!workspace.contains(file.path)) continue
+                                    val filePath = workspace.relativePath(file)
 
-                    batch.add(extractClassData(psiClass, fqn, filePath, project))
+                                    batch.add(extractClassData(psiClass, fqn, filePath, project))
+                                }
+                                batch
+                            }
+                            result.addAll(classes)
+                        } catch (e: Exception) {
+                            LOG.warn("Class extraction failed for name '$name': ${e.message}")
+                        }
+                    }
                 }
-                batch
             }
-            result.addAll(classes)
+            futures.forEach { it.get() }
+        } finally {
+            executor.shutdown()
         }
 
-        LOG.info("Collected ${result.size} classes/interfaces/enums")
-        return result
+        val resultList = result.toList()
+        LOG.info("Collected ${resultList.size} classes/interfaces/enums")
+        return resultList
     }
 
     private fun extractClassData(

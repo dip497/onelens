@@ -26,8 +26,8 @@ Monorepo, three shipped components + one local:
 
 - **IntelliJ PSI over tree-sitter**: 100% accurate type resolution. Tree-sitter misses overloads, polymorphism, Spring injection. This is the moat.
 - **FalkorDB default**: localhost:3001 browser UI + Cypher. Pluggable via `GraphDB` interface — swap to `falkordblite` (embedded, no Docker) or `neo4j` with one flag.
-- **ChromaDB semantic layer**: Qwen3-Embedding-0.6B for method body / javadoc / signature. Mxbai-rerank-base cross-encoder for top-K re-ranking. Optional — install via `pip install onelens[context]`.
-- **MCP server = source of truth for the CLI**. `python/src/onelens/mcp_server.py` defines every operation as an `@mcp.tool`. `cli_generated.py` is produced by `fastmcp generate-cli` from that server. Change tools in one place.
+- **ChromaDB semantic layer**: Default `jinaai/jina-embeddings-v2-base-code` (161M, 768-dim, ONNX, code-tuned, CPU works) — picked over Qwen3-0.6B as a "runs on every laptop" default. Opt-in profiles via `ONELENS_LOCAL_EMBED_PROFILE`: `gemma` (EmbeddingGemma-300m, MTEB Code #1 sub-500M, q4/q8 quants for tiny CPUs), `tiny` (BGE-small 33M / 384-dim, fastest CPU but re-mine required — different dim). Mxbai-rerank-base cross-encoder for top-K re-ranking. Optional — install via `pip install onelens[context]`.
+- **MCP server = source of truth for the CLI**. `python/src/onelens/mcp_server.py` defines every operation as an `@mcp.tool`. `cli_generated.py` is produced by `python/scripts/regen_cli.sh` (wraps `fastmcp generate-cli` and patches `CLIENT_SPEC` to in-process `FastMCPTransport` — no `fastmcp` binary on PATH required). Never run `fastmcp generate-cli` directly; use the script so the patch survives regeneration.
 - **Plugin bundles the skill**: `skills/onelens/SKILL.md` is copied into the plugin JAR at build (`processResources` in `build.gradle.kts`). `InstallSkillAction` drops it to `~/.claude/skills/onelens/`. No manual copy step.
 - **Auto-sync ON by default**: VFS BulkFileListener debounces `.java` saves (5 s), fires `DeltaExportService` → `delta_import`. Toggle via Tools → OneLens.
 - **Plugin auto-installs Python**: `PythonEnvManager` creates `~/.onelens/venv/` via `uv` on first sync. Installs `onelens[context]` so semantic retrieval works out of the box.
@@ -36,6 +36,7 @@ Monorepo, three shipped components + one local:
 - **PageRank at import**: `importer/pagerank.py` runs NetworkX personalized PageRank seeded by REST endpoints + `@Scheduled` / `@EventListener` / `@PostConstruct`. Scores stored as node properties. Retrieval uses a multiplicative boost on already-matched hits (not as an RRF source — prevents irrelevant but topologically central methods from leaking in).
 - **Query router in retrieval**: `hybrid_retrieve` short-circuits to direct Cypher for exact class names / FQN fragments, full RRF+rerank only for conceptual queries. Empty result = real no-match (cross-encoder threshold 0.02 filters gibberish).
 - **UNWIND batching**: Import uses Cypher UNWIND for bulk inserts. ~980K edges in ~30 s.
+- **Enum-as-config extraction**: Mature Spring apps use enums as per-feature/role/module registries (e.g. `OrderStatus(canTransitionTo=Set.of(APPROVED, REJECTED))`). The plugin resolves each constant's constructor args via PSI and emits `EnumConstant` nodes with `argList` array props so `WHERE 'APPROVED' IN ec.argList` answers per-feature questions without source grep. Annotation attributes get the same treatment on the `ANNOTATED_WITH` edge.
 
 ## Building
 
@@ -64,8 +65,26 @@ pip install -e ".[context]"
 
 ## Graph schema
 
-Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`
-Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`
+Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`, `EnumConstant`
+Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`, `RETURNS`, `THROWS`, `HAS_PARAMETER`, `READS_FIELD`, `WRITES_FIELD`, `INSTANTIATES`
+
+Data-flow edges (Tier-1 enrichment, v1.2+) — from `DataFlowCollector`'s method-body PSI walk (`plugin/.../collectors/DataFlowCollector.kt`), 100% type-accurate (resolves `this.x` vs shadowing locals vs inherited fields):
+- `READS_FIELD` / `WRITES_FIELD {line}` (Method → Field) — "who reads `cache`", "who mutates `order.status`". Project fields only (external field access drops). Read/write split via PSI `isAccessedForWriting`.
+- `INSTANTIATES {line}` (Method → Class) — "who `new`s a `RestTemplate`" — the non-DI object-creation graph (complements `INJECTS`). Anonymous classes resolve to their named base.
+
+Type-flow edges (Tier-0 enrichment, v1.2+) — Method → Class, reference types only (primitives/void/type-vars filtered):
+- `RETURNS` — "what produces a `User`". `MATCH (m:Method)-[:RETURNS]->(:Class {name:'User'})`.
+- `THROWS` — declared `throws` clause. "what can throw `PaymentDeclined`" / which endpoints surface a checked exception.
+- `HAS_PARAMETER {position, name}` — "what consumes a `UserDto`" / DTO blast radius.
+
+Method props (Tier-0 enrichment, derived from PSI modifiers + annotations):
+- `visibility` (`public`/`private`/`protected`/`package`), `isStatic`, `isAbstract`, `isDeprecated`, `paramCount`, `isTransactional`, `isAsync`. Enables exact queries: public-but-uncalled dead code, deprecated-still-called, non-transactional write paths, async boundaries in a trace.
+
+Semantic payload (v1.1+):
+- `EnumConstant.args` / `EnumConstant.argList` — resolved enum constructor args. Enables `WHERE 'REQUEST' IN ec.argList`-style module/feature filters on enum-as-config registries.
+- `ANNOTATED_WITH.attributes` — JSON map of resolved annotation attribute values (arrays, class FQNs, enum names, nested annotations).
+- `ANNOTATED_WITH.attr_<key>` — flat scalar copy of each primitive attribute, promoted to a first-class edge property. `@RequestMapping(value="/foo", method="GET")` lands as `r.attr_value="/foo"` + `r.attr_method="GET"`. Lets queries match exactly without JSON substring traps: `MATCH (m:Method)-[r:ANNOTATED_WITH]->(:Annotation {name:'RequestMapping'}) WHERE r.attr_value = '/users'`. Arrays + nested annotations stay JSON-only in `attributes`.
+- Resolver: `plugin/.../collectors/ExpressionResolver.kt`. PSI-native — delegates to `PsiConstantEvaluationHelper` for JLS constant expressions; walks collection factories (heuristic: `static` method returning `Collection` / `Map` / `Iterable`), array initializers, class literals, and enum refs. Unresolvable fragments render as `<dynamic>`.
 
 `external` property:
 - `true` — library/JDK stubs (auto-created from resolved call targets; no source file)
@@ -112,7 +131,7 @@ onelens entry-points --graph <name>
 # Retrieval (hybrid FTS + semantic + rerank)
 onelens retrieve --query "how password encryption works" --graph <name>
 
-# Daemon (keeps Qwen3 + mxbai warm for semantic tools — optional)
+# Daemon (keeps local embedder + mxbai warm for semantic tools — optional)
 onelens daemon start / stop / status
 ```
 
@@ -144,7 +163,7 @@ plugin/src/main/kotlin/com/onelens/plugin/
 python/src/onelens/
 ├── mcp_server.py                 # FastMCP v3 — single source of truth for CLI and MCP agents
 ├── cli_generated.py              # Auto-generated by `fastmcp generate-cli` (don't edit directly)
-├── daemon.py                     # onelens daemon start/stop/status (warm Qwen3 + mxbai)
+├── daemon.py                     # onelens daemon start/stop/status (warm local embedder + mxbai)
 ├── importer/
 │   ├── loader.py                 # Full import (UNWIND + context mine + PageRank post-phase)
 │   ├── delta_loader.py           # Delta import + context cascade-delete + mine_upserts
@@ -158,7 +177,7 @@ python/src/onelens/
 ├── context/                      # ChromaDB semantic layer
 │   ├── retrieval.py              # hybrid_retrieve: router → FTS+semantic RRF → kind-boost → PageRank boost → cross-encoder rerank → threshold filter
 │   ├── searcher.py
-│   ├── embedder.py               # Qwen3-Embedding-0.6B
+│   └── embed_backends/           # ONNX embedders (default Jina-v2-base-code; profiles: gemma, tiny)
 │   └── reranker.py               # mxbai-rerank-base cross-encoder
 └── miners/
     └── code_miner.py             # Full mine + mine_upserts + delete_by_ids + delete_methods_of_classes (ID-prefix cascade)
@@ -179,3 +198,23 @@ python/benchmarks/                # Local only (gitignored)
 - FalkorDB default port: 17532 (mapped from Docker 6379)
 - Before public push: `grep -rIn "<client-name>"` to catch leaked client refs in comments/examples
 - Before committing plugin-side changes: run `./gradlew compileKotlin` — the CLI command rename that slipped through once already (`import` → `import_graph`) would have been caught by CI
+- Git hooks (`.githooks/`) scan BOTH staged diffs (`pre-commit`) AND the commit message (`commit-msg`) against `.claude/hooks/client-names.txt`. Install once per clone with `git config core.hooksPath .githooks`. Don't bypass with `--no-verify` — if a client name is legitimately part of the commit (e.g. referencing a test fixture path that lives outside the repo), rewrite to a generic term instead
+
+## Tracker + docs — keep them current, every turn
+
+**Rule:** whenever you add, change, or retire a feature in this repo (plugin collector, Python module, adapter, schema, Cypher pattern, skill reference, etc.), update these files *in the same session* — never "I'll come back to it later":
+
+1. `docs/PROGRESS.md` — flip the feature row from ⬜/🟡 to ✅ (or add a new row). Drop a one-line pointer to the code file(s) that landed.
+2. `CHANGELOG.md` — append to `[Unreleased] → Added/Changed/Fixed/Removed` as appropriate. Phase/section labels are fine (`### Added — Phase B · Vue 3 adapter`).
+3. `docs/DECISIONS.md` — if the change encodes a non-obvious architectural choice (a new SPI, a manifest split, a backend swap, a skill-layout decision), add a new `ADR-NNN` entry with Decision / Context / Alternatives / Revisit-when.
+4. `docs/roadmap.md` — only when a milestone checkbox flips or a new milestone row is justified.
+5. `README.md` — only when the top-line positioning actually changes (new stack, new flagship feature).
+
+Trigger this check:
+
+- Right before you write the end-of-turn summary for any coding turn that shipped real changes.
+- Whenever you're about to call `git commit` — treat uncommitted doc drift as part of the same unit of work, not a follow-up.
+
+If the change is too small for any of the files above (typo fix, single-line refactor, comment cleanup), say so explicitly in the end-of-turn note so the reader knows the skip was deliberate.
+
+Rationale: tracker drift is invisible until someone else picks up the repo and can't tell what's real vs aspirational. PROGRESS.md + CHANGELOG + DECISIONS are the durable state that outlives any single conversation — keeping them fresh is cheaper than reconstructing them later.

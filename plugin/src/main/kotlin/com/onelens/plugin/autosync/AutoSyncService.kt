@@ -14,6 +14,8 @@ import com.onelens.plugin.export.ExportConfig
 import com.onelens.plugin.export.ExportService
 import com.onelens.plugin.export.delta.DeltaExportService
 import com.onelens.plugin.settings.OneLensSettings
+import com.onelens.plugin.ui.OneLensEvents
+import com.onelens.plugin.ui.OneLensState
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -130,35 +132,100 @@ class AutoSyncService(private val project: Project) : Disposable {
         }
 
         LOG.info("Auto-sync triggered: ${filesToSync.size} modified, ${filesDeleted.size} deleted")
+        OneLensEvents.status(OneLensState.SYNCING)
+        OneLensEvents.info("Auto-sync triggered: ${filesToSync.size} modified, ${filesDeleted.size} deleted")
 
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
+        val coordinator = com.onelens.plugin.export.SyncCoordinator.getInstance()
+        if (!coordinator.tryAcquire()) {
+            LOG.info("Auto-sync skipped — another sync is already running")
+            OneLensEvents.info("Auto-sync skipped — a sync is already running")
+            syncing.set(false)
+            return
+        }
+        val task = object : Task.Backgroundable(project, "OneLens: Auto-syncing", true) {
             override fun run(indicator: ProgressIndicator) {
+                val start = System.currentTimeMillis()
                 try {
                     indicator.text = "Auto-syncing ${filesToSync.size} modified, ${filesDeleted.size} deleted..."
-                    val config = ExportConfig()
+                    val settings = com.onelens.plugin.settings.OneLensSettings.getInstance().state
+                    val config = ExportConfig(
+                        buildSemanticIndex = settings.buildSemanticIndex,
+                        graphBackend = settings.graphBackend,
+                    )
+                    // Snapshot the delta diff-base BEFORE the export advances
+                    // it. If the import fails downstream we restore this so the
+                    // next delta re-covers the window instead of losing it.
+                    val exportState = com.onelens.plugin.export.ExportState.getInstance(project)
+                    val baseline = exportState.snapshotBaseline()
                     val result = DeltaExportService.exportDeltaForFiles(project, config, filesToSync, filesDeleted)
 
                     when (result) {
                         is DeltaExportService.DeltaResult.Success -> {
                             val service = ApplicationManager.getApplication().getService(ExportService::class.java)
-                            service.syncToGraph(result.path, project.name, config, isFull = false)
-                            LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
+                            val graphId = try {
+                                com.onelens.plugin.framework.workspace.WorkspaceLoader.load(project).graphId
+                            } catch (_: Exception) { project.name }
+                            val syncResult = service.syncToGraph(result.path, graphId, config, isFull = false, projectBasePath = project.basePath)
+                            if (!com.onelens.plugin.export.ExportState.isImportSuccess(syncResult)) {
+                                // Import did not land (FalkorDB down, Python
+                                // crash, MCP+CLI both failed). Roll the diff-base
+                                // back so these files re-export next delta —
+                                // otherwise the graph is silently, permanently
+                                // stale for this window.
+                                exportState.restoreBaseline(baseline)
+                                LOG.warn("Auto-sync import did not land — diff-base rolled back. result=$syncResult")
+                                OneLensEvents.error(
+                                    "Sync FAILED — graph is STALE for the last edit. " +
+                                    "Changes will retry on next save. (${syncResult ?: "import error"})"
+                                )
+                            } else {
+                                exportState.state.lastSuccessfulImportTimestamp = System.currentTimeMillis()
+                                val dur = System.currentTimeMillis() - start
+                                LOG.info("Auto-sync complete: ${result.stats.upsertedClassCount} classes, ${result.stats.upsertedCallEdgeCount} edges")
+                                OneLensEvents.syncComplete(
+                                    graphName = graphId,
+                                    classes = result.stats.upsertedClassCount,
+                                    methods = result.stats.upsertedMethodCount,
+                                    callEdges = result.stats.upsertedCallEdgeCount,
+                                    isDelta = true,
+                                    durationMs = dur,
+                                )
+                            }
                         }
                         is DeltaExportService.DeltaResult.NeedFullExport -> {
                             LOG.info("Auto-sync: full export needed, skipping (use manual Sync Graph)")
+                            OneLensEvents.warn("Auto-sync skipped: full export needed. Click Sync Graph.")
                         }
                         is DeltaExportService.DeltaResult.NoChanges -> {
                             LOG.info("Auto-sync: no changes detected")
+                            OneLensEvents.info("Auto-sync: no changes detected")
                         }
                         is DeltaExportService.DeltaResult.Error -> {
                             LOG.warn("Auto-sync failed: ${result.message}")
+                            OneLensEvents.error("Auto-sync failed: ${result.message}")
                         }
                     }
+                } catch (t: Throwable) {
+                    OneLensEvents.error("Auto-sync crashed: ${t.message}", t)
                 } finally {
+                    OneLensEvents.status(OneLensState.READY)
                     syncing.set(false)
                 }
             }
-        })
+            override fun onFinished() {
+                coordinator.release()
+            }
+            override fun onCancel() {
+                coordinator.killActive()
+                OneLensEvents.warn("Auto-sync cancelled by user")
+            }
+        }
+        try {
+            ProgressManager.getInstance().run(task)
+        } catch (t: Throwable) {
+            coordinator.release()
+            throw t
+        }
     }
 
     override fun dispose() {

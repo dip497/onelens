@@ -222,5 +222,1376 @@ the plugin (unlikely pre-1.0).
 
 ---
 
+---
+
+## ADR-011 · 2026-04-17 · Framework-adapter SPI for multi-stack support
+
+**Decision.** Introduce a `FrameworkAdapter` extension point so each
+language/framework lives in its own subpackage under
+`plugin/src/main/kotlin/com/onelens/plugin/framework/<adapter-id>/`. The
+existing Java/Spring collectors are wrapped as `SpringBootAdapter`; a new
+`Vue3Adapter` is the second adapter. `ExportService.exportFull` discovers
+active adapters via the EP and merges their outputs into a single JSON
+document; per-adapter subdocs live under top-level keys (`vue3: {…}`).
+
+**Context.** OneLens was hardcoded to Java: `ExportService` called seven
+collectors in a fixed order, `ExportDocument` had flat Java-centric keys,
+and `plugin.xml` hard-depended on `com.intellij.modules.java` so the JAR
+would not install on WebStorm. Adding a Vue 3 adapter in place would have
+duplicated the Java flow; modelling it as a peer via an SPI keeps each
+stack's logic self-contained, makes future stacks (Kotlin, Vert.x, FastAPI)
+additive, and lets users run a Vue-only sync on WebStorm.
+
+**Alternatives.**
+
+- Single mega-collector per language with hand-rolled switching inside
+  `ExportService` (rejected — every new stack would touch the
+  orchestrator and `ExportDocument` grows unbounded).
+- Separate plugins for Java and Vue (rejected — Marketplace UX worse,
+  shared infra like auto-sync and skill install would be duplicated).
+- Neo4j Fabric for federated multi-graph queries (deferred — FalkorDB
+  lacks `USE <graph>` and switching backends is a much larger change;
+  the `wing` property on nodes plus a monograph covers 10+ repos per
+  instance, enough until team-hosted scale forces federation).
+
+**Revisit when.** >10 repos per FalkorDB instance and monograph queries
+become too noisy, or a stack needs a fundamentally different graph shape
+the additive subdoc can't express.
+
+---
+
+## ADR-012 · 2026-04-17 · plugin.xml split via optional config-file deps
+
+**Decision.** `plugin.xml` declares only `com.intellij.modules.platform`
+hard. All language/framework machinery goes into stack-specific config
+files declared `optional` with `config-file=`:
+`framework-springboot.xml` (gated on `com.intellij.modules.java`),
+`spring-features.xml` (gated on `com.intellij.spring`),
+`framework-vue3.xml` (gated on `org.jetbrains.plugins.vue`).
+
+**Context.** The hard `<depends>com.intellij.modules.java</depends>` in
+the original plugin.xml refused installation on WebStorm and PyCharm
+Community — exactly the IDEs a Vue / Python user would have. The
+IntelliJ platform supports optional deps with config files; adapters
+register their extension-point contributions from those files so the
+core plugin loads even if a given stack's IDE module is absent.
+
+**Alternatives.**
+
+- Keep the hard Java dep and tell Vue users to install IDEA Ultimate
+  (rejected — user's target environment is WebStorm).
+- Runtime feature-flag checks inside every Kotlin collector (rejected —
+  ClassNotFoundError risk at plugin load; config-file gating happens in
+  the platform before anything Kotlin loads).
+
+**Revisit when.** The IntelliJ platform deprecates `config-file` or we
+decide to publish separate plugins per stack for Marketplace reasons.
+
+---
+
+## ADR-013 · 2026-04-17 · platformType IU (Ultimate) for dev, runtime portable
+
+**Decision.** `plugin/gradle.properties` sets `platformType = IU` so the
+sandbox + test classpath contain the JavaScript + Vue plugins (both
+bundled in Ultimate, not in Community). `platformCompatiblePlugins` stays
+wired in `build.gradle.kts` for future Marketplace plugins, but is empty
+for now. The shipped plugin's `sinceBuild = 251` gates IDE *version*, not
+*edition* — combined with ADR-012's config-file split, the JAR installs
+cleanly on WebStorm, PyCharm, IDEA Community, and Ultimate.
+
+**Context.** Attempted `compatiblePlugins("JavaScript")` against
+`platformType = IC` and hit `No plugin update with id='JavaScript'
+compatible with 'IC-251.26927.53' found in JetBrains Marketplace` — the
+JavaScript plugin is Ultimate-bundled, not a Marketplace entry. IU is
+the only way to get JS + Vue on the test classpath without per-version
+version pinning.
+
+**Alternatives.**
+
+- Stay on IC and pin a Marketplace build of the Vue plugin (rejected —
+  no standalone JavaScript plugin on Marketplace for IC).
+- Dual-build IC + IU in CI with matrix jobs (deferred — not needed until
+  we want automated verification on IC-specific code paths).
+
+**Revisit when.** JetBrains ships a standalone JavaScript plugin on
+Marketplace for IC, or the Ultimate dev footprint (~1.5 GB) proves too
+heavy for contributors.
+
+---
+
+## ADR-014 · 2026-04-17 · Skill layout — single skill, per-stack references
+
+**Decision.** One `skills/onelens/SKILL.md` hub plus
+`skills/onelens/references/jvm.md` and `.../vue3.md`. The hub
+(~100 lines) stays in context always; references load lazily when the
+hub's stack-detection step determines which stack the active wing
+belongs to. Plugin bundles both the hub and the references directory;
+`InstallSkillAction` copies both.
+
+**Context.** The initial instinct was to create separate
+`onelens-jvm` / `onelens-vue3` skills. That would have split triggering
+across two descriptions, risked Claude picking the wrong one for
+cross-stack questions, and forced duplicated "answer principles" text.
+The skill-creator's domain-organization pattern (hub +
+`references/*.md`) is the canonical fix: one trigger surface,
+progressive disclosure of stack-specific content, cross-stack queries
+live only in the hub.
+
+**Alternatives.**
+
+- Two separate skills with independent descriptions (rejected — ambiguous
+  trigger for cross-stack questions, doubles install surface).
+- Single monolithic SKILL.md (rejected — broke through the recommended
+  <500-line budget; non-relevant stack content polluted every
+  invocation's context).
+
+**Revisit when.** Enough stacks land (Vert.x, FastAPI, Kotlin) that the
+hub itself grows beyond ~200 lines — at that point move the
+stack-detection table into `references/stack-detection.md`.
+
+---
+
+---
+
+## ADR-015 · 2026-04-18 · Block-list hook prevents client names leaking in
+
+**Decision.** Add a `PreToolUse` hook
+(`.claude/hooks/block-client-names.sh`) that reads
+`.claude/hooks/client-names.txt` and refuses any `Write` / `Edit` /
+`NotebookEdit` tool call whose `file_path`, `content`, or `new_string`
+contains a forbidden term (case-insensitive substring). The block list
+is editable only for maintainers; contents stay out of commits by design
+because the file itself also counts against the hook (adding a name to
+the list and committing it would leak the name).
+
+At the same time we swept the existing tree and rewrote 12 references to
+a real-world test-target repo into generic phrasing ("a large Vue 3
+repo", "the reference Java backend"). CHANGELOG and PROGRESS call it
+out explicitly.
+
+**Context.** The convention section of `CLAUDE.md` already said
+"`grep -rIn "<client-name>"` before public push". That rule kept getting
+forgotten in-session, and a swath of plugin + docs code shipped with a
+specific client repo name embedded. Catching drift at Write/Edit time
+turns the rule into enforcement instead of etiquette. The list file +
+hook pattern keeps the fix centralized: new client relationships add
+one line to `client-names.txt`, retire by deleting the line.
+
+**Alternatives.**
+
+- Keep relying on the manual `grep` convention (rejected — already
+  proven unreliable over multiple sessions).
+- Add a CI job that greps the working tree (rejected as the *only*
+  line of defence — catches drift late, after PRs are already open;
+  still a useful second layer).
+- Ban the terms via `.gitignore` / `pre-commit` (rejected as sole
+  mechanism — pre-commit runs in dev loops only; the Claude-Code hook
+  catches the moment an edit is proposed, not just at commit time).
+
+**Revisit when.** The block list outgrows a simple substring match
+(multi-word fuzzy matches, regex needs) — at that point swap the
+`grep -qiF` core for a Python matcher keeping the same input contract.
+
+---
+
+## ADR-016 · 2026-04-18 · Modal remote — bake weights into image, drop the volume
+
+**Decision.** The Modal embed + rerank image (`python/src/onelens/
+remote/modal_app.py`) now pre-fetches `Qwen/Qwen3-Embedding-0.6B` and
+`BAAI/bge-reranker-base` at image-build time via
+`run_function(_prefetch_weights)`; the former `onelens-models`
+`modal.Volume` is removed. The base image also switches from
+`debian_slim` to `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` so
+`onnxruntime-gpu` actually loads the `CUDAExecutionProvider` instead
+of silently falling back to CPU.
+
+**Context.** Cold starts were hitting repeated 9p snapshot-restore
+failures — Modal's docs (explicitly) warn that *"Deleting files in a
+Volume used during restore will cause restore failures"*. Every
+restore failure burned 30 s of tail latency and occasionally wedged
+the container. The offending path was the volume-mounted HF cache;
+models get periodically evicted / refreshed, which races the restore.
+
+**Alternatives.**
+- Keep the volume, make the HF cache read-only (rejected — HF client
+  still writes metadata files on resolve; not truly read-only).
+- Switch to a pre-downloaded image layer without killing the volume
+  (rejected — residual volume mount means same restore race).
+- Bake weights into the image, accept the ~2.5 GB growth (**picked**).
+  Trade image pull cost once per deploy for zero restore failures and
+  strictly-local weight loads on every container.
+
+**Revisit when.** We need > 1 model variant per workspace (Mxbai
+large, multilingual reranker, etc.) and image size blows past the
+per-deploy pull-cost budget — at which point a pinned snapshot tag
+on the volume, combined with `scaledown_window=0` to avoid restores,
+becomes the better deal.
+
+---
+
+## ADR-017 · 2026-04-18 · Rerank scores normalized in `Reranker.score`, Modal wrapper passthrough
+
+**Decision.** `python/src/onelens/context/reranker.py` now squashes
+raw cross-encoder logits through `sigmoid(x)` before returning.
+`python/src/onelens/remote/modal_app.py::Embedder.rerank` is a plain
+passthrough over `Reranker.score` — no further transformation.
+
+**Context.** Retrieval filters on `ONELENS_MIN_RERANK_SCORE=0.02`
+which assumes a 0-1 probability range. `fastembed.TextCrossEncoder.
+rerank` surfaces raw logits (roughly [-10, +10] for bge-reranker-
+base), so every hit dropped below threshold and `hybrid_retrieve`
+returned an empty list — the regression caught in the Vue-3 dogfood.
+A prior fix added the squash only in the Modal wrapper; the local
+path (`ONELENS_RERANK_BACKEND=none` or tests instantiating `Reranker`
+directly) stayed broken.
+
+**Alternatives.**
+- Keep the squash only in Modal, document the local path (rejected —
+  silent divergence between backends, future regression magnet).
+- Move the threshold to logits-space with per-model calibration
+  (rejected — threshold becomes model-specific, breaks the
+  swap-the-reranker-backend contract we want to preserve).
+- Squash once in `Reranker.score`, Modal wrapper passthrough (**picked**
+  — single normalization point, identical range for local and remote).
+
+**Revisit when.** We move to a reranker that already emits
+probabilities (certain MiniLM-class checkpoints do); at that point
+the sigmoid becomes a no-op at best, slightly harmful at worst, and
+should be gated on model metadata.
+
+---
+
+## ADR-018 · 2026-04-18 · FTS Vue query results return prefixed `<type>:<key>` fqns
+
+**Decision.** `python/src/onelens/graph/queries.py` prefixes every
+Vue-label FTS result with the matching ChromaDB drawer-id prefix —
+`component:`, `composable:`, `store:`, `route:`, `apicall:`,
+`jsmodule:`, `jsfunction:`. The returned `fqn` column is treated as
+a drawer id by the retrieval layer.
+
+**Context.** Retrieval fuses FalkorDB FTS results and ChromaDB
+semantic results via RRF (`_rrf_fuse`) and then resolves `filePath`
+/ line ranges with `_fetch_locations_batch`. Both layers key on the
+ChromaDB drawer-id shape (`<type>:<key>`). The original Vue-label
+queries returned `node.name` / `node.fqn` / `node.filePath` raw —
+semantic hits (`route:UsersList`) and FTS hits (`UsersList`) were
+treated as different entries by RRF, and the prefix-partitioned Vue
+block in `_fetch_locations_batch` skipped any id without a `:`.
+
+**Alternatives.**
+- Strip the prefix inside the retrieval layer (rejected — spreads
+  the format contract across two files, every new Vue label drops
+  back into the same trap).
+- Move drawer-id construction into a helper called from both sides
+  (deferred — the single-source-of-truth helper is worth doing but
+  not gating this fix).
+- Prefix at the query source (**picked** — matches the existing
+  Component / Composable / Store convention already in the file;
+  one-line diff per query).
+
+**Revisit when.** The drawer-id prefix scheme changes (e.g. we
+introduce a namespace separator or a wing-scoped id) — at that
+point the helper extraction in the deferred alternative becomes
+the right move.
+
+---
+
+## ADR-019 · 2026-04-18 · Palace MCP — MemPalace-shaped surface, diverging KG store
+
+**Decision.** Ship a parallel MCP server `onelens-palace` that mirrors
+MemPalace's 19-tool interface, but store the temporal knowledge graph
+in a dedicated FalkorDB graph (`onelens_palace_kg`) instead of SQLite.
+Drawers stay in the existing per-wing ChromaDB collections; no schema
+change on the main collection. Agent diaries live in Chroma under
+`wing=agent:<name>`. A WAL at `~/.onelens/palace/wal/write_log.jsonl`
+records every write.
+
+**Context.** We want a cross-source navigation + fact layer on top of
+the code graph. MemPalace already ships this vocabulary
+(wings / rooms / halls / drawers / tunnels / triples). Adopting it
+verbatim means any agent trained against MemPalace drives OneLens with
+zero re-learning. Our code graph already runs in FalkorDB, so a
+SQLite-backed KG would force a Python-side join for every `kg_query`
+that targets a code FQN.
+
+**Alternatives.**
+- SQLite literal parity (rejected — loses structural projection).
+- Reuse each wing's graph for triples (rejected — code re-import with
+  `--clear` would nuke facts).
+- Dedicated FalkorDB graph + structural projection on query (picked).
+
+**Revisit when.** FalkorDB variable-length traversal with predicate
+filters stops being a bottleneck — at that point drop the Python-side
+hop unroll in `palace_traverse` and deepen `kg_query`.
+
+---
+
+## ADR-020 · 2026-04-18 · Halls as a dual taxonomy — source axis + content axis
+
+**Decision.** Keep OneLens's existing source-axis halls
+(`hall_code / hall_git / hall_issues / hall_cicd / hall_runtime /
+hall_decisions / hall_docs`) unchanged in `CodeMiner`. Add an
+orthogonal content-axis set — `hall_signature`, `hall_event`,
+`hall_fact`, `hall_doc` — used by Palace-authored drawers (notes,
+diaries, hand-asserted facts). Both vocabularies live in the same
+`hall` metadata field.
+
+**Context.** OneLens's `hall_*` constants are a source-of-signal
+taxonomy (where did the drawer come from). The Palace plan proposed
+splitting `hall_code` into five content classes. Collapsing the axes
+would either corrupt source-of-signal semantics or force a ChromaDB
+metadata migration on every existing drawer.
+
+**Alternatives.**
+- Single taxonomy, full migration (rejected — breaks existing data and
+  every hall consumer).
+- Drop halls for Palace drawers (rejected — loses content-class filter
+  on notes/diaries/facts).
+- Dual taxonomy (picked).
+
+**Revisit when.** A third consumer needs a new hall semantic. At that
+point promote `hall` to a structured multi-key metadata
+(`hall_source`, `hall_content`, ...) and ship a one-shot re-mine.
+
+---
+
+## ADR-021 · 2026-04-18 · Workspace abstraction for multi-repo / multi-module indexing
+
+**Decision.** Introduce an explicit `Workspace` concept above the
+IntelliJ-project level. A workspace is declared by a committed
+`onelens.workspace.yaml` with N `roots` (each optionally a separate
+git repo), a stable `graph` name, and policies for duplicate FQNs,
+delta tracking, and per-app PageRank. The plugin, collectors, delta
+tracker, and Python loader all consume a single `Workspace` object
+instead of reading `project.basePath` / `project.name` directly.
+Absent a config file, an implicit single-root workspace is
+synthesised — full backward compatibility.
+
+**Context.** OneLens silently equated "IntelliJ project" with "unit of
+indexing". That broke in three independent ways for real
+multi-module JVM codebases:
+
+1. **Collector scope.** `GlobalSearchScope.projectScope(project)` in
+   every collector excluded sibling Maven modules linked via a parent
+   pom's `<module>../otherRepo/common</module>` reference. Their
+   classes were invisible even though PSI could resolve calls into
+   them; the graph got dangling edges to FQNs with no nodes.
+2. **File paths.** `file.path.removePrefix(basePath)` on a sibling
+   file left a `../otherRepo/...` path that broke snippet fetching
+   in Python retrieval.
+3. **Full-import loader used `CREATE`** in bulk UNWIND. Plugin-style
+   repos routinely fork `com.acme.Constants` across 10+ plugin dirs,
+   each a valid compile unit under its own module. One duplicate
+   aborted the whole import.
+
+Add to this: the delta tracker ran `git diff` only inside the primary
+repo, so changes to a sibling `common/` were invisible; and graph
+names were locked to `project.name` with no knob for OSS adopters
+who want a stable, CI-friendly graph id.
+
+All of these are symptoms of the same missing abstraction. The fix
+is to name that abstraction — **Workspace** — and make every
+boundary-sensitive subsystem consume it.
+
+**Alternatives.**
+
+- **Hack `projectScope` to union linked Maven projects only**
+  (rejected — hides the concept, doesn't solve delta / loader /
+  graph-name problems, keeps one-repo-one-graph assumption).
+- **One graph per repo, federation layer on top** (deferred — proper
+  answer for cross-*workspace* queries, but doesn't help within a
+  workspace that legitimately spans repos, e.g. monorepo + sibling
+  lib or plugin-fork architectures).
+- **Infer everything from IntelliJ's module graph at sync time**
+  (rejected — not reproducible in CI without an IDE; OSS adopters
+  running headless builds need a committed file).
+- **Per-adapter workspace** (rejected — a workspace is a graph-level
+  concern; adapters already share the graph via the `wing` property
+  and would have to re-agree on boundaries).
+
+**Revisit when.** Two concrete signals:
+(a) A single workspace legitimately needs to span ≥5 git repos and
+config ergonomics start to rot — at which point the YAML schema
+gains glob roots and per-root inherit semantics. (b) Users demand
+cross-workspace federated queries (M3 roadmap item), which is a
+*different* abstraction layered on top of workspaces, not a
+replacement.
+
+See `docs/workspaces.md` for the config schema and migration notes.
+The loader-side blocker is already live:
+`python/src/onelens/importer/loader.py::_batch_nodes` switched from
+`CREATE` to `MERGE` so duplicate FQNs upsert instead of aborting the
+batch. The remaining work (collector-side scope, file-path
+normalisation, multi-git delta, policy knobs) lands in v1.2.
+
+---
+
+## ADR-022 · 2026-04-18 · App and Package as adapter-agnostic graph primitives
+
+**Decision.** Promote `App` and `Package` to first-class node types
+in the shared graph schema, owned by the core (not any single
+adapter). Each `FrameworkAdapter` is responsible for *emitting* App
+and Package nodes for its stack, using adapter-appropriate detection:
+
+- `SpringBootAdapter`: `App` per `@SpringBootApplication` (main class
+  package + `@ComponentScan` resolution → `SCANS_PACKAGE`). `Package`
+  per JVM package.
+- `Vue3Adapter`: `App` per detected Vue app root (already implicit
+  in `Vue3Adapter.detect()`). `Package` per `src/` subdirectory.
+- Future `FastAPIAdapter`: `App` per `FastAPI()` instance; `Package`
+  per Python module.
+- Future `GoAdapter`: `App` per `main()` package; `Package` per Go
+  import path.
+
+Edges: `CONTAINS` (App → Class / Method / Endpoint),
+`HAS_CLASS` (Package → Class), `PARENT_PACKAGE` (Package → Package).
+`Method.appFqns[]` and `Class.appFqns[]` are denormalised for fast
+filter on large graphs.
+
+**Context.** Real microservice monorepos have multiple entrypoints
+per repo (a reference enterprise Spring Boot server had 18 `@SpringBootApplication`
+classes across modules; same pattern appears in JHipster samples,
+Netflix OSS, and Spring Cloud demos). Today OneLens flattens them
+into one topology: PageRank blends endpoints across apps, impact
+analysis can't answer "which service handles this endpoint", and
+cross-service call edges are invisible. Every one of those is a
+first-order question for architecture-aware AI context.
+
+Package-as-node unlocks aggregation queries (per-package PageRank,
+coupling metrics, split-package detection) essentially for free —
+classes already carry `packageName`, and the edges are a one-time
+derivation pass in the loader.
+
+Keeping both primitives adapter-agnostic means cross-stack queries
+work without schema negotiation: "which Vue apps hit endpoints
+defined by which Spring apps" joins on `App` + `Endpoint` regardless
+of which adapter emitted each node.
+
+**Alternatives.**
+
+- **App-as-Spring-only concept** (rejected — every other framework
+  with a main entrypoint needs the same node; duplicating it per
+  adapter splits the vocabulary).
+- **`packageName` as a property only** (rejected — blocks
+  package-level aggregation, can't represent cross-package coupling
+  as an edge).
+- **Only `App`, no `Package`** (rejected — package aggregation is
+  cheap to add alongside and answers a real class of questions).
+- **Adapter-specific `App` subtypes** (deferred — may be necessary
+  if per-app analysis diverges enough; for now `App.type` as a
+  property covers `spring-boot` / `vue3` / `fastapi` / `go`).
+
+**Revisit when.** A framework lands whose "application boundary"
+genuinely can't be expressed as `App` with a package-ish membership
+rule — e.g. actor systems where boundaries are message-routing
+concerns. At that point consider `Scope` as a sibling primitive and
+let adapters pick.
+
+---
+
+## ADR-023 · 2026-04-18 · Dual engine — PSI in-IDE, metadata in CI
+
+**Decision.** The long-term architecture has two import engines
+behind the same JSON schema: the existing IntelliJ-PSI engine (for
+dev-time accuracy) and a headless metadata engine that parses JAR
+contents and Spring Boot's standardised metadata files
+(`spring-configuration-metadata.json`,
+`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`,
+`spring.factories`, `spring.binders`) plus bytecode via ASM. Same
+export format → same loader → same graph.
+
+**Context.** OSS adoption needs a zero-IDE path: a GitHub Action that
+imports a graph on PR, a CLI that runs on a CI box without IDEA
+installed. The PSI engine is and remains the accuracy moat — 100%
+type-resolved, overload-aware, Spring-plugin-integrated when Ultimate
+is available. But it requires a developer to open the project in
+IntelliJ, which kills CI and kills adopters who only learn about
+OneLens through a PR comment.
+
+The IntelliJ Spring plugin's public API (documented at
+`plugins.jetbrains.com/docs/intellij/spring-api.html`,
+`com.intellij.spring.*`) gives the PSI engine free access to bean
+graph, `@Profile`, `@ComponentScan` class-literal resolution,
+`@Import` chain, `spring.factories` auto-config resolution, Spring
+MVC endpoint model, and Spring Data query derivation — *if* the user
+has Ultimate and the `com.intellij.spring` / `com.intellij.spring.boot`
+plugins enabled. The metadata engine gives the CI path a
+lower-fidelity but fully accurate-for-what-it-covers subset of the
+same information, straight from the standardised files Spring Boot
+emits at build time.
+
+Neither engine is privileged. A workspace may be imported by
+whichever is available; if both produce exports for the same
+workspace, the last one wins on node properties (thanks to
+ADR-021's `MERGE`).
+
+**Alternatives.**
+
+- **PSI-only, forever** (rejected — kills CI adoption, kills any
+  adopter without IntelliJ).
+- **Parse Java source in Python via tree-sitter or javalang**
+  (rejected as a primary strategy — no overload resolution, no
+  generic inheritance, no `@ComponentScan` class-literal handling;
+  acceptable as a *supplemental* source for method bodies in CI mode
+  where exact PSI is unavailable).
+- **Ship a headless IntelliJ in CI via IDEA Community + scripts**
+  (rejected — ~1.5 GB image, slow cold start, licensing surface for
+  Ultimate-only APIs is still fragile).
+- **Use Spring's own `spring-boot-maven-plugin` at build time to
+  emit a richer manifest** (deferred — would require user co-op on
+  build config; nice-to-have, not on the critical path).
+
+**Revisit when.** The metadata engine hits a capability gap that
+matters enough to block OSS adopters (e.g. users demand transaction
+propagation traces from CI, which neither standardised metadata nor
+ASM bytecode can reconstruct). At that point consider requiring an
+IntelliJ Headless CI adapter as a second-tier CI path, or asking
+adopters to generate an augmented manifest via a custom Maven /
+Gradle plugin.
+
+Cross-references: ADR-011 (framework adapter SPI), ADR-012
+(plugin.xml optional config-file split — makes Spring-plugin API
+usage opt-in without hard-coupling core to Ultimate), ADR-021
+(workspace abstraction — both engines consume the same workspace
+config).
+
+---
+
 *To append a new ADR, copy the heading format and add at the
 bottom. Do not rewrite or delete earlier entries.*
+
+---
+
+## ADR-024 · Release snapshots: Lite-first, GitHub Releases primary, cosign-keyless (2026-04-20)
+
+**Decision.** Phase R Stage 1a ships release snapshots as
+developer-triggered, Lite-first, distributed through GitHub Releases
+with Sigstore keyless signing (`cosign sign-blob` / `cosign
+verify-blob`). A pinned `onelens-index` tag hosts a stable-URL
+`snapshots.json` catalog; consumers fetch one JSON and never paginate.
+The producer bundles `~/.onelens/graphs/<graph>/<graph>.rdb` (+ optional
+ChromaDB drawer) into `onelens-snapshot-<graph>-<tag>.tgz` with a
+bundle-internal `manifest.json` v3 carrying `schemaVersion`,
+`commitSha`, `embedder`, and `falkordbLite` fields. On consumer side
+the restored rdb is renamed via `GRAPH.COPY` + `GRAPH.DELETE` so the
+internal graph key matches `<graph>@<tag>` (FalkorDB Lite binds the key
+into the rdb — filename rename is insufficient).
+
+No CI / webhook / auto-build in Stage 1. No per-branch graphs (live
+graph follows HEAD; snapshots are tag-keyed).
+
+**Context.** Teams today share graphs via ad-hoc `scripts/bundle.sh` /
+`restore.sh`, which assume Docker FalkorDB, carry no SHA256 or
+signature, and don't fit a `<graph>@<tag>` naming scheme. First sync on
+a fresh laptop costs 20 min; onboarding + API-diff / regression-hunt
+workflows are gated on this. Community pressure from Graphiti-style
+temporal models and Sourcegraph-style CI-auto upload was evaluated and
+rejected for Stage 1 (see Alternatives).
+
+**Alternatives.**
+
+- **Extend `bundle.sh` to handle Lite.** Rejected — Lite path is
+  structurally different (file copy vs `docker exec BGSAVE`), and
+  piling both into one bash script hurts reviewability. New Python
+  producer + consumer gives typed signatures, testable seams, and
+  reuses `httpx` / `hashlib` / `tarfile` / `subprocess` we'd need
+  anyway.
+- **Graphiti-style bi-temporal invalidation (`valid_at`/`invalid_at`
+  per edge).** Rejected — git tags already express time for a code
+  graph; adding a temporal predicate to every Cypher hurts query
+  cost and readability.
+- **Sourcegraph-style CI-auto upload on every commit.** Deferred
+  (Phase R.1+) — requires either an IntelliJ headless harness
+  (`gradle runIdeForUiTests`) or a standalone Kotlin-CLI extraction
+  of the collectors (not started). Stage 1 ships the manual
+  developer-triggered CLI path so adopters aren't blocked on CI work
+  that has a clear operational owner.
+- **Ed25519 / GPG signatures.** Rejected — key management burden
+  with no transparency log. Sigstore keyless (OIDC → Fulcio → Rekor)
+  is the modern 2026 baseline for OSS dev-tool artifacts.
+- **Ship `snapshots.json` pagination.** Rejected for Stage 1 — at the
+  observed cadence (normal tagging, ~20-250 snapshots per repo over
+  years) one flat JSON fits comfortably in a CDN-cached asset.
+  Revisit when any single repo's catalog exceeds 500 entries.
+- **Publisher-side graph-key rename (COPY/DELETE at bundle time).**
+  Rejected — the rename cost (load 200k nodes into redislite → COPY
+  → DELETE → SAVE) is paid every publish. Moving it to consumer-side
+  pull means it happens once per restore, and publish stays a fast
+  file copy + metadata write.
+- **Embed `manifest.json` outside the tarball.** Rejected — schema
+  version + FalkorDB version must travel with the artifact to guard
+  against consumer/producer drift. SCIP's "metadata travels inside"
+  pattern applies.
+- **Per-branch graphs as the snapshot mental model.** Rejected —
+  50 GB+ disk at 1000 branches on a typical workstation; branches
+  are handled by the existing live graph + delta sync, not by
+  snapshots.
+
+**Revisit when.** (a) We ship the headless-collector CLI — promotes
+Phase R Stage 1 (manual) to CI (Phase R.1 auto). (b) A single repo's
+snapshot catalog crosses ~500 entries, requiring pagination on
+`snapshots.json`. (c) We launch the Cloud tier — at which point
+coordination across repos, RBAC, and audit replace the CLI + GitHub
+Releases workflow for enterprise orgs (Cloud is strictly additive;
+OSS keeps everything above intact forever).
+
+Cross-references: ADR-022 (FalkorDB Lite as default backend — the
+substrate snapshots ride on), ADR-023 (metadata engine — future CI
+path for snapshot producers without IntelliJ), `docs/design/phase-r-release-snapshots.md`
+(full spec).
+
+## ADR-025 · One tool window with tabs, not multiple sidebar entries (2026-04-20)
+
+**Decision.** OneLens ships a single IntelliJ tool window (`OneLens`,
+right anchor) with `Content` tabs for each surface — `Status` today,
+`Snapshots` shipped in Phase R Stage 1b, `Query` / `Retrieve` /
+`Diff` reserved for later. Secondary tool windows (`OneLens Snapshots`,
+etc.) are rejected.
+
+**Context.** Phase R Stage 1b initially shipped a separate `OneLens
+Snapshots` tool window to avoid touching the working Status panel.
+Resulting UI had two separate sidebar entries with duplicated graph /
+backend context, split mental model, and unclear home for new Publish
+/ Pull actions. Future Phase R.1+ work adds more surfaces (Query
+console, Retrieve NL search, Diff); continuing the pattern would
+balloon to 4–5 sidebar icons for one plugin.
+
+**Alternatives considered.**
+- *Secondary tool window per feature.* Rejected: sidebar clutter, no
+  shared header, duplicated graph/backend display, each feature
+  relearns the same state wiring.
+- *Single flat panel with sections.* Rejected: doesn't scale past 3
+  surfaces; Cypher console and snapshot list want full panel real
+  estate each.
+- *Modal dialogs for ephemeral surfaces (Publish/Pull).* Kept for
+  Publish because publishing is a one-shot action; rejected for
+  Snapshots list because listing is a persistent workspace concern
+  that benefits from being parked in the sidebar.
+
+**Consequences.**
+- Single `<toolWindow id="OneLens">` in `plugin.xml`; adding a tab is a
+  one-line change in `OneLensToolWindowFactory.createToolWindowContent`.
+- Shared header + graph picker + backend badge can be extracted as a
+  reusable `JBPanel` (Phase 2) without touching tab content.
+- Actions live in a single `OneLens.Actions` action group so any tab
+  can surface a button via `ActionManager.getInstance().getAction(id)` —
+  Publish is mirrored on Status toolbar + Snapshots toolbar without
+  code duplication.
+- Future framework adapters (Vue3, Spring) can contribute tabs via a
+  future `oneLensTab` extension point, preserving the
+  single-tool-window contract.
+
+**Revisit when.** (a) A tab's responsibilities grow beyond what a
+single vertical panel can carry and splitting into a dedicated tool
+window becomes genuinely simpler. (b) We add a truly orthogonal
+surface (e.g. a project-wide settings dashboard independent of the
+current graph) that doesn't share the Status header.
+
+Cross-references: ADR-009 (plugin auto-installs Python venv — same
+principle: one visible touchpoint, orchestrate the rest),
+ADR-011 (framework-adapter SPI — guides the future
+`oneLensTab` extension point shape).
+
+## ADR-026 · Snapshot-as-seed marker = one-shot, not permanent baseline (2026-04-21)
+
+**Decision.** When a user promotes a release snapshot to be the live
+graph's seed ("Start working from this snapshot"), the plugin writes
+`~/.onelens/graphs/<graphId>/.onelens-baseline` — a JSON file
+carrying `{tag, commitSha, promotedAt, schemaVersion, producerVersion,
+embedder}`. The marker is **consumed (read + deleted) at DeltaTracker
+entry on the next sync**, not cleaned up on a separate SyncComplete
+event. One-shot lifecycle: seed once, then every subsequent sync is
+normal last-export-timestamp diff. There is no permanent
+"baseline" field on every export.
+
+**Context.** Phase R Stage 1d ships the onboarding shortcut: new dev
+pulls a shared release snapshot, promotes it, and Sync Graph deltas
+the branch diff from tag commit instead of doing a 20-min full
+reindex. Two design axes had to be chosen:
+
+1. Marker lifecycle — one-shot consume vs permanent sidecar.
+2. Marker placement — co-located with artifact vs central registry.
+
+**Alternatives considered.**
+
+- *Permanent `baseline` field on every export state record.* Rejected:
+  snapshots are an onboarding shortcut, not a long-term contract.
+  A permanent baseline would fight with branch switches (merge commits
+  disconnect the lineage), squash merges (tag commit disappears from
+  history), and the single-repo mental model (one live graph = one
+  ongoing state, not "forever-diffed from 8.7.4"). Users who want
+  durable per-branch state want Phase 1f per-branch live graphs, not a
+  sticky baseline.
+- *Content-addressed baseline (Nix/Bazel pattern — hash the snapshot's
+  rdb, key the diff by hash, not commit).* Rejected: our delta is
+  git-diff-driven, not input-hash-driven. Hashing an rdb doesn't help
+  when the question is "which Java files changed since commit X?".
+- *SyncComplete listener cleanup (write marker at promote, delete on
+  successful sync).* Rejected: two-sync race where the second sync
+  fires before the first's listener clears the marker would re-apply
+  the seed twice. Consume-at-entry eliminates the race at the cost of
+  one scenario (sync fails mid-run → marker gone → next retry falls
+  back to full sync; but full sync is correct, just slow).
+- *Central registry file `~/.onelens/promotions.json`.* Rejected:
+  co-located dotfile next to the artifact is the dominant pattern
+  (`.git/shallow`, `CACHEDIR.TAG`, `PG_VERSION` in PostgreSQL data
+  dirs). Registry adds a single-point-of-failure for no concurrency or
+  discoverability benefit at our scale.
+
+**Consequences.**
+
+- DeltaTracker has exactly one integration point — `consumeBaselineMarker`
+  reads + deletes at the top of `getChangedFiles`. Any caller that
+  doesn't go through DeltaTracker (e.g., a direct CLI `git diff`) won't
+  consume the marker, so it persists until the next Sync via the IDE.
+  Acceptable: the marker is advisory; live graph works either way.
+- Schema-version mismatch (`marker.schemaVersion != plugin's 3`) =
+  discard marker, fall back to full sync. Matches SharedIndexes
+  precedent — prevents silent cross-version corruption when a v1.2
+  snapshot is promoted inside v1.4.
+- Atomicity order at promote time (rdb → GRAPH.COPY rename → context
+  → marker) means a half-applied seed never writes a marker. Partial
+  state is recoverable via "run Sync Graph, it'll full-sync fresh."
+- `promotedAt` is UTC ISO8601 (not epoch ms) — cross-TZ devs see
+  sensible timestamps.
+
+**Revisit when.**
+
+- **Phase 1f (per-branch live graphs) ships.** Per-branch graphs
+  would want a durable "this graph's baseline is @X" contract, not
+  a one-shot marker. Promote would become a lookup key, not a seed
+  action.
+- **A snapshot lineage / provenance log is requested.** Today the
+  marker vanishes after first sync; no record of "live graph was
+  seeded from @8.7.4 on 2026-04-21." If users want debugging/audit
+  history, add a separate append-only log (`~/.onelens/graphs/<g>/.onelens-seeds`)
+  alongside the one-shot marker — orthogonal.
+- **Multiple concurrent dev machines sharing a network `~/.onelens/`.**
+  The marker isn't file-lock protected; two machines reading the
+  same marker would both consume it. Unlikely (each dev has local
+  `~/`), but if it happens, wrap `consumeBaselineMarker` in a
+  file-lock.
+
+Cross-references: ADR-007 (ChromaDB metadata schema canonical — seed
+must promote context atomically with rdb to avoid wing/room/hall drift),
+ADR-024 (Lite-first snapshots — substrate this builds on),
+ADR-025 (unified tool window — right-click menu on snapshot rows is
+where `Start working from this snapshot` lives),
+`docs/design/phase-r-stage-1d-snapshot-as-seed.md` (full spec).
+
+
+## ADR-027 · 2026-04-21 · Local semantic — Jina v2 base code + BGE reranker, no Modal dependency
+
+**Decision.** When the user picks "Local" on the Semantic settings screen,
+embed + rerank both run on-device via ONNX Runtime:
+- Embed: `jinaai/jina-embeddings-v2-base-code` (161 M, 768-dim, Apache 2.0).
+- Rerank: `BAAI/bge-reranker-base` (278 M, Apache 2.0).
+- Provider: TRT fp16 → CUDA fp32 → CPU, picked automatically from what's
+  importable in the managed venv.
+OpenAI-compat (BYOK URL + API key + model + dim) is the only *other* user-
+visible backend. Modal stays available via env var for dev, not exposed in UI.
+
+**Context.** Users ship OneLens into air-gapped enterprise machines and
+consumer laptops. The Modal-only path required outbound network + a paid
+Modal account + ~2 s per-query latency floor. First full sync on a 100k-
+method repo was ~20 min wall-time, dominated by network round-trips even
+when the GPU had spare cycles.
+
+**Alternatives considered.**
+
+- *Qwen3-Embedding-0.6B local ONNX.* Already shipped via `embedder.py`.
+  1 024-dim, bigger model (~1.2 GB download), decoder-style ONNX with 28
+  KV-cache inputs per forward, hit NaN issues on TF32 earlier. Left in place
+  as the Modal-container internal embedder — but too heavy for a
+  laptop-first local path.
+- *CodeSage large (1.3 B).* Better CoIR scores, but 4-5 GB VRAM won't fit
+  the target consumer GPU (RTX A2000 Laptop 4 GB).
+- *Voyage-code-3.* Highest MTEB-Code score we saw (84.0) but closed API —
+  fails the air-gapped requirement.
+- *Nomic Embed Code (7 B).* Too big for 4 GB VRAM.
+
+**Measured on RTX A2000 Laptop** (101 M params @ 768-dim, seq ≤256):
+- CPU: 46 ms/item → 77 min / 100k methods.
+- CUDA fp32: 4.5 ms/item → 7.6 min.
+- TRT fp16: 1.2 ms/item → 2.0 min (3.6× over CUDA, 38× over CPU).
+Top-1 hits identical across providers on spot checks
+(`authenticateUser` 0.78, `notifySlaBreach` 0.72, `findAssetByIp` 0.71).
+
+**Why TRT fp16 is opt-in (dedicated install button).**
+Keeps the base local-install at ~1 GB. TRT adds ~1 GB more and introduces
+a harder NVIDIA-only dependency. The Jina v2 paper reports *BF16* gave
+unsatisfactory metrics, but TRT's auto-fallback keeps LayerNorm + Reduce
++ Pow in fp32 (the warning visible at load time is exactly this kick-in),
+which is the mitigation for the BF16 overflow path. We still gate it on a
+button click rather than auto-install because corpus-level recall@k isn't
+validated on code retrieval yet.
+
+**Why API key in PasswordSafe, not XML.** IntelliJ's `XmlSerializer`
+round-trips the settings state into plaintext under
+`~/.config/JetBrains/.../options/onelens-settings.xml`. Secrets don't
+belong there. `OpenAiSecrets.kt` uses the system credential store
+(Keychain / libsecret / Windows Credential Locker) via `PasswordSafe`.
+
+**Why dim-check at query time, not at write time.** Write-time check would
+require re-opening the collection in the middle of every sync. Query time
+is cheap (one `collection.peek(limit=1)`) and catches the real footgun —
+user switches from Jina 768-dim to OpenAI 1 536-dim without `--clear`,
+queries return silently-wrong cosine scores. Raising an error with
+"re-sync with --clear" is the desired UX.
+
+**Revisit when:**
+
+- *TRT fp16 quality drift is observed on a real corpus.* Add a
+  `recall@k` harness to `python/benchmarks/` that compares fp32 vs fp16
+  vectors and fails if Jaccard@10 drops below 0.9. Gate the install
+  button on the harness passing a pre-release checkpoint.
+- *A larger code-specialized model fits in 4 GB VRAM.* Swap the default,
+  keep Jina as the fallback for smaller GPUs.
+- *Jina ships a v3 base code.* Auto-update path: bump
+  `DEFAULT_MODEL` in `local_backend.py`, add a migration note requiring
+  `--clear` (new weights = different embedding space, so the stored
+  ChromaDB vectors are invalid).
+- *We add a "Modal" option back to the UI.* User demand for a managed
+  zero-setup path that doesn't touch customer GPUs. Requires billing
+  UX work and a Modal account; not in scope until cloud offering ships.
+
+Cross-references: ADR-004 (graph backend pluggable — same factory pattern),
+`python/src/onelens/context/embed_backends/__init__.py` (factory),
+`plugin/.../settings/SemanticSettingsConfigurable.kt` (UI).
+
+## ADR-028 · 2026-04-21 · Plugin owns Python MCP child (not embedded JVM server)
+
+**Decision.** The IntelliJ plugin spawns the Python MCP server
+(`python -m onelens.mcp_server --http --port <N>`) as a child process
+with lifecycle scoped to the IDE session. Plugin talks to it over
+Streamable HTTP via the official `io.modelcontextprotocol:kotlin-sdk-client`
+SDK + Ktor CIO. The child also serves external MCP clients (Claude Code,
+Codex, Cursor) that register via
+`claude mcp add --scope user --transport http onelens http://127.0.0.1:<port>/mcp/`
+— one warm Python serves everyone.
+
+**Context.** Phase S landed local embed + rerank via ONNX, but every
+`onelens` CLI call is a fresh subprocess that pays ~5-15 s to load the
+model + deserialize TRT engines. Delta sync on every file save amplified
+this pain: 12 s of model-load per 1 s of actual work. Needed a warm path.
+
+**Alternatives considered.**
+
+- *hechtcarmel/jetbrains-index-mcp-plugin approach — embedded Ktor server
+  in the IDE JVM.* Elegant for their tools because they're Kotlin + PSI.
+  Not applicable to us: our tools are Python (FalkorDB, ChromaDB, ONNX
+  runtime, sqlglot, networkx). Rewriting them to JVM = 3-4 months of
+  work for a less-capable system (no good JVM equivalent for ChromaDB or
+  sqlglot). ADR-027 rejected a Kotlin rewrite of the embedder for the
+  same reason.
+- *Plugin requires the user to manually run `onelens daemon start`.*
+  Rejected — one-click UX matters. JetBrains plugin auto-lifecycle is
+  the expected pattern, matches hechtcarmel's and every other MCP-in-IDE
+  integration.
+- *Hand-rolled JSON-RPC client over java.net.http.HttpClient.*
+  Actually tested and works (130 LoC, zero external deps). Rejected in
+  favor of the official SDK for typed request/response + future-proof
+  session management. Fallback stays possible if the SDK breaks: the
+  OneLensMcpClient surface is tiny (two methods) and easy to reimplement.
+- *MCP SDK 0.11.x.* Blocked by the Kotlin 2.1.20 compiler bundled with
+  IntelliJ Platform 2025.1 — 0.10+ ships with Kotlin 2.3 metadata that
+  the compiler refuses to read. Pinned to 0.9.0 until the platform
+  bumps its Kotlin toolchain.
+
+**Why stateless HTTP (`FASTMCP_STATELESS_HTTP=1`).** Simplifies the
+Kotlin client — no MCP-Session-ID tracking, no `initialize` handshake
+correlation, every tool call is a standalone POST. Server-side cost is
+near-zero (the same Python process handles every request, so "state" is
+still there, just not tracked per client). Accepted that some future
+MCP features requiring per-client state (long-running tool subscriptions)
+would need us to flip stateful later.
+
+**Why port 29170 base.** Matches hechtcarmel's default; avoids the
+well-known-ports range. Retry up to +30 on `BindException` so two IDE
+instances on one machine get unique ports. Chosen port is written to
+`~/.onelens/mcp.port` so external MCP clients discover the live port
+without the plugin having to coordinate with `claude mcp add`.
+
+**Why plugin-owned instead of systemd / launchd.** Lifecycle should
+follow developer intent: IDE open = server running, IDE closed = server
+gone. Stale Python processes surviving IDE close would hold 1-2 GB of
+GPU+RAM indefinitely. `Disposable.dispose()` + `Process.destroy()` ties
+the two cleanly. Users who want a persistent server outside the IDE can
+still run `onelens daemon start` manually.
+
+**Non-goals (Phase T scope).**
+
+- Streaming progress events via SSE mid-call — plugin shows "→ MCP call
+  onelens_import" and then a single summary event on completion. The CLI
+  fallback still streams stdout lines. Live progress over MCP SSE lands
+  in Phase T.1 if we need it.
+- Plugin-owned retrieve + status calls. Phase T only wires import; a
+  follow-up phase migrates `OneLensStatusService` and any future
+  retrieve UI.
+
+**Revisit when:**
+
+- *IntelliJ Platform bumps Kotlin to 2.3.* Swap `kotlin-sdk-client:0.9.0`
+  → `0.11.x`; API migrates `io.modelcontextprotocol.kotlin.sdk.types.*`
+  back to top-level. Small PR.
+- *FastMCP ships native progress-over-SSE for stateless mode.* Currently
+  progress notifications are tied to stateful sessions. When they arrive,
+  rewire `ExportService` to stream events straight into `OneLensEvents`
+  for live UI.
+- *Plugin ships headless mode (CI snapshot producer).* Daemon lifecycle
+  needs to decouple from project open — either auto-start on JVM boot
+  or wrap in a systemd unit. Out of scope today.
+
+Cross-references: ADR-027 (local semantic stack — this is the transport
+upgrade on top), hechtcarmel/jetbrains-index-mcp-plugin (prior art for
+IDE-hosted MCP), `plugin/.../mcp/OneLensMcpService.kt` + `OneLensMcpClient.kt`.
+
+---
+
+## ADR-029 · 2026-04-26 · Global CLI owns bootstrap; MCP registers independent of plugin
+
+**Status:** Accepted (design) — implementation Phase V (see PROGRESS.md).
+
+### Decision
+
+Move all bootstrap (uv install, venv create, dep install, semantic stack, GPU
+stack, TensorRT, key storage, MCP registration) out of the IntelliJ plugin
+(`PythonEnvManager`, ~660 LOC Kotlin) and into the Python CLI as `onelens
+setup`, `onelens onboard`, `onelens doctor`, `onelens config` commands. Plugin
+becomes thin: detect `onelens` on PATH, balloon-install if missing, shell-out
+for everything else.
+
+MCP server registers directly with Claude Code via `claude mcp add --scope
+project --transport stdio onelens -- onelens mcp serve`. Lifecycle is
+Claude-Code-managed (per-session stdio child). Plugin is no longer in the MCP
+critical path.
+
+### Context
+
+Plugin-owned bootstrap blocks four real use cases:
+
+1. **Headless / CI** — no IntelliJ, no bootstrap.
+2. **VS Code / other editors** — no path to onboard without IntelliJ.
+3. **MCP after IDE exit** — Claude Code sessions outside IntelliJ lose the
+   tool because the MCP child dies with the IDE.
+4. **Duplicate logic** — `installSemanticStack`, GPU stack, key handling all
+   live in Kotlin then again as CLI flags. Drift inevitable.
+
+Competitors (GitNexus `npm i -g gitnexus`, Graphify `pip install graphifyy`)
+onboard in one command. OneLens onboarding feels heavy by comparison.
+
+### Alternatives considered
+
+- **Status quo (plugin-owned).** Rejected — blocks every non-IntelliJ path.
+- **Single-file binary (PyInstaller / shiv / pex).** Rejected — torch +
+  transformers + chromadb payload = 500 MB-1.5 GB. uv tool install ships
+  prebuilt wheels in seconds for ~30 MB structural-only.
+- **`pipx install` as primary.** Demoted to fallback. uv tool install is
+  10-100× faster, doesn't require Python pre-installed (uv bundles its own
+  rust binary), single curl-bash bootstrap.
+- **Global-scope MCP (like GitNexus).** Rejected — OneLens graphs are
+  repo-bound (graph name = project name, embeddings keyed by `wing` =
+  graph). MCP scope should match. Default = project (`<repo>/.mcp.json`),
+  `--global` opt-in.
+- **HTTP/SSE MCP transport.** Rejected for default — local single-user dev
+  tool. stdio is simpler, stateless, kills with session. SSE/HTTP only when
+  remote / multi-tenant / shared (not our case).
+- **Long-running daemon as default.** Rejected — lifecycle pain (systemd
+  unit, launchd, Windows service). Kept as opt-in flag for power users
+  who want warm Qwen3 + mxbai (~50 ms cold-start vs ~3 s).
+- **Always-keyring secret storage.** Rejected — research-validated that
+  Python `keyring` fails silently on headless Linux / WSL without D-Bus +
+  gnome-keyring. Industry pattern (gh, aws, gcloud, aider, Claude Code
+  itself) is plaintext + chmod 600. We mirror gh: try keyring, fall back
+  to `~/.onelens/keys.json` chmod 600 with explicit warning, expose
+  `--insecure-storage` flag for opt-in.
+
+### Cloud embedder default = voyage-code-3 (not OpenAI)
+
+Validated against MTEB / CoIR Apr 2026:
+
+- voyage-code-3: CoIR 77.33, code-tuned, 32 K context, Matryoshka dims.
+- text-embedding-3-small: generic, $0.02/1M, fallback option.
+- jina-embeddings-v4: CoIR 71.59 — below voyage on code despite marketing.
+- nomic-embed-code: open-weights hedge against Voyage pricing changes.
+
+Onboard recommends voyage; OpenAI listed as fallback. Embedder interface
+kept single-config-line so swap is trivial.
+
+### Secrets never exposed via MCP
+
+CI guard: `grep -r "@mcp.tool" python/src/onelens/cli_only/` must be empty.
+Config / key tools live in `python/src/onelens/cli_only/`, never imported
+by `mcp_server.py`. Agent cannot read or write API keys via MCP.
+
+### Idempotency caveat (Claude Code #8288)
+
+`claude mcp add` lacks stable "already registered" exit code. Onboard
+implementation parses `claude mcp list` JSON before add; on parse failure
+falls back to remove+add. Document fragility; pin tested `claude` versions.
+
+### Revisit when
+
+- Claude Code ships stable `mcp add --idempotent` behavior (#8288 closed) —
+  simplify our parsing logic.
+- We grow a hosted SaaS / multi-tenant graph backend → revisit HTTP/SSE
+  transport for MCP.
+- Cursor-style team-shared embedding cache (chunk-hash keyed) becomes a
+  competitive must-have → likely separate plan, not a reversal of this ADR.
+- scip-java grows Spring annotation indexing (today: NO) — could enable
+  fully headless indexer without IntelliJ Ultimate / Qodana dependency.
+
+### Cross-references
+
+- `docs/design/PLAN-onboard-cli.md` — full plan (research-validated v2)
+- ADR-009 — plugin auto-installs venv (this ADR supersedes the
+  bootstrap-ownership half; venv mechanism unchanged, owner moves)
+- ADR-028 — plugin owns MCP child (this ADR supersedes for global / headless
+  use; in-IDE plugin-spawned MCP remains as optional power-user mode)
+- ADR-013 — platformType IU dev, runtime portable (still holds)
+- Research citations: see PLAN-onboard-cli.md §11 References
+- Claude Code MCP docs — https://code.claude.com/docs/en/mcp
+- Idempotency bug — https://github.com/anthropics/claude-code/issues/8288
+- voyage-code-3 — https://blog.voyageai.com/2024/12/04/voyage-code-3/
+- uv tool install — https://docs.astral.sh/uv/concepts/tools/
+
+---
+
+## ADR-W01 · 2026-04-30 · MCP server is the only OneLens runtime — no separate daemon command, no plugin CLI fallback
+
+### Decision
+
+`onelens mcp serve` is the **single long-lived process** that hosts every
+runtime concern: ML model load (Jina v2 + BGE), FalkorDB connection,
+ChromaDB collections, all `@mcp.tool` operations. There is no separate
+`onelens daemon start|stop|status` command — the MCP server *is* the
+daemon. The plugin's only job around the runtime is "ensure it's up";
+all sync / query / retrieve flows over HTTP to the same MCP child.
+
+Singleton enforced via `fcntl.lockf` (POSIX) / `msvcrt.locking` (Windows)
+on `~/.onelens/mcp.lock`. Second `onelens mcp serve --http` invocation
+reads `~/.onelens/mcp.port` and exits 0. Multi-IDE setups (two IntelliJ
+windows, plugin + Claude Code, headless CI) all converge on one process.
+
+### Context
+
+Three coupled symptoms hit on the same day:
+
+1. **EDT freezes (~19 s).** Status tab's 5 s Swing Timer ran
+   `nvidia-smi` from the EDT; NVML driver-lock contention from a
+   concurrent TRT engine build (or a second IDE on the same GPU)
+   blocked the subprocess for tens of seconds.
+2. **Two IDEs collide.** `OneLensMcpService` is `@Service(Service.Level.APP)`,
+   one MCP per JVM. Two IntelliJ windows = 2× model load = OOM on 4 GB
+   cards. Plus port-file races, `~/.onelens/venv` install races, and
+   FalkorDB Lite data-dir races.
+3. **CLI shell-out from plugin.** `ExportService.syncToGraph` shells
+   out to `cli_generated.py` even when MCP HTTP is reachable, forcing
+   PythonEnvManager to manage Python child lifecycles for *both* the
+   persistent MCP and the per-sync CLI.
+
+Root cause: "one MCP per IDE" *and* duplicated tool calls between MCP
+HTTP and CLI shell-out. Collapsing to MCP-only fixes (1) by removing
+in-plugin telemetry shell-outs and (2) by sharing one MCP across IDEs.
+(3) becomes a downstream consequence: no CLI to fall back to, plugin
+always uses HTTP.
+
+### Alternatives
+
+- **Docker container default** — solves model duplication only when
+  paired with a *shared* container plus MCP-only routing. Adds 4-6 GB
+  image weight, nvidia-container-toolkit (Linux-easy, macOS impossible
+  without remote GPU). Rejected as default; opt-in packaging later.
+- **Per-IDE daemon (current state).** Worked when most users had one
+  project open; OOM under multi-IDE.
+- **Separate `daemon` command + MCP client.** Phase V's earlier split:
+  daemon keeps models warm, MCP child connects to daemon for inference.
+  Rejected — adds a second long-lived process for no benefit; FastMCP
+  lifespan already gives "model loaded once, shared across all tool
+  calls" (DeepWiki confirmed).
+- **Stateless HTTP per request.** Each request reloads the model.
+  Rejected — Jina + BGE load is ~30 s warm, ~2 min cold; per-request
+  reload makes retrieval unusable.
+- **External inference runtime (Triton / TEI / Ollama / vLLM / Ray
+  Serve / BentoML).** Researched (PLAN-mcp-only.md §9). **TEI** kept
+  as opt-in (`ONELENS_RERANK_BACKEND=tei`) — wins ~2–4× indexing
+  throughput on GPU but costs platform-specific Rust install + 2
+  TEI processes (one per model; upstream issue #92 closed not-planned).
+  **Triton** rejected for default — overkill at batch=1 (arxiv
+  2602.00053: FastAPI 22 ms p50 beats Triton 28 ms below batch=16).
+  **Ollama** rejected — reranker PRs unmerged since Oct 2024
+  (#7406, #7219). **vLLM/TGI** rejected — LLM-shaped, no encoder/
+  cross-encoder primitives. **BentoML/Ray Serve** rejected — solve
+  packaging or distributed scale-out, not single-process serving.
+
+### Consequences
+
+- Plugin's `installSemanticStack` / `installTensorrt` / CLI shell-out
+  path (~400 LOC across `ExportService.kt` and `PythonEnvManager.kt`)
+  becomes obsolete once Phase W2 lands. Kept until Phase V's installer
+  ships.
+- The CLI shrinks to `onelens onboard` (interactive setup) +
+  `onelens mcp serve` (the runtime). Standalone CLI commands still work
+  via `cli_generated.py` for headless CI but no longer the plugin's
+  path.
+- Singleton lock means the first `onelens mcp serve` to start owns the
+  GPU. Subsequent invocations are no-ops. UX: identical to "first
+  process to call `start()` wins."
+- `mcp.port` is the single discovery channel; external clients (Claude
+  Code, Codex) read it once at startup. Atomic write via `os.replace`
+  prevents partial-write races.
+
+### Revisit when
+
+- Multi-user shared workstation becomes a real deployment shape →
+  switch from per-user lock to per-machine + multi-tenant routing.
+- Docker becomes the dominant install mode → re-anchor lock on
+  `/var/run/onelens.lock` inside the container.
+- FastMCP grows native singleton support (asked upstream; today: no).
+- A genuine need for "warm model independent of MCP server lifecycle"
+  emerges — then resurrect the daemon split.
+
+### Cross-references
+
+- `docs/design/PLAN-mcp-only.md` — full plan + research citations
+- ADR-028 — plugin owns MCP child (this ADR generalises: plugin starts
+  MCP child, but MCP is now expected to outlive the plugin)
+- ADR-029 — global CLI owns bootstrap (still holds; this ADR sharpens
+  runtime: CLI installs, MCP runs, plugin observes)
+- DeepWiki `jlowin/fastmcp` — lifespan + EventStore patterns
+- Anthropic — `claude mcp add --scope user --transport http`
+- Exa — single-instance fcntl/msvcrt patterns (StackOverflow #220525,
+  ActiveState recipe), `nvidia-smi` NVML-lock contention
+
+---
+
+## ADR-030 · 2026-05-07 · Embedder profiles for low-end CPUs
+
+**Decision.** `LocalEmbedder` gains an `ONELENS_LOCAL_EMBED_PROFILE`
+shorthand env (`balanced` | `gemma` | `tiny`) plus
+`ONELENS_LOCAL_EMBED_QUANT=q4|q8|fp32` to pick the ONNX variant from
+repos that ship multiple. Default stays `jinaai/jina-embeddings-v2-base-code`
+(unchanged, drawer-compatible). EmbeddingGemma-300m and BGE-small are
+opt-in.
+
+**Context.** User asked "can we use a less heavy model so all people
+can use it?" — the perception was Qwen3-Embedding-0.6B (the legacy
+`embedder.py` path, 1.2 GB) was the active model. In reality, the
+default has been Jina-v2-base-code (161 M, 320 MB, CPU-OK) since
+ADR-027. But: (a) the perception drift means docs were stale; (b)
+truly tiny machines (sub-8GB-RAM laptops) want sub-50 MB models with
+q4 quant; (c) we want a path to EmbeddingGemma now that an ungated
+ONNX mirror (`onnx-community/embeddinggemma-300m-ONNX`) ships fp32 +
+q4 + q8 in the same repo.
+
+**Why opt-in vs flipping default.** Existing ChromaDB drawers were
+embedded with Jina-v2-base-code. Switching the default model
+silently invalidates every drawer (cosine similarities are
+nonsense across model families). Forcing a re-mine on every existing
+install for a marginal recall gain is hostile. Profile = explicit
+opt-in + obvious re-mine step.
+
+**Why EmbeddingGemma over BGE-large / nomic-embed / Qwen3.**
+- Same 768-dim as our default → drawer schema unchanged
+- MTEB Code #1 sub-500M (Sept 2025), beats prior SOTA
+- Matryoshka: truncatable to 128/256/512 if storage matters
+- onnx-community mirror is **ungated** (Google's repo is gated under
+  the Gemma license — bad for "everyone can run it" goal)
+- `transformers.js`-friendly export means q4 quant exists and works
+  on phones/Chromebooks
+- fp16 unsupported (per Google's model card) but irrelevant for
+  CPU-first deployment; q4/q8 is the actual win
+
+**Why BGE-small as the `tiny` tier.** 33 M params, 128 MB on disk,
+CPU-fast on a Raspberry Pi. Different dim (384) so it's a
+break-glass option when the user explicitly wants minimum footprint
+and is happy to invalidate drawers.
+
+**Implementation gotcha.** ONNX exports >2 GB use external-weights
+mode (`save_as_external_data=True`), which produces a
+`model.onnx_data` sidecar. The previous `_download_model`
+`allow_patterns` only included `model.onnx`, so EmbeddingGemma /
+Qwen3 ONNX exports loaded the graph but failed at first inference
+with "Tensor data is empty". Fixed regardless of which profile a
+user picks. Jina v2 base code is below the 2 GB threshold so the
+bug never surfaced on the default.
+
+**Alternatives considered.**
+
+- *Auto-detect: GPU → Jina, CPU → Gemma.* Rejected — silent default
+  flips invalidate drawers without consent.
+- *Single env `ONELENS_LOCAL_EMBED_MODEL` (already supported).*
+  Still works; profile is a discoverability layer for the 80%
+  who don't want to memorise repo ids.
+- *Ship pre-quantized model.onnx in the plugin JAR.* Bloats the
+  IDE plugin distribution to 200+ MB. Lazy HF download remains
+  the right shape.
+
+**Revisit when.** (a) MTEB releases a model that beats EmbeddingGemma
+on Code while staying ≤300M and ungated; (b) we add
+`ONELENS_RETRIEVAL_AUTO_REMINE` so flipping profiles becomes
+non-hostile; (c) browser-side retrieval (Transformers.js) becomes
+a real OneLens shape, in which case `q4` Gemma becomes the
+default for that path.
+
+---
+
+## ADR-031 · 2026-05-08 · Skill + warm-aware CLI over `claude mcp add`
+
+**Decision.** OneLens does NOT register itself as an MCP server with
+Claude Code via `claude mcp add`. Instead, the LLM-facing surface stays
+the existing `SKILL.md` (bash → `onelens` CLI), and the CLI auto-routes
+to a running MCP daemon over HTTP when one exists. Warm process,
+single GPU model load, zero MCP-tool schemas in the LLM's context.
+
+**Context.** Three callers need OneLens: the IntelliJ plugin (already
+HTTP via `OneLensMcpService`), terminal users running `onelens X`, and
+Claude Code through `SKILL.md` calling the CLI via the bash tool. Until
+this ADR, the CLI used `Client(_server)` (in-process FastMCP) which
+re-loaded the embedder + reranker on every invocation — ~22-30 s cold
+start per call. The plugin path was warm; the skill path was not.
+
+The obvious fix was "register OneLens as an MCP server with Claude Code"
+(`claude mcp add --transport http onelens http://127.0.0.1:<port>/mcp/`).
+Rejected — see Alternatives.
+
+**Alternatives considered.**
+
+- *Register OneLens as a Claude Code MCP server.* Would have given
+  Claude Code warm HTTP access. **Rejected** because doing so injects
+  all 20 OneLens tool schemas into the LLM's context every session
+  (~5-10 KB tokens of pure plumbing). The skill approach has zero
+  schema overhead — Claude Code reads SKILL.md (which is just
+  documentation, not a tool surface) and learns to call `onelens X`
+  via bash. Industry consensus through 2026 (Cursor, Perplexity, the
+  HuggingFace and DevOps Daily comparisons we surveyed) has converged
+  on "Skills + CLI for the LLM, MCP only when stateful sessions or
+  multi-tenant auth are needed." OneLens is single-user and the
+  daemon stays warm via a different lock; we don't earn the schema
+  tax.
+- *Daemon-only — no in-process fallback in the CLI.* Would simplify
+  `cli_generated.py` to a single transport. Rejected — first-ever
+  invocation, air-gapped CI, and fresh installs all need a working
+  CLI before any daemon exists. In-process fallback IS the bootstrap
+  path.
+- *Auto-spawn daemon when CLI finds none.* Tempting (zero-config UX).
+  Rejected for v0.x because the MCP server has no idle-shutdown timer
+  yet — auto-spawn would create silent process leaks holding 1.5 GB
+  VRAM forever. Tracked as EP-17; will revisit once idle-shutdown ships.
+- *Skip the skill, register MCP, accept the schema cost.* Cleaner from
+  a "one transport" purity argument. Rejected because OneLens already
+  ships the skill (bundled in plugin JAR, copied to
+  `~/.claude/skills/onelens/`); throwing it away to gain one transport
+  is a regression in install-UX simplicity.
+
+**Why this works for OneLens specifically.**
+
+The standard CLI-vs-MCP framing ("CLI is cheap subprocess, MCP is
+warm protocol") inverts here. OneLens "CLI" was the *expensive* one
+(spawned a fresh Python with cold model loads per call). OneLens
+"MCP" via HTTP is the *cheap* one (warm, ~200 ms). By making the CLI
+prefer HTTP when available, we get cheap-everywhere behavior under
+the cheaper-LLM-context surface (skill).
+
+**Implementation.**
+
+`cli_generated.py::_resolve_client_spec()` is called per
+`Client(_resolve_client_spec())` invocation. It reads
+`~/.onelens/mcp.port`, TCP-probes `127.0.0.1:<port>`, returns the
+URL string `"http://127.0.0.1:<port>/mcp/"` if reachable, else
+returns the in-process `_server` (`FastMCPTransport`). FastMCP's
+`Client` auto-infers `StreamableHttpTransport` from `http://` prefix
+(v2.3.0+) — no explicit transport class import needed. The patch
+lives in `python/scripts/regen_cli.sh` so it survives `fastmcp
+generate-cli` regeneration.
+
+`ONELENS_FORCE_LOCAL_CLIENT=1` short-circuits the resolver to the
+in-process path — useful for cold-load benchmarks and air-gapped
+CI that must not touch the network stack.
+
+**Revisit when.** (a) Anthropic ships a way to register MCP servers
+without dumping all tool schemas into the LLM context (e.g. lazy
+schema discovery via `tools/list` on demand — already on the spec
+roadmap); (b) OneLens grows multi-user / per-user-token semantics
+that warrant MCP's auth model; (c) we add idle-shutdown to the
+daemon (EP-17) and want CLI auto-spawn for zero-config UX.
+
+**References.**
+- FastMCP `Client` transport inference: `fastmcp/clients/transports`
+- FastMCP `generate-cli` `CLIENT_SPEC` edit point: official docs
+- Industry CLI-vs-MCP analyses (Feb-Apr 2026): HuggingFace blog,
+  ddewhurst.com, clifor.ai, addyosmani/agent-engineer
+
+## ADR-032 · 2026-06 · Two orthogonal SPIs — LanguageExtractor ⊗ FrameworkAdapter
+
+**Decision.** Split extraction into *how to parse* (`LanguageExtractor`,
+keyed by `languageId`) and *what framework concepts to derive*
+(`FrameworkAdapter`, keyed by `id` + `languageId`). A framework adapter
+consumes the already-extracted universal `SymbolGraph` instead of
+re-walking files. The orchestrator runs detected extractors to fill the
+language-neutral core, then runs framework adapters whose `languageId`
+matched, merging overlays by `jsonKey`.
+
+**Context.** Today `FrameworkAdapter` conflates the two — `SpringBootAdapter`
+bundles Java-PSI extraction with Spring derivation. There is no seam to add
+a *language* (only a framework). The plugin EP (`framework/FrameworkAdapter.kt`)
+is otherwise sound (dynamic, gated behind `<depends>` config-files — Vue3
+proves it). The orchestrator also leaks: `ExportService` downcasts
+`when (collector) { is SpringBootCollector -> lastResult }` instead of
+consuming the opaque `CollectorOutput` (ADR-010 debt).
+
+**Alternatives.** (a) Keep one adapter type and add languages as "frameworks"
+— conflates the axes, every language re-implements the core. (b) One mega
+extractor with a language switch — unbounded god object. Rejected.
+
+**Revisit when.** A second backend language ships and the `SymbolGraph` shape
+proves too Java-centric (e.g. needs union types / structural typing fields).
+
+## ADR-033 · 2026-06 · Tiered extraction backends with an accuracy tag
+
+**Decision.** The 100%-type-accuracy moat is IntelliJ-PSI-and-per-language;
+it does not port to a single backend. Support a tiered model — PSI (IDE,
+100%) → LSP (standalone, type-resolved) → tree-sitter (structural floor) —
+and stamp every emitted node `source = PSI|TYPES|LSP|AST|TREE_SITTER` so
+retrieval and the skill express confidence honestly instead of claiming
+100% everywhere.
+
+**Context.** Go/C# realistically need Ultimate-tier IDEs for PSI; standalone
+Python/Go is better served by LSP or the language's own parser. The
+JSON-export → importer boundary is the right seam: a non-IntelliJ extractor
+emits the same JSON with no plugin. **Proven empirically** — a standalone
+`python_ast_extractor.py` (Python `ast`, no plugin) imported OneLens's own
+104 classes / 370 methods / 312 calls through the unmodified `GraphLoader`;
+`GraphDB` subclasses and PageRank came out correct (`tools/extractors/`).
+
+**Alternatives.** (a) tree-sitter only — loses cross-file resolution, breaks
+the moat. (b) PSI only — caps reach at JetBrains-supported langs in an IDE.
+Rejected in favor of tiered + honest tagging.
+
+**Revisit when.** A universal type-resolution layer (e.g. SCIP indexes) makes
+the per-backend distinction unnecessary.
+
+## ADR-034 · 2026-06 · Importer SubdocLoader registry kills the full/delta fork
+
+**Decision.** Replace the `load_full()` god-method's hardcoded
+`if spring / if jpa / if vue3` chain with a `LOADERS` registry of
+`SubdocLoader` objects, each owning one subsystem and implementing BOTH
+`load_full` and `apply_delta`. `loader.py` and `delta_loader.py` iterate the
+same registry; the shared `_batch_nodes`/`_batch_edges` primitives move to a
+neutral `graph_writer.py`.
+
+**Context.** `loader.py` (1763 LOC) and `delta_loader.py` (905 LOC) write the
+same graph shape through two separately-maintained bodies of Cypher. That
+duplication — not the individual symptoms — is the root cause of the entire
+"delta diverges from full import" bug class (Spring wing, phantom CALLS, enum
+split, JPA/test demotion — all patched in 2026-06). One subsystem = one class
+implementing both paths means they cannot drift.
+
+**Alternatives.** Keep patching parity by hand (the status quo — burned a full
+session). Rejected. A codegen approach (generate delta from full) was
+considered but the delete-before-write semantics are genuinely delta-only.
+
+**Revisit when.** Executed — staged so each subsystem migrates behind an
+unchanged wire format, verified by golden-graph diff. Step 1 in
+`docs/design/multi-language-architecture.md`.
+

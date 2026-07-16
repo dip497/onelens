@@ -6,12 +6,14 @@ import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.psi.*
-import com.intellij.psi.search.GlobalSearchScope
 import com.onelens.plugin.export.*
+import com.onelens.plugin.framework.workspace.Workspace
+import kotlinx.serialization.json.Json
 
 data class MemberResult(
     val methods: List<MethodData>,
-    val fields: List<FieldData>
+    val fields: List<FieldData>,
+    val enumConstants: List<EnumConstantData> = emptyList()
 )
 
 /**
@@ -22,41 +24,76 @@ object MemberCollector {
 
     private val LOG = logger<MemberCollector>()
 
-    fun collect(project: Project, classes: List<ClassData>): MemberResult {
+    /** Shared JSON codec for serializing EnumConstant.args / Annotation.attributes. */
+    private val JSON: Json = Json { encodeDefaults = true }
+
+    fun collect(
+        project: Project,
+        classes: List<ClassData>,
+        workspace: Workspace,
+    ): MemberResult {
         val facade = JavaPsiFacade.getInstance(project)
-        val scope = GlobalSearchScope.projectScope(project)
+        val scope = workspace.scope(project)
 
-        val methods = mutableListOf<MethodData>()
-        val fields = mutableListOf<FieldData>()
+        // Parallel per-class extraction — same pattern as CallGraphCollector.
+        // On a 16-core machine the sequential loop took 35s for 10K classes;
+        // parallelizing across all cores targets ~5s.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors())
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val methods = java.util.concurrent.ConcurrentLinkedQueue<MethodData>()
+        val fields = java.util.concurrent.ConcurrentLinkedQueue<FieldData>()
+        val enumConstants = java.util.concurrent.ConcurrentLinkedQueue<EnumConstantData>()
 
-        for (classData in classes) {
-            ProgressManager.checkCanceled()
+        try {
+            val futures = classes.chunked(maxOf(1, classes.size / threads)).map { chunk ->
+                executor.submit<Unit> {
+                    for (classData in chunk) {
+                        ProgressManager.checkCanceled()
+                        try {
+                            ReadAction.run<Throwable> {
+                                val psiClass = facade.findClass(classData.fqn, scope) ?: return@run
 
-            ReadAction.run<Throwable> {
-                val psiClass = facade.findClass(classData.fqn, scope) ?: return@run
+                                for (method in psiClass.methods) {
+                                    if (method.containingClass != psiClass) continue
+                                    try {
+                                        methods.add(extractMethod(method, classData.fqn, classData.filePath, project))
+                                    } catch (e: Exception) {
+                                        LOG.debug("Failed to extract method ${method.name} from ${classData.fqn}: ${e.message}")
+                                    }
+                                }
 
-                for (method in psiClass.methods) {
-                    if (method.containingClass != psiClass) continue
-                    try {
-                        methods.add(extractMethod(method, classData.fqn, classData.filePath, project))
-                    } catch (e: Exception) {
-                        LOG.debug("Failed to extract method ${method.name} from ${classData.fqn}: ${e.message}")
-                    }
-                }
-
-                for (field in psiClass.fields) {
-                    if (field.containingClass != psiClass) continue
-                    try {
-                        fields.add(extractField(field, classData.fqn, classData.filePath, project))
-                    } catch (e: Exception) {
-                        LOG.debug("Failed to extract field ${field.name} from ${classData.fqn}: ${e.message}")
+                                var enumOrdinal = 0
+                                for (field in psiClass.fields) {
+                                    if (field.containingClass != psiClass) continue
+                                    try {
+                                        fields.add(extractField(field, classData.fqn, classData.filePath, project))
+                                        if (field is PsiEnumConstant) {
+                                            enumConstants.add(
+                                                extractEnumConstant(field, classData.fqn, classData.filePath, enumOrdinal, project)
+                                            )
+                                            enumOrdinal++
+                                        }
+                                    } catch (e: Exception) {
+                                        LOG.debug("Failed to extract field ${field.name} from ${classData.fqn}: ${e.message}")
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            LOG.warn("Member extraction failed for ${classData.fqn}: ${e.message}")
+                        }
                     }
                 }
             }
+            futures.forEach { it.get() }
+        } finally {
+            executor.shutdown()
         }
 
-        LOG.info("Collected ${methods.size} methods, ${fields.size} fields")
-        return MemberResult(methods, fields)
+        val methodList = methods.toList()
+        val fieldList = fields.toList()
+        val enumList = enumConstants.toList()
+        LOG.info("Collected ${methodList.size} methods, ${fieldList.size} fields, ${enumList.size} enum constants")
+        return MemberResult(methodList, fieldList, enumList)
     }
 
     private fun extractMethod(
@@ -137,6 +174,43 @@ object MemberCollector {
             type = try { field.type.canonicalText } catch (_: Exception) { "?" },
             modifiers = ClassCollector.extractModifiers(field.modifierList),
             annotations = ClassCollector.extractAnnotations(field.modifierList),
+            filePath = filePath,
+            lineStart = lineStart
+        )
+    }
+
+    private fun extractEnumConstant(
+        constant: PsiEnumConstant,
+        classFqn: String,
+        filePath: String,
+        ordinal: Int,
+        project: Project
+    ): EnumConstantData {
+        val document = constant.containingFile?.let {
+            PsiDocumentManager.getInstance(project).getDocument(it)
+        }
+        val lineStart = safeGetLine(document, constant.textOffset)
+
+        val argExprs = constant.argumentList?.expressions?.toList() ?: emptyList()
+        val argsJson = argExprs.map { ExpressionResolver.resolve(it) }
+        val flat = argsJson.flatMap { ExpressionResolver.flatten(it) }
+        val types = argExprs.map { ExpressionResolver.typeOf(it) }
+
+        val argsString = try {
+            JSON.encodeToString(
+                kotlinx.serialization.json.JsonArray.serializer(),
+                kotlinx.serialization.json.JsonArray(argsJson)
+            )
+        } catch (_: Throwable) { "[]" }
+
+        return EnumConstantData(
+            fqn = "$classFqn#${constant.name}",
+            name = constant.name,
+            ordinal = ordinal,
+            enumFqn = classFqn,
+            args = argsString,
+            argList = flat,
+            argTypes = types,
             filePath = filePath,
             lineStart = lineStart
         )
