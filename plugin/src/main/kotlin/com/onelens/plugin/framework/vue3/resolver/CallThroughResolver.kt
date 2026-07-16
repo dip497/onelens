@@ -21,7 +21,7 @@ import com.onelens.plugin.export.UsesComposableEdge
 import com.onelens.plugin.export.UsesStoreEdge
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
-import com.onelens.plugin.framework.vue3.smartRead
+import com.onelens.plugin.framework.jscommon.smartRead
 
 /**
  * Post-pass that walks every Component (and Composable) and emits:

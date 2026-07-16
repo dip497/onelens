@@ -706,7 +706,7 @@ class OneLensExportStarter : ApplicationStarter {
         // Derive the sentinel from the ACTUAL module source roots (what
         // IntelliJ has imported + indexed), NOT the raw filesystem. The
         // filesystem walk would pick files from ignored Maven modules
-        // (e.g. aiserver/pom.xml in motadata-itsm-server is in Maven's
+        // (e.g. aiserver/pom.xml in example-server is in Maven's
         // ignoredFiles list) or worktree copies — classes that will NEVER
         // be in the stub index, causing the gate to wait forever.
         //

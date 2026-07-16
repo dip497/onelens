@@ -43,6 +43,10 @@ def search_code(db: GraphDB, term: str, node_type: str = "") -> list[dict]:
         # Vue 3 + JS business-logic layer
         "component", "composable", "store", "route", "apicall",
         "jsmodule", "jsfunction",
+        # Next.js (P2) — App Router (`route` above is shared with Vue)
+        "reactcomponent", "page",
+        # Next.js (P3) — server actions / route handlers / hooks / context
+        "serveraction", "routehandler", "customhook", "hook", "contextprovider",
     ]
 
     for nt in types_to_search:

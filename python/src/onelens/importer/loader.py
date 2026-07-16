@@ -438,6 +438,48 @@ class GraphLoader:
                     _emit("Store", vue3.get("stores", []), "id")
                     _emit("JsModule", vue3.get("modules", []), "filePath")
 
+            # Next.js — load the frontend subdoc if present. Maps only the
+            # JS-common slice (modules / functions / imports / apiCalls /
+            # callsApi) onto the SAME labels/edges the Vue path uses, so the
+            # cross-stack HITS bridge works for free. Java/Vue-only exports
+            # pass through unchanged: `data.get("nextjs")` is None.
+            nextjs = data.get("nextjs")
+            if nextjs:
+                self._load_nextjs(progress, nextjs, graph_name=graph_wing)
+
+                # Package → Next member CONTAINS edges — mirror of the `vue:`
+                # block above. Packages carry `id = next:<rootName>:<segment>`.
+                # Next.js has no Component/Composable/Store surface, so only
+                # JsModule (keyed on filePath) gets package containment.
+                next_pkgs = [p for p in packages if p.get("id", "").startswith("next:")]
+                if next_pkgs:
+                    def _top_n(fp: str) -> str:
+                        p = fp.lstrip("/").removeprefix("src/")
+                        return p.split("/", 1)[0] if "/" in p else ""
+
+                    pkg_by_name_n = {p["name"]: p["id"] for p in next_pkgs}
+
+                    def _emit_n(label, items, key):
+                        edges = []
+                        seen = set()
+                        for it in items:
+                            fp = it.get("filePath", "")
+                            seg = _top_n(fp)
+                            pid = pkg_by_name_n.get(seg)
+                            if not pid or not it.get(key):
+                                continue
+                            dedup = (pid, it[key])
+                            if dedup in seen:
+                                continue
+                            seen.add(dedup)
+                            edges.append({"src": pid, "dst": it[key]})
+                        if edges:
+                            self._batch_edges(progress, f"CONTAINS (Package→{label})",
+                                              edges, "Package", "id", label, key,
+                                              rel_type="CONTAINS")
+
+                    _emit_n("JsModule", nextjs.get("modules", []), "filePath")
+
         # Post-import phase: compute PageRank on the call graph and write
         # it back as Method.pagerank + Class.pagerank. One-time cost (~5-15s
         # for 80K methods). Enables "important methods" queries via
@@ -611,7 +653,7 @@ class GraphLoader:
         # PERFORMANCE: Each edge batch MUST use a label in the MATCH pattern
         # (e.g. `MATCH (c:Component {fqn: ...})`) so FalkorDB uses the fqn
         # index. A label-less `MATCH (c {fqn: ...}) WHERE c:Component OR ...`
-        # forces a full scan of every node in the graph (222K+ on motadata),
+        # forces a full scan of every node in the graph (222K+ on example),
         # costing ~120ms per edge vs ~0.02ms with the index — a 6000x penalty.
         # The caller type is determined by file extension: `.vue` → Component,
         # `.js`/`.ts`/`.mjs` → Composable or JsFunction.
@@ -862,6 +904,386 @@ class GraphLoader:
             logger.info("Vue 3 bridge pass: %s", bridge_stats)
         except Exception as e:
             logger.warning("Vue 3 bridge pass failed: %s", e)
+
+    def _load_nextjs(self, progress, nextjs: dict, graph_name: str):
+        """Load the Next.js subdoc into the same graph wing as the Java/Vue nodes.
+
+        Maps ONLY the JS-common slice (modules / functions / imports /
+        apiCalls / callsApi) onto the SAME labels/edges the Vue path uses —
+        `JsModule`, `JsFunction`, `ApiCall`, `HAS_FUNCTION`, `IMPORTS` /
+        `IMPORTS_FN`, `CALLS_API` — so the cross-stack HITS bridge (ApiCall ↔
+        Spring Endpoint) works for free. Next.js exports carry no
+        Component/Composable/Store/Route arrays, so none of those Vue-only
+        labels are emitted here. Every node/edge is stamped with
+        `wing = graph_name` for cross-wing bridge filtering.
+        """
+        wing = graph_name or "default"
+
+        # ApiCalls — fqn synthesized to be unique even across repeated callers.
+        api_calls = nextjs.get("apiCalls", []) or []
+        for a in api_calls:
+            a["fqn"] = f"{a.get('method', '')}:{a.get('path', '')}:{a.get('callerFqn', '')}"
+            a["wing"] = wing
+        self._batch_nodes(progress, "Next ApiCalls", api_calls, "ApiCall", "fqn", [
+            "method", "path", "parametric", "binding", "callerFqn", "filePath", "wing",
+        ])
+
+        # JsModule per file — derive a display `name` from the filePath basename
+        # (mirror of the Vue path) so the FalkorDB browser has a human label.
+        modules = [dict(m, wing=wing) for m in nextjs.get("modules", [])]
+        import os.path as _osp
+        for _m in modules:
+            fp = _m.get("filePath", "")
+            base = _osp.basename(fp)
+            stem = base.rsplit(".", 1)[0] if "." in base else base
+            _m.setdefault("name", stem or fp)
+        self._batch_nodes(progress, "Next JS Modules", modules, "JsModule", "filePath", [
+            "name", "fileKind", "isBarrel", "isTest", "wing",
+        ])
+
+        functions = [dict(f, wing=wing) for f in nextjs.get("functions", [])]
+        self._batch_nodes(progress, "Next JS Functions", functions, "JsFunction", "fqn", [
+            "name", "filePath", "exported", "isDefault", "isAsync",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        # HAS_FUNCTION: JsModule -> JsFunction by shared filePath.
+        has_fn = [
+            {"fp": f["filePath"], "fqn": f["fqn"]}
+            for f in functions if f.get("filePath") and f.get("fqn")
+        ]
+        if has_fn:
+            self._batch_edges_simple(
+                progress, "HAS_FUNCTION", has_fn,
+                "MATCH (m:JsModule {wing: $wing, filePath: e.fp})",
+                "MATCH (f:JsFunction {wing: $wing, fqn: e.fqn})",
+                "MERGE (m)-[:HAS_FUNCTION]->(f)",
+                wing=wing,
+                src_var="m",
+            )
+
+        # CALLS_API — JsFunction → ApiCall, matched by fqn. Next.js has no
+        # Component/Composable callers, so every caller is a JsFunction.
+        calls_api = [
+            {"caller": e.get("callerFqn", ""), "api": e.get("apiCallFqn", "")}
+            for e in nextjs.get("callsApi", [])
+        ]
+        if calls_api:
+            self._batch_edges_simple(
+                progress, "CALLS_API", calls_api,
+                "MATCH (c:JsFunction {wing: $wing, fqn: e.caller})",
+                "MATCH (a:ApiCall {wing: $wing, fqn: e.api})",
+                "MERGE (c)-[:CALLS_API]->(a)",
+                wing=wing,
+            )
+
+        # IMPORTS edges — source side is always JsModule for Next.js (no
+        # Component/Composable/Store nodes exist). Target: JsFunction by fqn
+        # when resolved, else JsModule by filePath.
+        imports_resolved = [
+            {"src": e.get("sourceModule", ""), "tgt_fqn": e.get("targetFqn") or "",
+             "name": e.get("importedName", ""),
+             "alias": e.get("localAlias") or "",
+             "isDefault": bool(e.get("isDefault", False)),
+             "isNamespace": bool(e.get("isNamespace", False))}
+            for e in nextjs.get("imports", []) if e.get("targetFqn")
+        ]
+        if imports_resolved:
+            self._batch_edges_simple(
+                progress, "IMPORTS (resolved · JsModule)", imports_resolved,
+                "MATCH (src:JsModule {wing: $wing, filePath: e.src})",
+                "MATCH (tgt:JsFunction {wing: $wing, fqn: e.tgt_fqn})",
+                "MERGE (src)-[r:IMPORTS]->(tgt) "
+                "SET r.importedName = e.name, r.alias = e.alias, "
+                "    r.isDefault = e.isDefault, r.isNamespace = e.isNamespace",
+                wing=wing,
+                src_var="src",
+            )
+
+        imports_modulelevel = [
+            {"src": e.get("sourceModule", ""), "tgt": e.get("targetModule", ""),
+             "name": e.get("importedName", ""),
+             "alias": e.get("localAlias") or "",
+             "unresolved": bool(e.get("unresolved", False))}
+            for e in nextjs.get("imports", []) if not e.get("targetFqn")
+        ]
+        # ES6 module resolution: expand extensionless specifiers to candidate
+        # filePaths so the JsModule join hits (mirror of the Vue path).
+        expanded_imports: list[dict] = []
+        module_paths: set[str] = {m["filePath"] for m in modules}
+        for e in imports_modulelevel:
+            tgt = e["tgt"]
+            candidates = [tgt]
+            if not tgt.endswith((".js", ".ts", ".mjs", ".jsx", ".tsx")):
+                candidates += [f"{tgt}.js", f"{tgt}.ts", f"{tgt}/index.js", f"{tgt}/index.ts"]
+            resolved = next((c for c in candidates if c in module_paths), tgt)
+            expanded_imports.append({**e, "tgt": resolved})
+        if expanded_imports:
+            self._batch_edges_simple(
+                progress, "IMPORTS (module · JsModule)", expanded_imports,
+                "MATCH (src:JsModule {wing: $wing, filePath: e.src})",
+                "MATCH (tgt:JsModule {wing: $wing, filePath: e.tgt})",
+                "MERGE (src)-[r:IMPORTS]->(tgt) "
+                "SET r.importedName = e.name, r.alias = e.alias, r.unresolved = e.unresolved",
+                wing=wing,
+                src_var="src",
+            )
+
+        # IMPORTS_FN bridge — re-derive function-level edges from named imports
+        # when a JsFunction with that name exists at the target module's path.
+        fn_bridge_rows = [
+            {"src": e["src"], "tgt": e["tgt"], "name": e["name"]}
+            for e in expanded_imports
+            if e.get("name") and e["name"] not in ("", "*", "default")
+        ]
+        if fn_bridge_rows:
+            self._batch_edges_simple(
+                progress, "IMPORTS_FN (JsModule)", fn_bridge_rows,
+                "MATCH (src:JsModule {wing: $wing, filePath: e.src})",
+                "MATCH (fn:JsFunction {wing: $wing, name: e.name, filePath: e.tgt})",
+                "MERGE (src)-[:IMPORTS_FN]->(fn)",
+                wing=wing,
+                src_var="src",
+            )
+
+        # --- P2: App Router routes / pages / layouts / special files + React
+        # components + the RSC-boundary edge set. Additive — pre-P2 exports
+        # carry none of these arrays, so every batch is a no-op there.
+        # Nodes first (PK-indexed), then edges whose label-indexed MATCH hits
+        # the RANGE index (loader documents the 6000x full-scan penalty).
+        routes = [dict(r, wing=wing) for r in nextjs.get("routes", []) or []]
+        self._batch_nodes(progress, "Next Routes", routes, "Route", "urlPath", [
+            "segmentDir", "dynamic", "paramNames", "group", "isRoot", "wing",
+        ])
+
+        pages = [dict(p, wing=wing) for p in nextjs.get("pages", []) or []]
+        self._batch_nodes(progress, "Next Pages", pages, "Page", "fqn", [
+            "filePath", "urlPath", "isAsync", "isClient",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        layouts = [dict(l, wing=wing) for l in nextjs.get("layouts", []) or []]
+        self._batch_nodes(progress, "Next Layouts", layouts, "Layout", "fqn", [
+            "filePath", "urlPath", "isRoot", "isClient",
+            "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        special_files = [dict(s, wing=wing) for s in nextjs.get("specialFiles", []) or []]
+        self._batch_nodes(progress, "Next SpecialFiles", special_files, "SpecialFile", "fqn", [
+            "filePath", "urlPath", "kind", "isClient",
+            "lineStart", "lineEnd", "wing",
+        ])
+
+        components = [dict(c, wing=wing) for c in nextjs.get("components", []) or []]
+        self._batch_nodes(progress, "Next Components", components, "ReactComponent", "fqn", [
+            "name", "filePath", "isDefaultExport", "isClient", "isServer",
+            "kind", "lineStart", "lineEnd", "body", "isTest", "wing",
+        ])
+
+        # HAS_PAGE (Route → Page)
+        has_page = [{"urlPath": e.get("urlPath", ""), "pageFqn": e.get("pageFqn", "")}
+                    for e in nextjs.get("hasPage", []) or []]
+        if has_page:
+            self._batch_edges_simple(
+                progress, "HAS_PAGE", has_page,
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MATCH (p:Page {wing: $wing, fqn: e.pageFqn})",
+                "MERGE (r)-[:HAS_PAGE]->(p)",
+                wing=wing, src_var="r",
+            )
+
+        # HAS_LAYOUT (Route → Layout)
+        has_layout = [{"urlPath": e.get("urlPath", ""), "layoutFqn": e.get("layoutFqn", "")}
+                      for e in nextjs.get("hasLayout", []) or []]
+        if has_layout:
+            self._batch_edges_simple(
+                progress, "HAS_LAYOUT", has_layout,
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MATCH (l:Layout {wing: $wing, fqn: e.layoutFqn})",
+                "MERGE (r)-[:HAS_LAYOUT]->(l)",
+                wing=wing, src_var="r",
+            )
+
+        # BOUNDARY_OF (SpecialFile → Route)
+        boundary_of = [{"specialFqn": e.get("specialFqn", ""), "urlPath": e.get("urlPath", "")}
+                       for e in nextjs.get("boundaryOf", []) or []]
+        if boundary_of:
+            self._batch_edges_simple(
+                progress, "BOUNDARY_OF", boundary_of,
+                "MATCH (s:SpecialFile {wing: $wing, fqn: e.specialFqn})",
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MERGE (s)-[:BOUNDARY_OF]->(r)",
+                wing=wing, src_var="s",
+            )
+
+        # CHILD_OF (Route → Route) — child route to nearest ancestor route.
+        child_of = [{"childUrlPath": e.get("childUrlPath", ""),
+                     "parentUrlPath": e.get("parentUrlPath", "")}
+                    for e in nextjs.get("childOf", []) or []]
+        if child_of:
+            self._batch_edges_simple(
+                progress, "CHILD_OF", child_of,
+                "MATCH (c:Route {wing: $wing, urlPath: e.childUrlPath})",
+                "MATCH (p:Route {wing: $wing, urlPath: e.parentUrlPath})",
+                "MERGE (c)-[:CHILD_OF]->(p)",
+                wing=wing, src_var="c",
+            )
+
+        # RENDERS ((Page|Layout|ReactComponent) → ReactComponent). Source label
+        # is not tagged in the contract, so emit once per candidate source
+        # label — the two non-matching passes drop silently (HAS_STATEMENT
+        # dual-label pattern). Target is always a ReactComponent.
+        renders = [{"sourceFqn": e.get("sourceFqn", ""), "targetFqn": e.get("targetFqn", "")}
+                   for e in nextjs.get("renders", []) or []]
+        if renders:
+            for src_label in ("Page", "Layout", "ReactComponent"):
+                self._batch_edges_simple(
+                    progress, f"RENDERS ({src_label})", renders,
+                    f"MATCH (s:{src_label} {{wing: $wing, fqn: e.sourceFqn}})",
+                    "MATCH (t:ReactComponent {wing: $wing, fqn: e.targetFqn})",
+                    "MERGE (s)-[:RENDERS]->(t)",
+                    wing=wing, src_var="s",
+                )
+
+        # --- P3: server actions / route handlers / hooks / context / middleware.
+        # Additive — pre-P3 exports carry none of these arrays, so every batch is
+        # a no-op there. Zero-target-safe: a repo with no route handlers or
+        # middleware simply emits empty lists (contract: RouteHandler / Middleware
+        # collectors emit nothing rather than crash). Nodes first (PK-indexed),
+        # then edges whose label-indexed MATCH hits the RANGE index.
+        server_actions = [dict(s, wing=wing) for s in nextjs.get("serverActions", []) or []]
+        self._batch_nodes(progress, "Next ServerActions", server_actions, "ServerAction", "fqn", [
+            "name", "filePath", "scope", "isAsync",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
+        route_handlers = [dict(r, wing=wing) for r in nextjs.get("routeHandlers", []) or []]
+        self._batch_nodes(progress, "Next RouteHandlers", route_handlers, "RouteHandler", "fqn", [
+            "filePath", "httpMethod", "urlPath",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
+        # Endpoint — a Next route-handler endpoint is DISTINCT from a Spring one even
+        # when the "<METHOD>:<urlPath>" string matches (different service, different
+        # wing). MERGE on the bare fqn would collapse the Next endpoint into the Spring
+        # node and OVERWRITE its `wing` (wing is in the SET list), which then breaks
+        # bridge_http's cross-wing `a.wing <> e.wing` HITS guard for BOTH wings. So the
+        # Next endpoint id is wing-qualified. bridge_http matches on `path`, so the
+        # cross-stack frontend->backend bridge is unaffected; Spring's (unqualified) id
+        # is never touched. HANDLES below uses the same qualified id.
+        def _next_ep_id(fqn: str) -> str:
+            return f"{fqn}@{wing}"
+        endpoints = [{"id": _next_ep_id(e.get("fqn", "")), "method": e.get("method", ""),
+                      "path": e.get("path", ""), "wing": wing}
+                     for e in nextjs.get("endpoints", []) or []]
+        self._batch_nodes(progress, "Next Endpoints", endpoints, "Endpoint", "id", [
+            "method", "path", "wing",
+        ])
+
+        custom_hooks = [dict(c, wing=wing) for c in nextjs.get("customHooks", []) or []]
+        self._batch_nodes(progress, "Next CustomHooks", custom_hooks, "CustomHook", "fqn", [
+            "name", "filePath", "isAsync",
+            "lineStart", "lineEnd", "body", "wing",
+        ])
+
+        hooks = [dict(h, wing=wing) for h in nextjs.get("hooks", []) or []]
+        self._batch_nodes(progress, "Next Hooks", hooks, "Hook", "name", [
+            "origin", "wing",
+        ])
+
+        context_providers = [dict(c, wing=wing) for c in nextjs.get("contextProviders", []) or []]
+        self._batch_nodes(progress, "Next ContextProviders", context_providers, "ContextProvider", "fqn", [
+            "name", "filePath", "lineStart", "lineEnd", "wing",
+        ])
+
+        middlewares = [dict(m, wing=wing) for m in nextjs.get("middlewares", []) or []]
+        self._batch_nodes(progress, "Next Middlewares", middlewares, "Middleware", "fqn", [
+            "filePath", "matchers", "wing",
+        ])
+
+        # HANDLES (Endpoint → RouteHandler) — match the wing-qualified Next endpoint id.
+        handles = [{"endpointFqn": _next_ep_id(e.get("endpointFqn", "")), "handlerFqn": e.get("handlerFqn", "")}
+                   for e in nextjs.get("handles", []) or []]
+        if handles:
+            self._batch_edges_simple(
+                progress, "HANDLES", handles,
+                "MATCH (s:Endpoint {wing: $wing, id: e.endpointFqn})",
+                "MATCH (h:RouteHandler {wing: $wing, fqn: e.handlerFqn})",
+                "MERGE (s)-[:HANDLES]->(h)",
+                wing=wing, src_var="s",
+            )
+
+        # EXPOSED_BY (ServerAction → Page|ReactComponent). Owner label is not
+        # tagged, so emit once per candidate target label — the non-matching pass
+        # drops silently (same dual-label pattern RENDERS uses).
+        exposed_by = [{"actionFqn": e.get("actionFqn", ""), "ownerFqn": e.get("ownerFqn", "")}
+                      for e in nextjs.get("exposedBy", []) or []]
+        if exposed_by:
+            for owner_label in ("Page", "ReactComponent"):
+                self._batch_edges_simple(
+                    progress, f"EXPOSED_BY ({owner_label})", exposed_by,
+                    "MATCH (a:ServerAction {wing: $wing, fqn: e.actionFqn})",
+                    f"MATCH (o:{owner_label} {{wing: $wing, fqn: e.ownerFqn}})",
+                    "MERGE (a)-[:EXPOSED_BY]->(o)",
+                    wing=wing, src_var="a",
+                )
+
+        # USES_HOOK ((Page|Layout|ReactComponent|CustomHook) → Hook). Source label
+        # not tagged — multi-pass over every candidate, non-matching passes drop.
+        uses_hook = [{"sourceFqn": e.get("sourceFqn", ""), "hookName": e.get("hookName", "")}
+                     for e in nextjs.get("usesHook", []) or []]
+        if uses_hook:
+            for src_label in ("Page", "Layout", "ReactComponent", "CustomHook"):
+                self._batch_edges_simple(
+                    progress, f"USES_HOOK ({src_label})", uses_hook,
+                    f"MATCH (s:{src_label} {{wing: $wing, fqn: e.sourceFqn}})",
+                    "MATCH (h:Hook {wing: $wing, name: e.hookName})",
+                    "MERGE (s)-[:USES_HOOK]->(h)",
+                    wing=wing, src_var="s",
+                )
+
+        # PROVIDES_CONTEXT ((ReactComponent|JsModule) → ContextProvider). Source
+        # is a component (keyed fqn) or the module holding the createContext site
+        # (JsModule keyed filePath) — the sourceFqn carries whichever identity, so
+        # try both label/key combos; the non-matching pass drops silently.
+        provides_context = [{"sourceFqn": e.get("sourceFqn", ""), "contextFqn": e.get("contextFqn", "")}
+                            for e in nextjs.get("providesContext", []) or []]
+        if provides_context:
+            self._batch_edges_simple(
+                progress, "PROVIDES_CONTEXT (ReactComponent)", provides_context,
+                "MATCH (s:ReactComponent {wing: $wing, fqn: e.sourceFqn})",
+                "MATCH (c:ContextProvider {wing: $wing, fqn: e.contextFqn})",
+                "MERGE (s)-[:PROVIDES_CONTEXT]->(c)",
+                wing=wing, src_var="s",
+            )
+            self._batch_edges_simple(
+                progress, "PROVIDES_CONTEXT (JsModule)", provides_context,
+                "MATCH (s:JsModule {wing: $wing, filePath: e.sourceFqn})",
+                "MATCH (c:ContextProvider {wing: $wing, fqn: e.contextFqn})",
+                "MERGE (s)-[:PROVIDES_CONTEXT]->(c)",
+                wing=wing, src_var="s",
+            )
+
+        # INTERCEPTS (Middleware → Route)
+        intercepts = [{"middlewareFqn": e.get("middlewareFqn", ""), "urlPath": e.get("urlPath", "")}
+                      for e in nextjs.get("intercepts", []) or []]
+        if intercepts:
+            self._batch_edges_simple(
+                progress, "INTERCEPTS", intercepts,
+                "MATCH (m:Middleware {wing: $wing, fqn: e.middlewareFqn})",
+                "MATCH (r:Route {wing: $wing, urlPath: e.urlPath})",
+                "MERGE (m)-[:INTERCEPTS]->(r)",
+                wing=wing, src_var="m",
+            )
+
+        # Bridge pass — cross-wing HITS between Next ApiCall and Spring Endpoint.
+        try:
+            from onelens.importer import bridge_http
+
+            bridge_stats = bridge_http.compute_hits(self.db, graph_name=wing)
+            logger.info("Next.js bridge pass: %s", bridge_stats)
+        except Exception as e:
+            logger.warning("Next.js bridge pass failed: %s", e)
 
     def _load_sql(self, progress, workspace_header: dict, graph_wing: str):
         """

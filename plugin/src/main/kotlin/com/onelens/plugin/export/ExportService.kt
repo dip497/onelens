@@ -13,6 +13,9 @@ import com.onelens.plugin.framework.springboot.SpringBootCollectionResult
 import com.onelens.plugin.framework.springboot.SpringBootCollector
 import com.onelens.plugin.framework.vue3.Vue3Collector
 import com.onelens.plugin.framework.vue3.Vue3Context
+import com.onelens.plugin.framework.nextjs.NextjsAdapter
+import com.onelens.plugin.framework.nextjs.NextjsCollector
+import com.onelens.plugin.framework.nextjs.NextjsContext
 import com.onelens.plugin.framework.workspace.Workspace
 import com.onelens.plugin.framework.workspace.WorkspaceLoader
 import com.onelens.plugin.ui.OneLensEvent
@@ -97,9 +100,11 @@ class ExportService {
         // collector type and merges it into the legacy top-level keys.
         var springResult: SpringBootCollectionResult? = null
         var vueCtx: Vue3Context? = null
+        var nextCtx: NextjsContext? = null
         for (adapter in adapters) {
             val fraction = when (adapter) {
                 is SpringBootAdapter -> 0.0
+                is NextjsAdapter -> 0.5
                 else -> 0.5   // Vue + future adapters start at the half-way mark
             }
             val ctx = CollectContext(
@@ -118,6 +123,7 @@ class ExportService {
                 when (collector) {
                     is SpringBootCollector -> springResult = collector.lastResult
                     is Vue3Collector -> vueCtx = collector.lastContext
+                    is NextjsCollector -> nextCtx = collector.lastContext
                 }
             }
         }
@@ -176,8 +182,37 @@ class ExportService {
             }
         }
 
-        val apps = springApps + vueApps
-        val packages = springPackages + vuePackages
+        // Next.js App = one per Next root detected in the workspace. Same
+        // lightweight filesystem-only synthesis as the Vue block above.
+        val nextApps = mutableListOf<AppData>()
+        val nextPackages = mutableListOf<PackageData>()
+        if (nextCtx != null) {
+            for (root in workspace.roots) {
+                val rootDir = root.path.toFile()
+                val pkgJson = java.io.File(rootDir, "package.json")
+                if (!pkgJson.isFile) continue
+                val nextRootName = rootDir.name.ifBlank { workspace.name }
+                val appId = "app:nextjs:${workspace.relativePath(rootDir.absolutePath).ifBlank { nextRootName }}"
+                val srcDir = java.io.File(rootDir, "src")
+                val topLevelSegments = if (srcDir.isDirectory) {
+                    srcDir.listFiles { f -> f.isDirectory }?.map { it.name } ?: emptyList()
+                } else emptyList()
+                nextApps += AppData(
+                    id = appId,
+                    name = nextRootName,
+                    type = "nextjs",
+                    rootPath = rootDir.absolutePath,
+                    scanPackages = topLevelSegments,
+                )
+                for (seg in topLevelSegments) {
+                    val pkgId = "next:$nextRootName:$seg"
+                    nextPackages += PackageData(id = pkgId, name = seg, parentId = null, appId = appId)
+                }
+            }
+        }
+
+        val apps = springApps + vueApps + nextApps
+        val packages = springPackages + vuePackages + nextPackages
 
         val durationMs = System.currentTimeMillis() - startTime
 
@@ -234,6 +269,7 @@ class ExportService {
             ),
             adapters = activeIds.ifEmpty { listOf("spring-boot") },
             vue3 = vue3Data,
+            nextjs = nextCtx?.snapshot(),
         )
 
         // Write JSON — stream directly to disk. `encodeToString(document)`
@@ -288,8 +324,8 @@ class ExportService {
             durationMs = durationMs,
             vueNodes = vueNodeCount,
             vueEdges = vueEdgeCount,
-            jsModules = v?.modules?.size ?: 0,
-            jsFunctions = v?.functions?.size ?: 0,
+            jsModules = (v?.modules?.size ?: 0) + (document.nextjs?.modules?.size ?: 0),
+            jsFunctions = (v?.functions?.size ?: 0) + (document.nextjs?.functions?.size ?: 0),
             activeAdapters = document.adapters,
         ))
 

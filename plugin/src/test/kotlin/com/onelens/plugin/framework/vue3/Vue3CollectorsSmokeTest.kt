@@ -2,13 +2,13 @@ package com.onelens.plugin.framework.vue3
 
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import org.junit.Assert.assertNotEquals
-import com.onelens.plugin.framework.vue3.collectors.ApiCallCollector
+import com.onelens.plugin.framework.jscommon.ApiCallCollector
 import com.onelens.plugin.framework.vue3.collectors.ComposableCollector
 import com.onelens.plugin.framework.vue3.collectors.LazyRouteCollector
 import com.onelens.plugin.framework.vue3.collectors.PiniaStoreCollector
 import com.onelens.plugin.framework.vue3.collectors.SfcScriptSetupCollector
 import com.onelens.plugin.framework.vue3.resolver.CallThroughResolver
-import com.onelens.plugin.framework.vue3.resolver.ModuleNameBinder
+import com.onelens.plugin.framework.jscommon.ModuleNameBinder
 import java.nio.file.Paths
 
 /**

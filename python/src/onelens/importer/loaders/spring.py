@@ -114,7 +114,14 @@ class SpringLoader(SubdocLoader):
             return
 
         writer.db.execute("MATCH (b:SpringBean) DETACH DELETE b")
-        writer.db.execute("MATCH (e:Endpoint) DETACH DELETE e")
+        # Endpoint is NO LONGER Spring-exclusive — the Next.js loader MERGEs Endpoint
+        # nodes for its route handlers on the same `<METHOD>:<path>` PK. An unfiltered
+        # global delete here wiped other wings' (and Next's) endpoints plus the HITS
+        # bridge edges into them, from a single-wing delta. Scope it to this wing;
+        # `_replace_nextjs` re-inserts this wing's Next endpoints afterwards.
+        writer.db.execute(
+            "MATCH (e:Endpoint) WHERE e.wing = $wing DETACH DELETE e", {"wing": wing}
+        )
         writer.db.execute("MATCH (a:SpringAutoConfig) DETACH DELETE a")
 
         beans = spring.get("beans", []) or []

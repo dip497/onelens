@@ -2,7 +2,73 @@
 
 Source of truth for what's landed, what's in flight, and what's deferred. Append-only per phase; mark status inline. Links point to the canonical artefact so this file stays skimmable.
 
-Last updated: 2026-05-07.
+Last updated: 2026-06.
+
+## Phase H — Headless server one-shot + non-JVM export (2026-06)
+
+| # | Feature | Status | Where |
+|---|---------|--------|-------|
+| H1 | One-shot headless flow for a no-IDE server (preflight → engine → plugin → license → export → import → verify; no sudo/Docker) | ✅ | `scripts/onelens-headless.sh` |
+| H2 | Headless-server licensing: `idea.key` into gradle sandbox config + restore-before-every-export (JBA keys self-invalidate after one session) | ✅ | `scripts/onelens-headless.sh::license`, `docs/headless.md` Gotcha A |
+| H3 | Non-JVM (Vue/JS) content-root fix — generate minimal `.idea` (web module + `src/` source root) so a directory-opened npm project is indexable; symlinked source dirs followed too | ✅ | `scripts/onelens-headless.sh::gen_idea` (`--frontend`), `docs/headless.md` Gotcha B |
+| H4 | `onelens_init --export-path` JSON-encoding documented (generated CLI `json.loads()` the arg) | ✅ | `docs/headless.md` Gotcha C |
+| H5 | Verified end-to-end on a real 28-module Spring backend (195K nodes) + 2.5K-component Vue frontend, both queryable via falkordblite | ✅ | — |
+| H6 | Starter-side auto content-root for directory-opened projects (drop the `.idea` step) | ⬜ | future — `OneLensExportStarter.kt` + `UnindexedFilesScanner.queue().get()` |
+
+## Phase N — Next.js / React adapter (2026-07)
+
+| ID | Feature | Status | Pointer |
+|---|---------|--------|-------|
+| N1 | `framework/jscommon/` extraction — JS/TS collectors + resolvers behind `JsCommonSink`; Vue behaviour preserved byte-for-byte | ✅ | `plugin/.../framework/jscommon/*` |
+| N2 | `NextjsAdapter` + `NextjsContext` + `NextjsCollector` — reuse JsModule/ApiCall/ModuleNameBinder over `.ts/.tsx/.jsx` | ✅ | `plugin/.../framework/nextjs/*`, `framework-nextjs.xml` |
+| N3 | `detect()` — `next` in `package.json`, root + 2 monorepo levels; `nextAdapterEnabled` override | ✅ | `NextjsAdapter.kt::detect` |
+| N4 | Vendored-dir exclusion (`node_modules`/`.next`/`dist`/…) across all JS enumerations | ✅ | `JsFileTypes.isVendorPath` |
+| N5 | `ExportModels.nextjs` + `ExportService` dispatch/synthesis/stats wiring | ✅ | `ExportModels.kt`, `ExportService.kt` |
+| N6 | Python `NextLoader._load_nextjs` → reused JsModule/JsFunction/ApiCall + HITS bridge | ✅ | `python/.../importer/loader.py` |
+| N7 | **Verified E2E on `the validation repo`** — 289 JsModule / 125 JsFunction / 325 IMPORTS in FalkorDB | ✅ | — |
+| N8 | **P2** — routes (App Router segment→URL), Page/Layout/SpecialFile, React components, RSC client/server boundary, RENDERS composition + new labels/schema/search/miner | ✅ | `framework/nextjs/collectors/{RouteTree,ReactComponent,Directive,RendersResolver,NextPsiUtil}`; `loader.py::_load_nextjs`, `schema.py`, `queries.py`, `code_miner.py` |
+| N8v | P2 verified E2E on `the validation repo` — 24 Route / 24 Page / 4 Layout / 6 SpecialFile / 50 ReactComponent (26 client) / 11 RENDERS, all queryable | ✅ | — |
+| N12 | RENDERS cross-package resolution — `@scope/*` pnpm-workspace component imports resolve to file paths (P2 only does same-package/relative/`@/`) | ⬜ | P3 — workspace-alias map in `ViteAliasResolver` |
+| N9 | **P3** — server actions (module + inline), route handlers (+Endpoint/HANDLES), hooks (origin-classified) + custom hooks, Context providers, middleware | ✅ | `framework/nextjs/collectors/{ServerAction,RouteHandler,Hook,ContextProvider,Middleware}Collector` |
+| N9v | P3 verified E2E on `the validation repo` — 40 Hook / 8 ContextProvider / 16 ApiCall / 2 CustomHook / 1 ServerAction (inline); 43 USES_HOOK, 15 RENDERS, 8 PROVIDES_CONTEXT. RouteHandler + Middleware zero-target-safe | ✅ | — |
+| N10 | **P4** — Next delta (first frontend wired into delta), export side: `DeltaTracker.isTracked` widened past `.java` (ts/tsx/js/jsx/vue/kt), `AutoSyncFileListener` fires on `.tsx` saves, `DeltaExportService` emits a full `nextjs` section (~3 s re-collect) + `adapters` | ✅ | `export/delta/{DeltaTracker,DeltaExportService}.kt`, `autosync/AutoSyncFileListener.kt` |
+| N10-wing | **Delta `wing` mismatch fixed** — the delta doc carried no `workspace` header, so the importer stamped `wing = graph_name` while a full import stamped `wing = workspace.graphId`. Wing-scoped replaces deleted nothing and re-inserted under a second wing (a removed component survived). `DeltaDocument.workspace` now mirrors the full export. **Also repairs Java/Spring delta**, whose `Endpoint.wing` had the same drift | ✅ | `DeltaExportService.kt::DeltaDocument.workspace` |
+| N10v | P4 verified E2E on a Next fixture repo: full import (4 components) → delete a component + commit → `ONELENS_DELTA=true` export → delta import **without `--clear`** → component gone, 0 stale RENDERS edges | ✅ | — |
+| N10-py | **P4 import side** — delta wholesale-replaces the Next subgraph (`_replace_nextjs`): wing-scoped DETACH DELETE of Next-exclusive labels + re-run `_load_nextjs`; shared JS labels deleted only on Next-only graphs (warn on mixed Vue+Next); Chroma Next drawers purged by prefix + re-mined under `--context`. Fixes stale ReactComponent/Route lingering across delta. | ✅ | `python/.../importer/delta_loader.py::_replace_nextjs` |
+| N11 | `ky` / `fetch` in `CLIENT_NAMES` so App-Router data calls surface as `ApiCall` (P1 had `apiCalls=0` → now 16) | ✅ | `jscommon/ApiCallCollector` (bare `fetch(url,{method})` + `ky`) |
+| N13 | `CALLS_API` joins only 2/16 ApiCalls — module-level / arrow callers aren't emitted as `JsFunction`, so the caller-fqn join drops | ⬜ | follow-up — `JsModuleCollector` caller coverage |
+
+### Phase N — post-merge code review (high effort, 2026-07)
+
+Fixed in `<review-fix>`:
+
+| ID | Finding | Status |
+|---|---------|--------|
+| NR1 | `isVendorPath` took the ABSOLUTE path → a checkout under `~/out/` or `/builds/dist/` silently emitted an EMPTY JS subgraph. Now `isVendorFile(vf, sink)` relativizes first | ✅ |
+| NR2 | `next_only` mixed-graph guard was dead — delta export never emitted `"vue3"`, so a Next delta `DETACH DELETE`d Vue's shared JsModule/JsFunction/ApiCall | ✅ |
+| NR3 | `SpringLoader.apply_delta` did a global unfiltered `MATCH (e:Endpoint) DETACH DELETE e`; now that Next reuses `Endpoint`, a single-wing delta wiped other wings' endpoints. Wing-scoped | ✅ |
+| NR4 | `AutoSyncFileListener.EXCLUDED_DIRS` lacked `node_modules`/`.next`/`dist` → one `npm install` storms the debounced sync | ✅ |
+| NR5 | `rendersJsx`'s `<[A-Z]` textual probe matched TS generics (`Map<String,Foo>`) → phantom `ReactComponent` nodes | ✅ |
+| NR6 | `jsxTagNames` ran its regex unconditionally (not as a fallback) → bogus `RENDERS` from `useQuery<TodoList>()` | ✅ |
+| NR7 | `isAsync` substring-matched, so `function asyncLoad()` was stamped `isAsync=true` | ✅ |
+| NR8 | Zero tests for ~2,200 lines. Added `NextjsPureLogicTest` (13 pure-logic cases, no platform fixture) pinning computeUrl / isVendorPath / JSX_MARKER / isTracked | ✅ |
+
+Open (logged, not fixed):
+
+| ID | Finding | Status |
+|---|---------|--------|
+| NR9 | Next `Endpoint` is never wing-deleted on delta → a removed route handler leaves an orphan Endpoint forever | ⬜ |
+| NR10 | `Endpoint` MERGEd on `id` only; in a multi-wing graph a Next endpoint sharing a path with a Spring one overwrote its `wing`, silently dropping the HITS edge. Next endpoint id is now wing-qualified (`<fqn>@<wing>`); Spring's untouched, `bridge_http` matches on `path` so the bridge is unaffected. Verified: two distinct nodes, Spring wing preserved | ✅ |
+| NR11 | `Hook` PK is `name` (global). Two frontends in one graph share the node; a wing-scoped delete on one destroys the other's `USES_HOOK` edges | ⬜ |
+| NR12 | Chroma delta purge assumes the collection is per-wing; two apps under one `--graph` purge each other's Next drawers | ⬜ |
+| NR13 | `_load_nextjs` uses a bare `m['filePath']` where siblings use `.get()` → KeyError aborts a half-written import | ⬜ |
+| NR14 | Multi-label edge passes (RENDERS/USES_HOOK/EXPOSED_BY) double-count when a `page.tsx` default export is both a `Page` and a `ReactComponent` with the same fqn | ⬜ |
+| NR15 | `isExported` only walks ancestors → `function Card(){}; export default Card;` is invisible. Latent: 0 occurrences in the validation repo | ⬜ |
+| NR16 | Anonymous inline server action gets fqn `<file>::default`, colliding with the Page's PK in the same file | ⬜ |
+| NR17 | Pages-router pass skips any path containing a segment named `app` (drops a legit `pages/app/settings.tsx`); `segs.indexOf("app")` takes the first match | ⬜ |
+| NR18 | `cli_generated.py` not regenerated after `mcp_server.py` changed — CLAUDE.md names the MCP server the CLI's source of truth. Regenerated via `scripts/regen_cli.sh`; Next.js schema now in `onelens query --help` + `SKILL.md` | ✅ |
+| NR19 | 11 collectors each re-run `FileTypeIndex.getFiles` + vendor filter over the same file set; enumerate once on the context | ⬜ |
+| NR20 | `_load_nextjs` duplicates ~130 lines of `_load_vue3`'s JS-common mapping (extensionless import resolution exists twice) | ⬜ |
 
 ## Embedder profiles · low-end CPU UX (2026-05-07 → 2026-05-08)
 

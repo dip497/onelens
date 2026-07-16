@@ -24,6 +24,15 @@ object DeltaTracker {
 
     private val LOG = logger<DeltaTracker>()
 
+    // File extensions whose changes are worth a delta. Non-.java entries (.ts,
+    // .tsx, .vue, …) flow straight through to DeltaExportService, which resolves
+    // Java classes only from `.java` paths (PsiJavaFile) and ignores the rest —
+    // Next/Vue changes are picked up by a full re-collect of their subgraph, not
+    // per-file. See DeltaExportService.exportDeltaForFiles.
+    private val TRACKED_EXT = setOf("java", "kt", "ts", "tsx", "js", "jsx", "mjs", "vue")
+    internal fun isTracked(path: String): Boolean =
+        path.substringAfterLast('.', "") in TRACKED_EXT
+
     data class ChangedFiles(
         val modified: List<String>,   // Changed or added .java files (relative paths)
         val deleted: List<String>,    // Deleted .java files (relative paths)
@@ -219,7 +228,7 @@ object DeltaTracker {
                 when {
                     status.startsWith("D") -> {
                         val p = parts[1].trim()
-                        if (p.endsWith(".java")) deleted.add(p)
+                        if (isTracked(p)) deleted.add(p)
                     }
                     status.startsWith("R") || status.startsWith("C") -> {
                         // Rename / copy: parts[1] = from, parts[2] = to.
@@ -228,13 +237,13 @@ object DeltaTracker {
                         if (parts.size >= 3) {
                             val from = parts[1].trim()
                             val to = parts[2].trim()
-                            if (from.endsWith(".java")) deleted.add(from)
-                            if (to.endsWith(".java")) modified.add(to)
+                            if (isTracked(from)) deleted.add(from)
+                            if (isTracked(to)) modified.add(to)
                         }
                     }
                     status.startsWith("A") || status.startsWith("M") -> {
                         val p = parts[1].trim()
-                        if (p.endsWith(".java")) modified.add(p)
+                        if (isTracked(p)) modified.add(p)
                     }
                 }
             }
@@ -264,13 +273,13 @@ object DeltaTracker {
                     com.intellij.openapi.vcs.changes.Change.Type.NEW,
                     com.intellij.openapi.vcs.changes.Change.Type.MODIFICATION,
                     com.intellij.openapi.vcs.changes.Change.Type.MOVED -> {
-                        if (afterPath != null && afterPath.endsWith(".java")) {
+                        if (afterPath != null && isTracked(afterPath)) {
                             val relative = afterPath.removePrefix(basePath).removePrefix("/")
                             modified.add(relative)
                         }
                     }
                     com.intellij.openapi.vcs.changes.Change.Type.DELETED -> {
-                        if (beforePath != null && beforePath.endsWith(".java")) {
+                        if (beforePath != null && isTracked(beforePath)) {
                             val relative = beforePath.removePrefix(basePath).removePrefix("/")
                             deleted.add(relative)
                         }
@@ -298,7 +307,7 @@ object DeltaTracker {
                     if (child.name != ".git" && child.name != "build" && child.name != "target") {
                         walk(child)
                     }
-                } else if (child.name.endsWith(".java") && child.timeStamp > sinceTimestamp) {
+                } else if (isTracked(child.name) && child.timeStamp > sinceTimestamp) {
                     val relative = child.path.removePrefix(basePath).removePrefix("/")
                     modified.add(relative)
                 }

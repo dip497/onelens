@@ -18,8 +18,8 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComponentData
 import com.onelens.plugin.export.PropData
 import com.onelens.plugin.framework.vue3.Vue3Context
-import com.onelens.plugin.framework.vue3.isTestFile
-import com.onelens.plugin.framework.vue3.smartRead
+import com.onelens.plugin.framework.jscommon.isTestFile
+import com.onelens.plugin.framework.jscommon.smartRead
 import java.nio.file.Paths
 
 /**

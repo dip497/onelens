@@ -1,4 +1,4 @@
-package com.onelens.plugin.framework.vue3
+package com.onelens.plugin.framework.jscommon
 
 /**
  * Single source of truth for recognising test-originated files in the Vue3 /

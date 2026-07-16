@@ -352,6 +352,14 @@ class DeltaLoader:
         if "tests" in data or "mockBeans" in data or "spyBeans" in data:
             TestLoader().apply_delta(self.writer, data, graph_wing)
 
+        # Next.js: the Kotlin side re-collects the WHOLE Next subgraph on every
+        # delta (~3s, ~500 nodes), so we replace it wholesale — no per-file
+        # cascade bookkeeping. Fixes stale ReactComponent/Route/etc. that used
+        # to survive a delta and force a --clear.
+        nextjs = data.get("nextjs")
+        if nextjs:
+            self._replace_nextjs(nextjs, graph_wing, adapters=data.get("adapters") or [])
+
         stats = data.get("stats", {})
 
         # 10. Optional: propagate the delta into the ChromaDB semantic layer.
@@ -391,6 +399,23 @@ class DeltaLoader:
                         "will drift until next full --context import"
                     )
                     stats["context"] = {"skipped": "mine_upserts not implemented"}
+
+                # Next.js drawers: same wholesale-replace strategy as the graph.
+                # This collection is per-wing (context_path derives from
+                # graph_name), so a prefix purge IS a wing purge — delete every
+                # Next drawer, then re-mine the fresh Next section.
+                nextjs = data.get("nextjs")
+                if nextjs:
+                    try:
+                        miner._ensure_collection()
+                        for prefix in ("reactcomponent:", "page:", "serveraction:", "customhook:"):
+                            miner.delete_by_ids(list(miner._get_existing_ids(prefix)))
+                        miner._mine_next_components(nextjs)
+                        miner._mine_next_pages(nextjs)
+                        miner._mine_server_actions(nextjs)
+                        miner._mine_custom_hooks(nextjs)
+                    except Exception as e:
+                        logger.warning("Next.js delta context mining failed: %s", e)
             except Exception as e:
                 logger.warning("Delta context mining failed: %s", e)
                 stats["context"] = {"error": str(e)}
@@ -412,6 +437,57 @@ class DeltaLoader:
 
         logger.info(f"Delta applied: {stats}")
         return stats
+
+    # Next-exclusive labels — safe to wing-delete wholesale, they belong to
+    # nobody but the Next collector.
+    _NEXT_EXCLUSIVE_LABELS = (
+        "Route", "Page", "Layout", "SpecialFile", "ReactComponent",
+        "ServerAction", "RouteHandler", "CustomHook", "Hook",
+        "ContextProvider", "Middleware",
+    )
+    # Shared with the Vue collector — only safe to delete when the graph is
+    # Next-only.
+    _NEXT_SHARED_LABELS = ("JsModule", "JsFunction", "ApiCall")
+
+    def _replace_nextjs(self, nextjs: dict, wing: str, adapters: list) -> None:
+        """Replace the entire Next.js subgraph for this wing, then re-insert.
+
+        The delta's `nextjs` section is a FULL re-collect (the Kotlin side
+        does this deliberately — Next collection is cheap). So we delete the
+        Next-owned nodes for this wing and re-run the existing full mapping.
+        No per-file cascade logic — staleness is fixed by wholesale replace.
+        """
+        labels = list(self._NEXT_EXCLUSIVE_LABELS)
+
+        next_only = "nextjs" in adapters and "vue3" not in adapters
+        if next_only:
+            labels += list(self._NEXT_SHARED_LABELS)
+        else:
+            # ponytail: mixed Vue+Next graph — we don't distinguish which
+            # JsModule/JsFunction/ApiCall came from which collector, so we
+            # can't safely wing-delete the shared labels (would nuke Vue's).
+            # We MERGE-upsert them instead; genuinely-removed shared JS nodes
+            # linger until a --clear. Upgrade path: stamp a `source` prop on
+            # shared JS nodes and scope the delete by it.
+            logger.warning(
+                "Next.js delta on a mixed Vue+Next graph (wing=%s): stale "
+                "JsModule/JsFunction/ApiCall nodes may linger; run a full "
+                "--clear import to purge them.", wing
+            )
+
+        for label in labels:
+            self.db.execute(
+                f"MATCH (n:{label}) WHERE n.wing = $wing DETACH DELETE n",
+                {"wing": wing},
+            )
+
+        # Re-insert via the EXISTING full mapping. GraphLoader._load_nextjs
+        # stamps every node with wing=graph_name and its _batch_* helpers
+        # guard `progress is not None`, so pass None (no progress bar).
+        from onelens.importer.loader import GraphLoader
+
+        GraphLoader(self.db)._load_nextjs(None, nextjs, graph_name=wing)
+        logger.info("Next.js subgraph replaced for wing=%s", wing)
 
     def _replace_modules(self, modules: list) -> None:
         """Drop all Module nodes, then re-insert."""

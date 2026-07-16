@@ -186,10 +186,26 @@ def search(term: str, node_type: str = "") -> tuple[str, dict]:
         # Prefix matches ChromaDB drawer-id convention (`<type>:<key>`) so
         # retrieval._fetch_locations_batch's prefix-partition lookup resolves
         # FTS hits. Without the prefix, location + snippet both drop silently.
+        # `coalesce` spans both frontends: Vue routes key on `name`, Next.js
+        # App Router routes key on `urlPath` — same `Route` label, distinct PK.
         cypher = f"""
             CALL db.idx.fulltext.queryNodes('Route', '{safe_term}') YIELD node
-            RETURN 'Route' AS type, ('route:' + node.name) AS fqn,
-                   node.path AS name, node.filePath AS file, '' AS kind
+            RETURN 'Route' AS type,
+                   ('route:' + coalesce(node.urlPath, node.name)) AS fqn,
+                   coalesce(node.path, node.urlPath) AS name,
+                   node.filePath AS file, '' AS kind
+        """
+    elif node_type == "reactcomponent":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ReactComponent', '{safe_term}') YIELD node
+            RETURN 'ReactComponent' AS type, ('reactcomponent:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "page":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Page', '{safe_term}') YIELD node
+            RETURN 'Page' AS type, ('page:' + node.fqn) AS fqn,
+                   node.fqn AS name, node.filePath AS file, '' AS kind
         """
     elif node_type == "apicall":
         cypher = f"""
@@ -208,6 +224,36 @@ def search(term: str, node_type: str = "") -> tuple[str, dict]:
         cypher = f"""
             CALL db.idx.fulltext.queryNodes('JsFunction', '{safe_term}') YIELD node
             RETURN 'JsFunction' AS type, ('jsfunction:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "serveraction":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ServerAction', '{safe_term}') YIELD node
+            RETURN 'ServerAction' AS type, ('serveraction:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, node.scope AS kind
+        """
+    elif node_type == "routehandler":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('RouteHandler', '{safe_term}') YIELD node
+            RETURN 'RouteHandler' AS type, ('routehandler:' + node.fqn) AS fqn,
+                   node.urlPath AS name, node.filePath AS file, node.httpMethod AS kind
+        """
+    elif node_type == "customhook":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('CustomHook', '{safe_term}') YIELD node
+            RETURN 'CustomHook' AS type, ('customhook:' + node.fqn) AS fqn,
+                   node.name AS name, node.filePath AS file, '' AS kind
+        """
+    elif node_type == "hook":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('Hook', '{safe_term}') YIELD node
+            RETURN 'Hook' AS type, ('hook:' + node.name) AS fqn,
+                   node.name AS name, '' AS file, node.origin AS kind
+        """
+    elif node_type == "contextprovider":
+        cypher = f"""
+            CALL db.idx.fulltext.queryNodes('ContextProvider', '{safe_term}') YIELD node
+            RETURN 'ContextProvider' AS type, ('contextprovider:' + node.fqn) AS fqn,
                    node.name AS name, node.filePath AS file, '' AS kind
         """
     else:

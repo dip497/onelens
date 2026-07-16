@@ -7,6 +7,157 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Next.js / React adapter · Phase 4 · delta export side (2026-07)
+
+- **Next.js is the first frontend wired into delta.** `DeltaTracker` no longer filters
+  git-diff to `.java` (now `java/kt/ts/tsx/js/jsx/mjs/vue` via `isTracked`), and
+  `AutoSyncFileListener` fires a debounced sync on `.tsx` saves — editing a component no
+  longer reports "NoChanges" and leaves the graph stale.
+- `DeltaExportService` emits a full `nextjs` section on delta. ponytail: a full Next
+  re-collect is ~3 s (the slow part of an export is IntelliJ indexing, not collection), so
+  no scoped-delta Collector SPI was built. Upgrade when collection time dominates.
+
+### Fixed — delta `wing` stamp mismatch (2026-07)
+
+- A delta export carried no `workspace` header, so the importer resolved `wing = graph_name`
+  while a full import resolved `wing = workspace.graphId`. Wing-scoped replaces then deleted
+  nothing and re-inserted under a second wing — a component removed from the source survived
+  the delta. `DeltaDocument` now mirrors the full export's `workspace` header.
+  This also repairs **Java/Spring** delta, whose `Endpoint.wing` drifted the same way (the
+  cross-stack `HITS` bridge filters on `Endpoint.wing IS NOT NULL`).
+
+### Added — Next.js / React adapter · Phase 4 · delta import (2026-07)
+
+- **`DeltaLoader._replace_nextjs`** — incremental imports now update the Next.js
+  subgraph instead of leaving it stale. The delta's `nextjs` section is a full
+  re-collect (cheap on the Kotlin side), so the loader replaces it wholesale:
+  wing-scoped `DETACH DELETE` of the Next-exclusive labels (Route, Page, Layout,
+  SpecialFile, ReactComponent, ServerAction, RouteHandler, CustomHook, Hook,
+  ContextProvider, Middleware) then re-runs the existing `GraphLoader._load_nextjs`
+  mapping. Fixes stale `ReactComponent`/`Route`/etc. that previously survived a
+  delta and forced a `--clear`.
+- Shared-with-Vue labels (`JsModule`, `JsFunction`, `ApiCall`) are deleted only
+  when the graph is Next-only (`nextjs` in adapters, `vue3` absent). On a mixed
+  Vue+Next graph the loader MERGE-upserts them and logs a warning that stale
+  shared JS nodes may linger (known ceiling — needs a per-node `source` stamp).
+- Under `--context`, the Next ChromaDB drawers (`reactcomponent:`, `page:`,
+  `serveraction:`, `customhook:`) are purged by prefix and re-mined, so semantic
+  retrieval tracks the delta.
+
+### Added — Next.js / React adapter · Phase 3 · actions, handlers, hooks, context (2026-07)
+
+- **Server actions** — module-level and **inline** `"use server"` (directive as the first
+  statement of a function body) → `ServerAction` + `EXPOSED_BY` to the enclosing page/component.
+- **Route handlers** — `route.*` under `app/` exporting `GET`/`POST`/… → `RouteHandler` +
+  a reused `Endpoint` node + `HANDLES`, so Next REST surfaces bridge to the Spring graph.
+- **Hooks** — `use*` call sites → `Hook` nodes classified `react` / `library` / `custom`,
+  plus `CustomHook` definitions; `USES_HOOK` from the enclosing page/layout/component/hook.
+- **Context providers** — top-level `createContext(...)` → `ContextProvider` + `PROVIDES_CONTEXT`
+  (replaces the Vue Pinia-store collector, which has no React analogue).
+- **Middleware** — `middleware.ts` + `config.matcher` → `Middleware` + `INTERCEPTS` to routes.
+- **`ky` / bare `fetch(url, {method})` detection** in the shared `ApiCallCollector` (additive;
+  Vue unaffected) — Next `apiCalls` went 0 → 16 on the validation repo.
+- **Cross-package RENDERS** — `WorkspaceAliasResolver` maps `@scope/pkg` → package dir via
+  `pnpm-workspace.yaml` / `workspaces`, so `<Badge/>` imported from another workspace package
+  resolves (RENDERS 11 → 15).
+- Python: `_load_nextjs` maps the 6 new labels + 5 new edges; `Endpoint` MERGEs on the shared
+  `id` PK so Spring endpoints are matched, never clobbered. schema/FTS, search branches,
+  `_mine_server_actions` / `_mine_custom_hooks`, and `mcp_server` docs updated.
+- Verified E2E on `the validation repo`: 40 Hook / 8 ContextProvider / 16 ApiCall / 2 CustomHook /
+  1 inline ServerAction; 43 USES_HOOK, 15 RENDERS, 8 PROVIDES_CONTEXT. Route handlers and
+  middleware are zero-target-safe on a repo that has none.
+
+### Added — Next.js / React adapter · Phase 2 · routes + components + RSC (2026-07)
+
+- **Route tree** (`RouteTreeCollector`) — walks `app/` (best-effort `pages/`):
+  `Route` (App Router segment → URL, `(group)` stripped, `[param]`→`:param`,
+  `[...x]`→`*x`), `Page`, `Layout`, `SpecialFile` (loading/error/not-found/
+  global-error) nodes + `HAS_PAGE`/`HAS_LAYOUT`/`BOUNDARY_OF`/`CHILD_OF` edges.
+- **React components** (`ReactComponentCollector`) — exported functions/arrows
+  that render JSX (`JSXmlLiteralExpression` PSI + a textual guard) → `ReactComponent`
+  nodes. Non-function PascalCase consts (config objects / lookup maps) are excluded.
+- **RSC boundary** (`DirectiveCollector`) — module-level `"use client"` sets
+  `isClient` on pages/layouts/components; `isServer = !isClient` (App Router default).
+- **RENDERS composition** (`RendersResolver`) — `(Page|Layout|Component) -[:RENDERS]->
+  Component` derived from JSX tags resolved through the import graph (extensionless
+  path matching; same-package/relative/`@/`-alias). Cross-package `@scope/*` resolution
+  is deferred (needs workspace-alias mapping).
+- Python: `_load_nextjs` maps the new arrays into `Route`/`Page`/`Layout`/
+  `SpecialFile`/`ReactComponent` + the four edge types; `schema.py` gains RANGE +
+  FTS indexes; `queries.py`/`analysis.py` gain `reactcomponent`/`page`/`route`
+  search; `code_miner` embeds component + page bodies; `mcp_server` status/docs updated.
+- Verified E2E on `the validation repo`: 24 Route / 24 Page / 4 Layout / 6 SpecialFile /
+  50 ReactComponent (26 client) / 11 RENDERS, all queryable in FalkorDB.
+
+### Added — Next.js / React adapter · Phase 1 (2026-07)
+
+- **`NextjsAdapter`** — a third `FrameworkAdapter` peer (alongside Spring Boot +
+  Vue 3) for Next.js / React frontends. Detects via `next` in `package.json`
+  (root + up to two monorepo levels, so `apps/web/package.json` is found).
+  `plugin/.../framework/nextjs/`.
+- **`framework/jscommon/` package** — the framework-agnostic JS/TS collectors
+  (`JsModuleCollector`, `ApiCallCollector`, `ModuleNameBinder`) + resolvers
+  (`ViteAliasResolver`, `SymlinkResolver`) + helpers (`SmartRead`,
+  `JsTestDetection`) extracted out of `vue3/` behind a `JsCommonSink` interface,
+  so both Vue and Next drive them. Vue import-collection behaviour preserved
+  byte-for-byte (the SFC vs plain-script branch is a string check, no Vue-plugin
+  dependency). `.jsx`/`.tsx` added to the file-type scan.
+- **Vendored-dir exclusion** (`JsFileTypes.isVendorPath`) — `node_modules`,
+  `.next`, `.turbo`, `dist`, `out`, … are dropped from every JS/TS enumeration.
+  A real `the validation repo` export went from 96 % `node_modules` noise (7,399
+  modules, 114 s) to 289 app/package modules in 3 s.
+- **Python `NextLoader._load_nextjs`** — maps the `nextjs` export section into the
+  reused `JsModule` / `JsFunction` / `ApiCall` labels + `HAS_FUNCTION` /
+  `IMPORTS` / `CALLS_API` edges, so trace/impact/search and the cross-stack
+  `HITS` bridge (frontend call → Spring `Endpoint`) work with no schema change.
+  `python/.../importer/loader.py`.
+- Verified end-to-end on `the validation repo`: 289 `JsModule` / 125 `JsFunction` /
+  325 `IMPORTS` queryable in FalkorDB. (P2 adds routes, React components, RSC
+  boundary; P3 adds server actions / route handlers / hooks; P4 wires delta.)
+
+### Added — Headless server setup + non-JVM export (2026-06)
+
+- **`scripts/onelens-headless.sh`** — one-shot headless flow for a no-IDE Linux
+  server: preflight (JDK/network/disk) → engine (uv venv + base onelens) →
+  plugin → license → PSI export → falkordblite import → verify. No sudo, no
+  Docker; everything under `$HOME`. Verified end-to-end on a real 28-module
+  Spring backend (195K nodes) + a 2,500-component Vue frontend.
+- **Licensing a headless server documented + automated.** The Gradle path's
+  downloaded IU runs `LicenseManager` even headless (`No valid license found` →
+  exit 7 before the starter). The script places `idea.key` into the sandbox
+  config and **restores it before every export** — account-tied (JBA) keys
+  self-invalidate after one session. See `docs/headless.md` → "Gotcha A".
+- **Non-JVM (Vue/JS) content-root handling.** A directory-opened npm project has
+  no content root → scanner reports `0 files for indexing` → silent 0-node
+  export. `--frontend` generates a minimal `.idea` (web module + `src/` source
+  root); symlinked source dirs inside the content root are indexed too. See
+  `docs/headless.md` → "Gotcha B".
+- **`docs/headless.md`** expanded: corrected the "Gradle path is license-free"
+  implication, added the server one-shot recipe, the license-key trick, the
+  content-root trick, and the `onelens_init` arg-encoding note.
+
+### Fixed — CLI generation safety (2026-06)
+
+- **`cli_generated.py` corruption fix.** The committed artifact (from
+  `8d1fb22`) held a `fastmcp generate-cli` error string instead of code, so
+  every fresh from-source install crashed on `import cli_generated`
+  (`SyntaxError`). Regenerated the valid 726-line file + refreshed
+  `src/onelens/SKILL.md`.
+- **`scripts/regen_cli.sh` hardened against recurrence.** Now generates to a
+  temp file, validates it parses as Python (`ast.parse`), patches in temp, and
+  only overwrites `cli_generated.py` after every transform succeeds — `$OUT` is
+  left untouched on any failure. Previously `generate-cli` wrote its own error
+  text straight into `$OUT`, and that garbage got committed.
+
+### Changed — install.sh default (2026-06)
+
+- **`install.sh` now installs the base package (no semantic extras) by
+  default.** Previously it hardcoded `onelens[context]`, silently pulling the
+  Modal client into every install — useless without a Modal account. Semantic
+  retrieval is now opt-in via `ONELENS_WITH_CONTEXT=local` (account-free ONNX,
+  CPU-OK) or `=modal` (Modal-backed). Base gives the full structural graph
+  (impact / trace / query / search) via embedded falkordblite, zero accounts.
+
 ### Added — Headless delta export (2026-06)
 
 - **`--delta` flag for headless export.** `ONELENS_DELTA=true ./gradlew

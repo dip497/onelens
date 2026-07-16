@@ -1,6 +1,6 @@
 # OneLens
 
-Code knowledge graph for Java/Spring Boot backends **and Vue 3 frontends**. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints, Vue components, Pinia stores, composables, routes, API calls — plus cross-stack traversal via `HITS` edges that link a Vue `ApiCall` to the Spring `Endpoint` it dispatches to.
+Code knowledge graph for Java/Spring Boot backends **and Vue 3 / Next.js (React) frontends**. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints, Vue components / Pinia stores / composables, Next.js App Router routes / React components / hooks / server actions — plus cross-stack traversal via `HITS` edges that link a frontend `ApiCall` to the Spring `Endpoint` it dispatches to.
 
 **Built for AI agents (Claude Code, Cursor, MCP clients).** Two simple tools — `search` and `query` — plus a detailed skill that teaches the agent how to navigate your codebase.
 
@@ -12,6 +12,11 @@ OneLens exports your project's code intelligence from IntelliJ using PSI APIs (t
 - 81K methods, 678K call edges, 2.8K Spring beans, 2.3K REST endpoints
 - 2.5K Vue components, 65 Pinia stores, 1.5K API calls
 - Full export: ~4 min • Graph import: ~25 s • Delta re-sync: ~30 s
+
+**Next.js / React** (validated on a 12-package pnpm+turbo App Router monorepo):
+- 24 routes, 24 pages, 4 layouts, 50 React components (client/server split), 40 hooks,
+  8 context providers, inline server actions — plus the shared JS module/import graph
+- Component collection runs in ~3 s; frontend edits re-sync incrementally (delta)
 
 ---
 
@@ -48,6 +53,8 @@ cp -r skills/onelens ~/.agents/skills/
 #   "blast radius of changing OrderService"
 #   "trace the /api/orders endpoint"
 #   "which Vue components call /api/users?"
+#   "which React components are client components?"
+#   "what routes does the Next.js app expose, and which components do they render?"
 ```
 
 ### Way 2: IntelliJ plugin (IDE users)
@@ -57,7 +64,7 @@ Best for: Live development with auto-sync on every save.
 1. Start FalkorDB: `docker run -d -p 17532:6379 -p 3001:3000 falkordb/falkordb:latest`
 2. Install plugin: Download `onelens-graph-builder-*.zip` → IntelliJ → Settings → Plugins → Install from Disk
 3. Open your project → Tools → OneLens → Sync Graph
-4. Auto-sync runs on every `.java` save (5s debounce, incremental delta)
+4. Auto-sync runs on save (5s debounce, incremental delta) — `.java` for the backend, `.ts`/`.tsx`/`.js`/`.jsx` for a Next.js app
 5. Install Skill: Tools → OneLens → Install Skill → ask Claude Code naturally
 
 Or build from source:
@@ -83,7 +90,18 @@ ONELENS_DELTA=true ./gradlew headlessExport -PonelensProject=/path/to/project -P
 onelens call-tool onelens_import --export-path /tmp/exports/myproject-*.json --graph myproject
 ```
 
-See [`docs/headless.md`](./docs/headless.md) for delta, auto-sync (watchexec), and multi-project docs.
+**On a bare server (no IDE), use the one-shot wrapper** — it handles JDK/network
+preflight, the engine install, the **license key** placement (the downloaded
+IDE is *not* license-free headless), and content roots for Vue/JS projects:
+
+```bash
+export ONELENS_LICENSE_KEY=/path/to/your/idea.key   # you place the key (a credential)
+scripts/onelens-headless.sh all /opt/myapp-server   myapp                 # Maven/Spring
+scripts/onelens-headless.sh all /opt/myapp-frontend myapp-frontend --frontend  # Vue/npm
+```
+
+See [`docs/headless.md`](./docs/headless.md) for the server gotchas (license-key
+trick, content roots), delta, auto-sync (watchexec), and multi-project docs.
 
 ---
 
@@ -137,7 +155,12 @@ The [SKILL.md](./skills/onelens/SKILL.md) contains 10+ copy-paste Cypher recipes
 | JPA entities, repositories, columns | `@Entity`/`JpaRepository` detection |
 | Vue 3 components (SFC `<script setup>`) | Vue PSI + JS PSI extraction |
 | Pinia stores, composables, routes, API calls | JS PSI patterns |
-| Vue → Spring cross-stack links | `HITS` bridge (normalized HTTP path matching) |
+| Next.js App Router routes / pages / layouts / special files | `app/` directory + segment grammar (`[param]`, `(group)`, `@slot`) |
+| React components + client/server (RSC) boundary | JSX PSI + module-level `"use client"` directive |
+| React hooks (react / library / custom), context providers | `use*` call sites + `createContext` |
+| Server actions (module + inline `"use server"`), route handlers | directive prologue + `route.ts` verb exports |
+| Component composition (`RENDERS`), hook usage (`USES_HOOK`) | JSX tag → import resolution (incl. cross-package) |
+| Frontend → Spring cross-stack links | `HITS` bridge (normalized HTTP path matching) |
 | Annotation usages | `PsiModifierList.getAnnotations()` |
 | External library stubs | Auto-created from resolved call targets |
 | Test file tagging (`isTest`) | `__tests__/`, `*.test.js`, `*.spec.js` |
@@ -152,6 +175,7 @@ The [SKILL.md](./skills/onelens/SKILL.md) contains 10+ copy-paste Cypher recipes
 │  OneLens Plugin (Kotlin)                                   │
 │  ├── SpringBootAdapter → Class/Method/CallGraph/Spring/JPA │
 │  ├── Vue3Adapter → Component/Store/Composable/Route/ApiCall│
+│  ├── NextjsAdapter → Route/Page/ReactComponent/Hook/Action │
 │  └── FrameworkAdapter SPI (extensible — add your own)      │
 └──────────────────────┬──────────────────────────────────────┘
                        │ JSON (full or delta)
@@ -188,8 +212,9 @@ language/framework lives in its own adapter and contributes:
 |-----------|---------|-----------|--------|
 | Java / Spring Boot | `SpringBootAdapter` | Class, Method, Field, Endpoint, SpringBean, JpaEntity, TestCase | ✅ Production |
 | Vue 3 / Pinia | `Vue3Adapter` | Component, Store, Composable, Route, ApiCall, JsFunction, JsModule | ✅ Production |
+| Next.js / React | `NextjsAdapter` | Route, Page, Layout, ReactComponent, Hook, ServerAction, RouteHandler, ContextProvider, Middleware | ✅ Production |
 
-### How to add a new framework (e.g., Python/FastAPI, Go, Rust, Next.js)
+### How to add a new framework (e.g., Python/FastAPI, Go, Rust)
 
 1. **Create the adapter** in `plugin/src/main/kotlin/.../framework/<name>/`:
    ```kotlin

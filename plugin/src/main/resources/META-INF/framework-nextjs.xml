@@ -1,0 +1,5 @@
+<idea-plugin>
+  <extensions defaultExtensionNs="com.onelens.plugin">
+    <frameworkAdapter implementation="com.onelens.plugin.framework.nextjs.NextjsAdapter"/>
+  </extensions>
+</idea-plugin>

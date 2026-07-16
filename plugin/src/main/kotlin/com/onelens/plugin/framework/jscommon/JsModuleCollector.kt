@@ -1,4 +1,4 @@
-package com.onelens.plugin.framework.vue3.collectors
+package com.onelens.plugin.framework.jscommon
 
 import com.intellij.lang.ecmascript6.psi.ES6ImportDeclaration
 import com.intellij.lang.ecmascript6.psi.ES6ImportSpecifier
@@ -13,8 +13,6 @@ import com.intellij.lang.javascript.psi.JSReferenceExpression
 import com.intellij.lang.javascript.psi.JSVariable
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.logger
-import com.intellij.openapi.fileTypes.FileTypeManager
-import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
@@ -27,11 +25,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ImportsEdge
 import com.onelens.plugin.export.JsFunctionData
 import com.onelens.plugin.export.JsModuleData
-import com.onelens.plugin.framework.vue3.Vue3Context
-import com.onelens.plugin.framework.vue3.VuePsiScope
 import java.nio.file.Paths
-import com.onelens.plugin.framework.vue3.isTestFile
-import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Closes the "business-logic layer is invisible" gap: plain JS helper
@@ -64,20 +58,17 @@ object JsModuleCollector {
     private val LOG = logger<JsModuleCollector>()
     private const val MAX_BODY_CHARS = 2000
 
-    fun collect(project: Project, ctx: Vue3Context) {
+    fun collect(project: Project, ctx: JsCommonSink) {
         if (DumbService.isDumb(project)) {
             LOG.warn("Skipping JS module collection — dumb mode")
             return
         }
-        val ftm = FileTypeManager.getInstance()
-        val types = listOfNotNull(
-            ftm.getFileTypeByExtension("js").takeIf { it != UnknownFileType.INSTANCE },
-            ftm.getFileTypeByExtension("ts").takeIf { it != UnknownFileType.INSTANCE },
-            ftm.getFileTypeByExtension("mjs").takeIf { it != UnknownFileType.INSTANCE },
-            ftm.getFileTypeByExtension("vue").takeIf { it != UnknownFileType.INSTANCE }
-        )
+        val types = JsFileTypes.script()
         val scope = ctx.workspace.scope(project)
-        val allFiles = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        val allFiles = smartRead(project) {
+            types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
+                .filterNot { JsFileTypes.isVendorFile(it, ctx) }
+        }
         val psiManager = PsiManager.getInstance(project)
 
         // Parallel file processing — same pattern as CallGraphCollector.
@@ -106,7 +97,7 @@ object JsModuleCollector {
                                     isBarrel = looksLikeBarrel(psi),
                                     isTest = isTestFile(relative)
                                 ),
-                                functions = collectExportedFunctions(psi, relative),
+                                functions = collectExportedFunctions(psi, relative, ctx),
                                 imports = collectImports(psi, relative, ctx),
                             )
                         }
@@ -169,11 +160,11 @@ object JsModuleCollector {
      *   - `export default function foo() {}` / `export default () => {}`
      * Functions nested inside classes / other functions are skipped.
      */
-    private fun collectExportedFunctions(file: PsiFile, relative: String): List<JsFunctionData> {
+    private fun collectExportedFunctions(file: PsiFile, relative: String, ctx: JsCommonSink): List<JsFunctionData> {
         val out = mutableListOf<JsFunctionData>()
         // Walk every JSFunction; we filter to module-top-level by checking the
         // parent chain stops at the file / an export statement.
-        val fns = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSFunction>(file)
+        val fns = ctx.findAll<JSFunction>(file)
         for (fn in fns) {
             val name = fn.name ?: continue
             if (!isTopLevel(fn)) continue
@@ -192,7 +183,7 @@ object JsModuleCollector {
         }
         // `export const foo = () => {}` / `= function () {}` — RHS is a function
         // expression, variable is the named binding.
-        val vars = com.onelens.plugin.framework.vue3.VuePsiScope.findAll<JSVariable>(file)
+        val vars = ctx.findAll<JSVariable>(file)
         for (v in vars) {
             val name = v.name ?: continue
             if (!isTopLevel(v)) continue
@@ -266,9 +257,9 @@ object JsModuleCollector {
      * Walk every `ES6ImportDeclaration` in the file and emit one [ImportsEdge]
      * per imported binding.
      */
-    private fun collectImports(file: PsiFile, sourceModule: String, ctx: Vue3Context): List<ImportsEdge> {
+    private fun collectImports(file: PsiFile, sourceModule: String, ctx: JsCommonSink): List<ImportsEdge> {
         val out = mutableListOf<ImportsEdge>()
-        val decls = findImportDeclarations(file)
+        val decls = findImportDeclarations(file, ctx)
         val sourceDir = file.virtualFile?.parent?.path
         for (decl in decls) {
             val rawModule = decl.importModuleText?.trim()?.trim('\'', '"', '`') ?: continue
@@ -349,7 +340,7 @@ object JsModuleCollector {
      * resolve again on the alias's own reference to reach the original
      * declaration. Verified in ImportResolveTest.testCaseF.
      */
-    private fun resolveSpecifier(spec: ES6ImportSpecifier, moduleText: String, ctx: Vue3Context): Pair<String?, String> {
+    private fun resolveSpecifier(spec: ES6ImportSpecifier, moduleText: String, ctx: JsCommonSink): Pair<String?, String> {
         // `spec.declaredName` is the binding visible in this file. When there's
         // an alias, this is the alias; otherwise it matches the external name.
         val ref = spec.reference ?: return null to moduleText
@@ -378,7 +369,7 @@ object JsModuleCollector {
      *   import * as ns from '…'
      *   import '…'                       (side-effect only, emits a * edge)
      */
-    private fun extractImportsTextual(file: PsiFile, sourceModule: String, ctx: Vue3Context): List<ImportsEdge> {
+    private fun extractImportsTextual(file: PsiFile, sourceModule: String, ctx: JsCommonSink): List<ImportsEdge> {
         val out = mutableListOf<ImportsEdge>()
         val src = file.text
         val sourceDir = file.virtualFile?.parent?.path
@@ -490,16 +481,22 @@ object JsModuleCollector {
      * the same set as the tree walk (verified via bytecode: both code
      * paths surface `ES6ImportDeclaration`).
      */
-    private fun findImportDeclarations(file: PsiFile): List<ES6ImportDeclaration> {
-        // For .vue files, prefer the stub-aware getStubbedChildren path on the
-        // embedded script module — some real-world files expose imports only
-        // through the stub children API and hide them from the PSI tree walk.
-        // For .js / .ts, VuePsiScope.findAll delegates to PsiTreeUtil (same as
-        // before). Both layers fall back gracefully on any exception.
+    private fun findImportDeclarations(file: PsiFile, ctx: JsCommonSink): List<ES6ImportDeclaration> {
+        // Branch on Vue SFC vs plain script — behaviour-identical to the pre-jscommon
+        // code. The `VueFile` check is a plain string comparison (NO Vue-plugin class
+        // reference), so it is safe to keep in the framework-agnostic layer.
+        //
+        // `.vue`: the stub-aware getStubbedChildren path over the embedded `<script>`
+        // modules (ctx.scriptRoots) — a plain tree walk misses declarations behind
+        // stubs on large real projects (every `.vue` file in the dogfood repo produced
+        // zero imports before this path existed).
+        //
+        // Plain `.js` / `.ts` / `.tsx` / `.jsx` (incl. all React/Next files): the tree
+        // walk on the file itself — the original behaviour for non-SFC files. Both
+        // layers fall back gracefully on any exception.
         return try {
             if (file.javaClass.name == "org.jetbrains.vuejs.lang.html.VueFile") {
-                val scopes = VuePsiScope.scriptRoots(file)
-                scopes.asSequence()
+                ctx.scriptRoots(file).asSequence()
                     .flatMap {
                         JSResolveUtil.getStubbedChildren(it, ES6ImportPsiUtil.ES6_IMPORT_DECLARATION)
                             .asSequence()
@@ -535,7 +532,7 @@ object JsModuleCollector {
      * JsModule row and every alias-form IMPORTS edge silently dropped during
      * the Python join.
      */
-    private fun normalizeModuleSpecifier(spec: String, sourceDir: String?, ctx: Vue3Context): String {
+    private fun normalizeModuleSpecifier(spec: String, sourceDir: String?, ctx: JsCommonSink): String {
         // Alias hit — exact or prefix match, longest alias first to avoid a
         // shorter alias shadowing a longer one.
         val sorted = ctx.aliases.entries.sortedByDescending { it.key.length }
@@ -570,7 +567,7 @@ object JsModuleCollector {
      * Same two-hop resolve for default-binding references, if they ever land
      * on an alias node.
      */
-    private fun resolveWithAliasHop(binding: PsiElement, ctx: Vue3Context): String? {
+    private fun resolveWithAliasHop(binding: PsiElement, ctx: JsCommonSink): String? {
         val ref = binding.references.firstOrNull() ?: return null
         var target: PsiElement? = try { ref.resolve() } catch (_: Throwable) { null }
         if (target is ES6ImportSpecifierAlias) {
@@ -585,7 +582,7 @@ object JsModuleCollector {
      * Falls back to null when the element doesn't belong to a nameable
      * declaration (built-ins, external libs, etc).
      */
-    private fun fqnFor(element: PsiElement, ctx: Vue3Context): String? {
+    private fun fqnFor(element: PsiElement, ctx: JsCommonSink): String? {
         val vf = element.containingFile?.virtualFile ?: return null
         val name = when (element) {
             is JSFunction -> element.name

@@ -133,7 +133,7 @@ object MavenHeadlessImport {
         // --- Import sibling workspace roots as Maven projects ---
         //
         // The primary Maven import (below) discovers poms under the project's
-        // base path. But workspace YAML roots like `../motadata_plugins` are
+        // base path. But workspace YAML roots like `../sibling_plugins` are
         // OUTSIDE the project base — Maven never sees them. In the GUI, the
         // user right-clicks and "Add as Maven Project". Headlessly, we must
         // explicitly add their pom.xml files as managed projects.
@@ -203,7 +203,7 @@ object MavenHeadlessImport {
      * Find pom.xml files in workspace roots OTHER than the project's base path.
      *
      * The primary Maven import discovers poms under `project.basePath`. Sibling
-     * workspace roots (e.g. `../motadata_plugins`) are outside that path and
+     * workspace roots (e.g. `../sibling_plugins`) are outside that path and
      * need explicit linking. This method:
      *
      * 1. Loads the workspace YAML.

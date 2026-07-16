@@ -21,8 +21,8 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.StoreData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
-import com.onelens.plugin.framework.vue3.isTestFile
-import com.onelens.plugin.framework.vue3.smartRead
+import com.onelens.plugin.framework.jscommon.isTestFile
+import com.onelens.plugin.framework.jscommon.smartRead
 
 /**
  * Collects Pinia store definitions. Recognizes both supported shapes:

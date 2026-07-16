@@ -23,6 +23,10 @@
          IDEA Community/Ultimate once installed from Marketplace. -->
     <depends optional="true" config-file="framework-vue3.xml">org.jetbrains.plugins.vue</depends>
 
+    <!-- Next.js adapter. Requires the JavaScript plugin; available in WebStorm and
+         IDEA Ultimate. -->
+    <depends optional="true" config-file="framework-nextjs.xml">JavaScript</depends>
+
     <!-- Git4Idea — enables GitInfo for Publish dialog tag pre-fill. Optional so
          the plugin still loads on WebStorm without Git plugin. -->
     <depends optional="true" config-file="git-features.xml">Git4Idea</depends>

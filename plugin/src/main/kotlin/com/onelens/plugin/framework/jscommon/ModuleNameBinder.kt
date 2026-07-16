@@ -1,4 +1,4 @@
-package com.onelens.plugin.framework.vue3.resolver
+package com.onelens.plugin.framework.jscommon
 
 import com.intellij.lang.javascript.psi.JSLiteralExpression
 import com.intellij.lang.javascript.psi.JSVariable
@@ -14,9 +14,7 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ApiCallData
-import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
-import com.onelens.plugin.framework.vue3.smartRead
 
 /**
  * Resolves the most common parametric-URL shape seen in the target repo:
@@ -38,7 +36,7 @@ import com.onelens.plugin.framework.vue3.smartRead
 object ModuleNameBinder {
     private val LOG = logger<ModuleNameBinder>()
 
-    fun bind(project: Project, ctx: Vue3Context) {
+    fun bind(project: Project, ctx: JsCommonSink) {
         if (DumbService.isDumb(project)) return
         val parametrics = ctx.apiCalls.filter { it.parametric && !it.binding.isNullOrBlank() }
         if (parametrics.isEmpty()) return
@@ -56,7 +54,10 @@ object ModuleNameBinder {
         // action. Per-file FileTypeIndex calls inside the parametrics loop
         // would re-pay the read-action penalty and trip WebStorm 2026.1's
         // strict "read access must be inside read action" guard.
-        val allFiles = smartRead(project) { types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct() }
+        val allFiles = smartRead(project) {
+            types.flatMap { FileTypeIndex.getFiles(it, scope) }.distinct()
+                .filterNot { JsFileTypes.isVendorFile(it, ctx) }
+        }
 
         // File → { varName → literal } cache, rebuilt lazily per file.
         val fileConstants = HashMap<String, Map<String, String>>()

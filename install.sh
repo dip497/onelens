@@ -33,21 +33,38 @@ echo "╚═══════════════════════�
 echo ""
 
 # ── 1. Python CLI ──────────────────────────────────────────────
+#
+# Default = base install (NO semantic extras). The structural graph
+# (impact / trace / query / search) works out of the box via embedded
+# falkordblite, with zero external accounts. Semantic `retrieve` is opt-in:
+#
+#   ONELENS_WITH_CONTEXT=local  ./install.sh   # account-free ONNX embedder (~1GB, CPU-OK)
+#   ONELENS_WITH_CONTEXT=modal  ./install.sh   # Modal-backed embedder (needs a Modal token)
+#
+# We deliberately do NOT pull `[context]` by default — it drags in the Modal
+# client, which is useless without a Modal account and surprises self-hosted
+# installs.
+case "${ONELENS_WITH_CONTEXT:-}" in
+    local) PKG="onelens[context-local]"; info "Semantic: local ONNX embedder (account-free)" ;;
+    modal) PKG="onelens[context]";       info "Semantic: Modal backend (needs ONELENS token)" ;;
+    "")    PKG="onelens";                 info "Base install (no semantic extras — set ONELENS_WITH_CONTEXT=local to add)" ;;
+    *)     fail "ONELENS_WITH_CONTEXT must be 'local', 'modal', or unset (got '${ONELENS_WITH_CONTEXT}')" ;;
+esac
 
 if command -v uv &>/dev/null; then
-    info "Found uv — installing onelens[context] via uv"
-    uv tool install "onelens[context]" 2>/dev/null || uv pip install --system "onelens[context]"
+    info "Found uv — installing $PKG via uv"
+    uv tool install "$PKG" 2>/dev/null || uv pip install --system "$PKG"
 elif command -v pip3 &>/dev/null; then
-    info "Found pip — installing onelens[context]"
-    pip3 install "onelens[context]"
+    info "Found pip — installing $PKG"
+    pip3 install "$PKG"
 elif command -v pip &>/dev/null; then
-    info "Found pip — installing onelens[context]"
-    pip install "onelens[context]"
+    info "Found pip — installing $PKG"
+    pip install "$PKG"
 else
     warn "No pip/uv found — installing uv first"
     curl -LsSf https://astral.sh/uv/install.sh | sh
     source "$HOME/.local/bin/env" 2>/dev/null || true
-    uv tool install "onelens[context]" || fail "Could not install onelens via uv"
+    uv tool install "$PKG" || fail "Could not install onelens via uv"
 fi
 
 # Verify

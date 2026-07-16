@@ -28,6 +28,8 @@ data class ExportDocument(
     val adapters: List<String> = listOf("spring-boot"),
     /** Vue 3 adapter output. Present only if Vue3Adapter was active. */
     val vue3: Vue3Data? = null,
+    /** Next.js adapter output. Present only if NextjsAdapter was active. */
+    val nextjs: NextjsData? = null,
     /** JPA / Spring Data payload (Phase C3c). Null when no @Entity types found. */
     val jpa: JpaData? = null,
     /** Tier-1 data-flow (Phase D): field reads/writes + instantiations. */
@@ -183,6 +185,237 @@ data class Vue3Data(
     val functions: List<JsFunctionData> = emptyList(),
     val imports: List<ImportsEdge> = emptyList()
 )
+
+/**
+ * Next.js adapter payload. Mirrors the framework-agnostic JS/TS subset of
+ * [Vue3Data] — modules / functions / imports plus HTTP api-call graph.
+ */
+@Serializable
+data class NextjsData(
+    val modules: List<JsModuleData> = emptyList(),
+    val functions: List<JsFunctionData> = emptyList(),
+    val imports: List<ImportsEdge> = emptyList(),
+    val apiCalls: List<ApiCallData> = emptyList(),
+    val callsApi: List<CallsApiEdge> = emptyList(),
+    // --- P2: routes + React components + RSC boundary ---
+    val routes: List<NextRouteData> = emptyList(),
+    val pages: List<PageData> = emptyList(),
+    val layouts: List<LayoutData> = emptyList(),
+    val specialFiles: List<SpecialFileData> = emptyList(),
+    val components: List<ReactComponentData> = emptyList(),
+    val hasPage: List<HasPageEdge> = emptyList(),
+    val hasLayout: List<HasLayoutEdge> = emptyList(),
+    val boundaryOf: List<BoundaryOfEdge> = emptyList(),
+    val childOf: List<ChildOfEdge> = emptyList(),
+    val renders: List<RendersEdge> = emptyList(),
+    // --- P3: server actions, route handlers, hooks, context, middleware ---
+    val serverActions: List<ServerActionData> = emptyList(),
+    val routeHandlers: List<RouteHandlerData> = emptyList(),
+    val endpoints: List<NextEndpointData> = emptyList(),
+    val customHooks: List<CustomHookData> = emptyList(),
+    val hooks: List<HookData> = emptyList(),
+    val contextProviders: List<ContextProviderData> = emptyList(),
+    val middlewares: List<MiddlewareData> = emptyList(),
+    val handles: List<HandlesEdge> = emptyList(),
+    val exposedBy: List<ExposedByEdge> = emptyList(),
+    val usesHook: List<UsesHookEdge> = emptyList(),
+    val providesContext: List<ProvidesContextEdge> = emptyList(),
+    val intercepts: List<InterceptsEdge> = emptyList(),
+)
+
+/** A React Server Action. `scope` = "module" (whole file "use server") | "inline". PK = [fqn]. */
+@Serializable
+data class ServerActionData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val scope: String,                 // "module" | "inline"
+    val isAsync: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,          // <=2000 chars
+)
+
+/** A `route.*` named HTTP-method export. Endpoint -[:HANDLES]-> RouteHandler. PK = [fqn]. */
+@Serializable
+data class RouteHandlerData(
+    val fqn: String,                   // "<filePath>::<METHOD>"
+    val filePath: String,
+    val httpMethod: String,            // GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS
+    val urlPath: String,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,
+)
+
+/**
+ * REST endpoint surfaced by a route handler. REUSES the `Endpoint` label on the
+ * Python side (same PK format as Spring) so the cross-stack HITS bridge works.
+ * Named `NextEndpointData` only to avoid a Kotlin symbol clash. PK = [fqn].
+ */
+@Serializable
+data class NextEndpointData(
+    val fqn: String,                   // "<METHOD>:<urlPath>"
+    val method: String,
+    val path: String,
+)
+
+/** An exported `use*` hook definition. PK = [fqn]. */
+@Serializable
+data class CustomHookData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val isAsync: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,
+)
+
+/** A distinct hook by name. `origin` = "react" | "library" | "custom". PK = [name]. */
+@Serializable
+data class HookData(
+    val name: String,
+    val origin: String,
+)
+
+/** A `createContext(...)` assigned to a top-level variable. PK = [fqn]. */
+@Serializable
+data class ContextProviderData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+)
+
+/** A `middleware.(ts|js)` module. PK = [fqn]. */
+@Serializable
+data class MiddlewareData(
+    val fqn: String,                   // "<filePath>::middleware"
+    val filePath: String,
+    val matchers: List<String> = emptyList(),
+)
+
+/** Endpoint -[:HANDLES]-> RouteHandler. */
+@Serializable
+data class HandlesEdge(val endpointFqn: String, val handlerFqn: String)
+
+/** ServerAction -[:EXPOSED_BY]-> (Page|ReactComponent). */
+@Serializable
+data class ExposedByEdge(val actionFqn: String, val ownerFqn: String)
+
+/** (Page|Layout|ReactComponent|CustomHook) -[:USES_HOOK]-> Hook. */
+@Serializable
+data class UsesHookEdge(val sourceFqn: String, val hookName: String)
+
+/** (ReactComponent|JsModule) -[:PROVIDES_CONTEXT]-> ContextProvider. */
+@Serializable
+data class ProvidesContextEdge(val sourceFqn: String, val contextFqn: String)
+
+/** Middleware -[:INTERCEPTS]-> Route. */
+@Serializable
+data class InterceptsEdge(val middlewareFqn: String, val urlPath: String)
+
+/**
+ * A Next.js App Router route directory. PK = [urlPath]. Named `NextRouteData` (not
+ * `RouteData`) to avoid colliding with the Vue router's [RouteData]; the serialized
+ * field name in [NextjsData] is still `routes`, so the Python side is unaffected.
+ *
+ * `urlPath` is computed by the collector: route groups `(group)` are stripped,
+ * `[param]` → `:param`, `[...slug]`/`[[...slug]]` → `*slug`, parallel `@slot`
+ * segments dropped. The app root is `/`.
+ */
+@Serializable
+data class NextRouteData(
+    val urlPath: String,               // e.g. "/admin/persons/:id"  (PK)
+    val segmentDir: String,            // repo-relative dir under app/
+    val dynamic: Boolean = false,
+    val paramNames: List<String> = emptyList(),
+    val group: String? = null,         // e.g. "(app)"; null if none
+    val isRoot: Boolean = false,       // true for "/"
+)
+
+/** `page.(tsx|jsx|ts|js)` default export. Route -[:HAS_PAGE]-> Page. PK = [fqn]. */
+@Serializable
+data class PageData(
+    val fqn: String,                   // "<filePath>::default"
+    val filePath: String,
+    val urlPath: String,
+    val isAsync: Boolean = false,
+    val isClient: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,          // <=2000 chars
+    val isTest: Boolean = false,
+)
+
+/** `layout.*` default export. Route -[:HAS_LAYOUT]-> Layout. PK = [fqn]. */
+@Serializable
+data class LayoutData(
+    val fqn: String,
+    val filePath: String,
+    val urlPath: String,
+    val isRoot: Boolean = false,
+    val isClient: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,
+    val isTest: Boolean = false,
+)
+
+/** `loading|error|not-found|global-error|template` file. SpecialFile -[:BOUNDARY_OF]-> Route. PK = [fqn]. */
+@Serializable
+data class SpecialFileData(
+    val fqn: String,
+    val filePath: String,
+    val urlPath: String,
+    val kind: String,                  // loading|error|not-found|global-error|template
+    val isClient: Boolean = false,
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+)
+
+/**
+ * An exported function / arrow whose body renders JSX. PK = [fqn] ("<filePath>::<name>").
+ * `isServer = !isClient` — App Router default is a server component; a component is
+ * client iff its module carries a "use client" directive (transitive propagation
+ * deferred to P3).
+ */
+@Serializable
+data class ReactComponentData(
+    val fqn: String,                   // "<filePath>::<name>"
+    val name: String,
+    val filePath: String,
+    val isDefaultExport: Boolean = false,
+    val isClient: Boolean = false,
+    val isServer: Boolean = true,
+    val kind: String = "function",     // function|arrow
+    val lineStart: Int = 0,
+    val lineEnd: Int = 0,
+    val body: String? = null,          // <=2000 chars
+    val isTest: Boolean = false,
+)
+
+/** Route -[:HAS_PAGE]-> Page. */
+@Serializable
+data class HasPageEdge(val urlPath: String, val pageFqn: String)
+
+/** Route -[:HAS_LAYOUT]-> Layout. */
+@Serializable
+data class HasLayoutEdge(val urlPath: String, val layoutFqn: String)
+
+/** SpecialFile -[:BOUNDARY_OF]-> Route. */
+@Serializable
+data class BoundaryOfEdge(val specialFqn: String, val urlPath: String)
+
+/** Route -[:CHILD_OF]-> Route (nearest ancestor route dir). */
+@Serializable
+data class ChildOfEdge(val childUrlPath: String, val parentUrlPath: String)
+
+/** (Page|Layout|ReactComponent) -[:RENDERS]-> ReactComponent. */
+@Serializable
+data class RendersEdge(val sourceFqn: String, val targetFqn: String)
 
 /**
  * Every `.js` / `.ts` / `.vue` source file that participates in the import

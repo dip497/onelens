@@ -7,6 +7,32 @@ description: "CLI for the mcp_server MCP server. Call tools, list resources, and
 
 ## Tool Commands
 
+### onelens_init
+
+One-command setup: create the graph, import an export (if provided),
+and verify the installation.
+
+If [export_path] is provided, imports the JSON (full or delta — auto-detected)
+into the specified graph. If not provided, just creates an empty graph and
+returns status.
+
+This is the fastest path from "just installed" to "querying my codebase":
+```
+onelens call-tool onelens_init \
+  --export-path /tmp/exports/myproject-full.json \
+  --graph myproject
+```
+
+```bash
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_init --graph <value> --backend <value> --export-path <value>
+```
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--graph` | string | no |  |
+| `--backend` | string | no |  |
+| `--export-path` | string | no | JSON string |
+
 ### onelens_status
 
 Session wake-up. First tool to call in every session.
@@ -17,7 +43,7 @@ SQL-surface queries vs code-only, …). Works on any graph — code
 graphs, Vue3 graphs, and the palace memory graph alike.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_status --graph <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_status --graph <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -28,14 +54,67 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_status --graph <
 
 ### onelens_query
 
-Run raw Cypher against any graph. Returns up to `limit` rows.
+Run raw Cypher queries against the code knowledge graph for graph traversal.
 
-Use this for impact analysis, trace, entry-point enumeration, schema
-introspection — the skill docs have ready-made patterns for each of
-those. Works on code graphs and the palace memory graph uniformly.
+Use this for: impact analysis ("what breaks if I change X?"), execution
+traces ("trace /api/users"), dependency chains ("who injects AuthService?"),
+dead code detection, cross-stack queries (Vue to Spring via HITS edges),
+entry-point enumeration, and any question about relationships between nodes.
+
+## Graph schema — nodes
+
+Java/Spring: Class {fqn, name, kind, filePath, superClass, packageName},
+Method {fqn, name, classFqn, returnType, body, visibility, isStatic, isConstructor, external},
+Field {fqn, name, type}, Endpoint {path, httpMethod}, SpringBean {name, classFqn, scope},
+Module {name}, Package {name}, Annotation {fqn, name}
+
+Vue 3: Component {fqn, name, filePath, props, emits, isTest},
+Store {fqn, name, id, state, getters, actions, isTest},
+Composable {fqn, name, body}, Route {name, path, fullPath},
+ApiCall {method, path, callerFqn}, JsFunction {fqn, name, filePath, body},
+JsModule {filePath, name}
+
+Next.js (App Router): Route {urlPath, segmentDir, dynamic, isRoot},
+Page {fqn, filePath, urlPath, isClient, body}, Layout {fqn, filePath, isRoot, isClient},
+SpecialFile {fqn, filePath, kind, isClient}, ReactComponent {fqn, name, filePath, isClient, body},
+ServerAction {fqn, name, filePath, scope, isAsync, body}, RouteHandler {fqn, httpMethod, urlPath, body},
+CustomHook {fqn, name, filePath, body}, Hook {name, origin},
+ContextProvider {fqn, name, filePath}, Middleware {fqn, filePath, matchers}
+
+## Graph schema — edges
+
+CALLS (Method→Method), HAS_METHOD (Class→Method), HAS_FIELD (Class→Field),
+EXTENDS (Class→Class), IMPLEMENTS (Class→Class), OVERRIDES (Method→Method),
+HANDLES (Class→Endpoint), INJECTS (Class→SpringBean),
+ANNOTATED_WITH (Class/Method→Annotation), READS_FIELD (Method→Field),
+WRITES_FIELD (Method→Field), INSTANTIATES (Method→Class),
+USES_STORE (Component→Store), USES_COMPOSABLE (Component→Composable),
+CALLS_API (Component→ApiCall), DISPATCHES (Route→Component),
+IMPORTS (JsModule→JsModule/JsFunction),
+HAS_PAGE (Route→Page), HAS_LAYOUT (Route→Layout),
+BOUNDARY_OF (SpecialFile→Route), CHILD_OF (Route→Route),
+RENDERS (Page/Layout/ReactComponent→ReactComponent),
+HANDLES (Endpoint→RouteHandler — Next.js route.ts), EXPOSED_BY (ServerAction→Page/ReactComponent),
+USES_HOOK (Page/Layout/ReactComponent/CustomHook→Hook),
+PROVIDES_CONTEXT (ReactComponent/JsModule→ContextProvider), INTERCEPTS (Middleware→Route),
+HITS (ApiCall→Endpoint — cross-stack: Vue API call matches Spring endpoint)
+
+## FalkorDB Cypher rules
+
+- No `=~` regex. Use CONTAINS, STARTS WITH, ENDS WITH.
+- No variable-length paths (`[:CALLS*1..3]`). Use explicit hops.
+- Properties are camelCase: fqn, filePath, classFqn, returnType.
+- Always include LIMIT. Filter `WHERE n.external IS NULL` for project code only.
+
+## Common patterns
+
+Impact: `MATCH (caller:Method)-[:CALLS]->(t:Method) WHERE t.classFqn CONTAINS 'UserService' RETURN caller.fqn`
+Trace: `MATCH (e:Endpoint {path:'/api/users'})<-[:HANDLES]-(c) MATCH (c)-[:HAS_METHOD]->(m)-[:CALLS]->(callee) RETURN callee.name`
+Cross-stack: `MATCH (comp:Component)-[:CALLS_API]->(a:ApiCall)-[:HITS]->(e:Endpoint) RETURN comp.name, e.path`
+Dead code: `MATCH (m:Method) WHERE m.external IS NULL AND NOT ()-[:CALLS]->(m) RETURN m.fqn`
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_query --cypher <value> --graph <value> --backend <value> --db-path <value> --limit <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_query --cypher <value> --graph <value> --backend <value> --db-path <value> --limit <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -48,24 +127,58 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_query --cypher <
 
 ### onelens_search
 
-Name-based search across graph nodes (FTS, supports `User*`, `%auth%`).
+Search the code knowledge graph using RediSearch full-text syntax.
 
-`node_type`: one of "class", "method", "endpoint", "drawer", or "" for any.
-For conceptual / natural-language questions, use `onelens_retrieve`
-instead — that one reads actual code content.
+Searches across ALL node types (Java classes/methods/endpoints, Vue
+components/stores/composables/routes, JS functions/modules) when node_type
+is empty, or filters to one type when specified.
+
+## Search syntax (RediSearch)
+
+- Prefix: `auth*` (matches authenticate, authorize, authentication)
+- Fuzzy: `%passwor%` (matches password, passwd, passw0rd)
+- Union: `login|signin|authenticate` (any term)
+- Phrase: `"password encryption"` (exact contiguous)
+- Intersection: `password encryption` (both terms, any field)
+- Wildcard: `*` (match all — use with node_type to list everything)
+
+## node_type values
+
+Empty string "" = search all types. Otherwise:
+Java/Spring: "class", "method", "endpoint", "springbean", "field"
+Vue 3: "component", "store", "composable", "route", "apicall", "jsfunction", "jsmodule"
+Next.js: "reactcomponent", "page", "route" (route shared with Vue),
+    "serveraction", "routehandler", "customhook", "hook", "contextprovider"
+
+## Scoring
+
+Results ranked by BM25: name (10x) > javadoc/path/id (3-8x) > body (1x).
+
+## Return format
+
+Each result: {type, fqn, name, file} — compact, no full bodies.
+Use Read tool on file to see source code.
+
+## Examples
+
+onelens_search("UserService", node_type="class") — find specific class
+onelens_search("auth*") — all auth-related methods
+onelens_search("password encryption") — methods mentioning both words
+onelens_search("ticket*", node_type="component") — Vue components for tickets
+onelens_search("*", node_type="store") — list all Pinia stores
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_search --term <value> --node-type <value> --graph <value> --backend <value> --db-path <value> --n-results <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_search --query <value> --graph <value> --node-type <value> --n-results <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
 |------|------|----------|-------------|
-| `--term` | string | yes |  |
-| `--node-type` | string | no |  |
+| `--query` | string | yes |  |
 | `--graph` | string | no |  |
+| `--node-type` | string | no |  |
+| `--n-results` | integer | no |  |
 | `--backend` | string | no |  |
 | `--db-path` | string | no |  |
-| `--n-results` | integer | no |  |
 
 ### onelens_retrieve
 
@@ -125,7 +238,7 @@ per-call token footprint small (~250 tokens for 8 hits vs ~3000 with
 bodies).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_retrieve --query <value> --graph <value> --n-results <value> --fanout <value> --rerank --rerank-pool <value> --project-root <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_retrieve --query <value> --graph <value> --n-results <value> --fanout <value> --rerank --rerank-pool <value> --project-root <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -148,7 +261,7 @@ Import an export JSON (auto-detects full vs delta).
 `onelens_retrieve` works afterwards.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_import --export-path <value> --graph <value> --backend <value> --db-path <value> --clear --context
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_import --export-path <value> --graph <value> --backend <value> --db-path <value> --clear --context
 ```
 
 | Flag | Type | Required | Description |
@@ -174,7 +287,7 @@ Finds the newest `<graph>-full-*.json` in `~/.onelens/exports/` and
 replays `CodeMiner.mine()` against it. Requires `[context]` extras.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_reindex_semantic --graph <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_reindex_semantic --graph <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -188,7 +301,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_reindex_semantic
 Apply a delta export explicitly (bypasses the auto-detect in onelens_import).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_delta_import --delta-path <value> --graph <value> --backend <value> --db-path <value> --context
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_delta_import --delta-path <value> --graph <value> --backend <value> --db-path <value> --context
 ```
 
 | Flag | Type | Required | Description |
@@ -204,7 +317,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_delta_import --d
 Store content in a wing/room drawer. Runs embedding + dedups unless force=True.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_add_drawer --wing <value> --room <value> --content <value> --source-file <value> --added-by <value> --hall <value> --kind <value> --importance <value> --fqn <value> --force
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_add_drawer --wing <value> --room <value> --content <value> --source-file <value> --added-by <value> --hall <value> --kind <value> --importance <value> --fqn <value> --force
 ```
 
 | Flag | Type | Required | Description |
@@ -225,7 +338,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_add_drawer --win
 Delete one drawer by id.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_delete_drawer --drawer-id <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_delete_drawer --drawer-id <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -237,7 +350,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_delete_drawer --
 Semantic dedup check before `onelens_add_drawer`. Returns hits ≥ threshold.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_check_duplicate --content <value> --threshold <value> --wing <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_check_duplicate --content <value> --threshold <value> --wing <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -251,7 +364,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_check_duplicate 
 Add a temporal fact triple. Dedupes by hash(s|p|o|valid_from).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_kg_add --subject <value> --predicate <value> --object <value> --valid-from <value> --confidence <value> --source-closet <value> --ended <value> --wing <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_add --subject <value> --predicate <value> --object <value> --valid-from <value> --confidence <value> --source-closet <value> --ended <value> --wing <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -270,7 +383,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_kg_add --subject
 Close an existing fact by id (temporal retraction; history preserved).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_kg_invalidate --fact-id <value> --ended-at <value> --reason <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_invalidate --fact-id <value> --ended-at <value> --reason <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -284,7 +397,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_kg_invalidate --
 Time-bucketed view of facts touching an entity — see how knowledge evolved.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_kg_timeline --entity <value> --predicate <value> --since <value> --until <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_timeline --entity <value> --predicate <value> --since <value> --until <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -299,7 +412,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_kg_timeline --en
 Cross-wing semantic similarity — concepts shared across repos / subsystems.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_find_tunnels --wing-a <value> --wing-b <value> --threshold <value> --n-results <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_find_tunnels --wing-a <value> --wing-b <value> --threshold <value> --n-results <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -314,7 +427,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_find_tunnels --w
 Append a diary entry for `wing`. WAL-backed — crash-safe.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_diary_write --wing <value> --content <value> --author <value> --date <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_diary_write --wing <value> --content <value> --author <value> --date <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -329,7 +442,7 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_diary_write --wi
 Read diary entries for a wing, optionally time-ranged.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_diary_read --wing <value> --since <value> --until <value> --limit <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_diary_read --wing <value> --since <value> --until <value> --limit <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -349,7 +462,7 @@ SHA256 checksum, and (when cosign is on PATH) a Sigstore signature.
 maintains a `snapshots.json` index on the pinned `onelens-index` tag.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_snapshot_publish --graph <value> --tag <value> --repo <value> --include-embeddings --sign --backend <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshot_publish --graph <value> --tag <value> --repo <value> --include-embeddings --sign --backend <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -370,7 +483,7 @@ one HTTPS GET, no pagination. Returns an empty list when the repo has
 never published a snapshot.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_snapshots_list --graph <value> --repo <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshots_list --graph <value> --repo <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -388,7 +501,7 @@ back to the `.sha256` sidecar. Optionally cosign-verifies when the
 `onelens_status` calls under `--graph <graph>@<tag>`.
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_snapshots_pull --graph <value> --tag <value> --repo <value> --verify
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshots_pull --graph <value> --tag <value> --repo <value> --verify
 ```
 
 | Flag | Type | Required | Description |
@@ -413,7 +526,7 @@ next sync. Prerequisite: the snapshot is installed (via
 `onelens_snapshots_pull --repo local`).
 
 ```bash
-uv run --with fastmcp python cli_generated.py call-tool onelens_snapshot_promote --graph <value> --tag <value> --commit-sha <value>
+uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshot_promote --graph <value> --tag <value> --commit-sha <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -425,9 +538,9 @@ uv run --with fastmcp python cli_generated.py call-tool onelens_snapshot_promote
 ## Utility Commands
 
 ```bash
-uv run --with fastmcp python cli_generated.py list-tools
-uv run --with fastmcp python cli_generated.py list-resources
-uv run --with fastmcp python cli_generated.py read-resource <uri>
-uv run --with fastmcp python cli_generated.py list-prompts
-uv run --with fastmcp python cli_generated.py get-prompt <name> [key=value ...]
+uv run --with fastmcp python tmp.T46fZvkHpT list-tools
+uv run --with fastmcp python tmp.T46fZvkHpT list-resources
+uv run --with fastmcp python tmp.T46fZvkHpT read-resource <uri>
+uv run --with fastmcp python tmp.T46fZvkHpT list-prompts
+uv run --with fastmcp python tmp.T46fZvkHpT get-prompt <name> [key=value ...]
 ```

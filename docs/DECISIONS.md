@@ -1595,3 +1595,123 @@ considered but the delete-before-write semantics are genuinely delta-only.
 unchanged wire format, verified by golden-graph diff. Step 1 in
 `docs/design/multi-language-architecture.md`.
 
+## ADR-035 · 2026-06 · Headless server licensing + non-JVM content root
+
+**Decision.** Headless OneLens on a no-IDE server runs the verified Gradle
+`headlessExport` path (Gradle downloads IU itself), with two server-only
+requirements made explicit and automated in `scripts/onelens-headless.sh`:
+(1) a valid `idea.key` is placed in the gradle sandbox config and **restored
+before every export**; (2) directory-opened non-JVM projects (Vue/JS) get a
+generated minimal `.idea` (web module + `src/` source root) so their files are
+indexable.
+
+**Context.** The Gradle path is "verified" for local dev but the verification
+machine silently inherited its activated IntelliJ license — so the docs implied
+it was license-free. On a bare server, IDEA's `LicenseManager` runs even
+headless and exits 7 (`No valid license found`) before the export starter. And
+an account-tied (JBA) key is re-validated online and **invalidated after a
+single session**, so it must be re-placed each run. Separately, a directory-
+opened npm project has no content root: the scanner reports `0 files for
+indexing` and the Vue collectors emit a silent 0-node export — the same failure
+class as the Java "0 classes" bug, on the *file* index instead of the *stub*
+index.
+
+**Alternatives.** Qodana token (rent Ultimate) — rejected: the OneLens starter
+uses the platform off-label, the repo Dockerfile is experimental, and the user
+already owns a license. scip-java/scip-typescript (license-free, compiler-grade)
+— deferred, a separate future tier, no Spring/Vue PSI depth. For the content
+root: programmatic creation in the starter via
+`UnindexedFilesScanner.queue().get()` + `ModifiableModuleModel` — deferred
+(internal, version-sensitive API); the `.idea` file approach uses IntelliJ's
+standard project-open path with zero internal API and is what shipped.
+
+**Revisit when.** The starter learns to auto-create a content root for
+directory-opened projects (PROGRESS H6) — then the `--frontend` `.idea` step
+disappears and `scripts/onelens-headless.sh` drops it. Also revisit licensing
+if a JetBrains License Server / floating-license path is wired (the clean
+headless-license answer for orgs).
+
+## ADR-036 · 2026-07 · Next.js adapter — reuse JS-common collectors, don't copy Vue
+
+**Decision.** Add Next.js/React as a third `FrameworkAdapter` peer, built by (a)
+extracting the framework-agnostic JS/TS collectors out of `vue3/` into a new
+`framework/jscommon/` package behind a `JsCommonSink` interface, and (b) reusing
+them from a thin `NextjsAdapter`. Phase 1 emits only the reused
+`JsModule`/`JsFunction`/`ApiCall` graph (no new labels); routes, React
+components, and the RSC boundary come in Phase 2+. On the Python side the
+`nextjs` export section maps into those same reused labels, so trace/impact/
+search and the cross-stack `HITS` bridge work with zero schema change.
+
+**Context.** OneLens shipped Spring + Vue adapters; a Next.js frontend produced a
+near-empty graph. Research showed the Vue routing model (config arrays,
+`vue-router`) and component model (SFC `.vue`, `defineProps`) are *inverted* from
+Next (file-system routing, `.tsx` JSX, RSC server/client split, server actions) —
+so the route/component/store collectors can't be copied. But the module/import/
+api-call collectors and the alias/symlink resolvers are pure JS PSI with no Vue
+dependency; only a `VuePsiScope.findAll` seam (for `.vue` embedded `<script>`)
+and the file-type list were Vue-coupled. Extracting them behind `JsCommonSink`
+(one polymorphic `scriptRoots()` hook) lets both adapters share ~1,200 lines
+without Next depending on the Vue plugin.
+
+**Alternatives.** (1) Copy the Vue collectors and hack them for React — rejected:
+the routing/component/state models don't map, and it forks the JS graph logic.
+(2) tree-sitter for `.tsx` — rejected: IntelliJ JS PSI (bundled JavaScript
+plugin) already gives type-accurate resolution, consistent with the PSI-over-
+tree-sitter moat. (3) Next reaches into the `vue3` package directly — rejected:
+couples Next to Vue-registered classes and risks class-load failures when the
+Vue plugin is absent. (4) A brand-new label set from day one — deferred to P2:
+reusing `JsModule`/`ApiCall`/`Endpoint` in P1 buys the whole trace/impact/search/
+HITS surface for free and lands a useful graph immediately.
+
+**Also decided.** Vendored dirs (`node_modules`/`.next`/`dist`/…) are excluded at
+enumeration in `jscommon` (a real monorepo export was 96 % `node_modules`); the
+Vue import-collection branch is kept byte-for-byte (the `VueFile` check is a
+plain string comparison, no Vue-plugin class reference), so the extraction is a
+behaviour-preserving refactor for Vue.
+
+**Revisit when.** P4 wires Next into the delta path — it will be the first
+frontend ever incrementally re-synced (Vue still full-only), so the export-side
+`.java`-only delta filter must be bypassed *only* when `NextjsAdapter` is active.
+Also revisit if a second React meta-framework (Remix/TanStack Start) lands — the
+route-tree synthesiser should then generalise rather than fork again.
+
+## ADR-037 · 2026-07 · Next delta = re-collect + replace-subgraph, not scoped collection
+
+**Decision.** Incremental sync for Next.js does NOT introduce a scoped-delta
+`Collector` SPI. Instead: (a) the export side widens change *detection* past
+`.java` and re-collects the **whole** `nextjs` section on every delta; (b) the
+import side **replaces the Next subgraph wholesale** for that wing
+(`DeltaLoader._replace_nextjs`) rather than diffing per file.
+
+**Context.** The `Collector` SPI has only a full-pass `collect(ctx)`; adding
+`collect(ctx, changedFiles)` and routing changed files through `detect()` is the
+"proper" language-agnostic delta (see `delta-language-agnostic.md`). But measured
+on a real Next monorepo the Next collectors run in **~3 s**, while the export as a
+whole takes ~3.5 min — the cost is IntelliJ *indexing*, not collection. A scoped
+collector would save ~3 s and add a whole SPI. The import side likewise: the Next
+subgraph is ~500 nodes and re-imports in ~1.5 s, so a wing-scoped
+`DETACH DELETE` + re-insert is cheaper to write and impossible to get subtly wrong
+than per-file cascade bookkeeping.
+
+**Alternatives.** (1) Scoped-delta Collector SPI — rejected for now: large refactor,
+~3 s payoff. (2) Per-file cascade delete on import — rejected: needs a file→nodes
+map and a deleted-file list on the frontend side; the wholesale replace is correct
+by construction. (3) Leave Next full-export-only — rejected: a `.tsx` edit silently
+left the graph stale, which is the bug users actually hit.
+
+**Consequences / ceilings.** Shared JS labels (`JsModule`, `JsFunction`, `ApiCall`)
+are only wing-deleted when the graph is Next-only (`"nextjs" in adapters and "vue3"
+not in`); on a mixed Vue+Next graph the replace MERGE-upserts and warns, so stale JS
+modules can linger — the upgrade is a `source` stamp per adapter. `Endpoint` is never
+wing-deleted (Spring shares the label and PK).
+
+**Also fixed here.** The delta doc carried no `workspace` header, so the importer
+stamped `wing = graph_name` while a full import stamped `wing = workspace.graphId`.
+Wing-scoped replaces then deleted nothing and re-inserted under a second wing. This
+had been silently corrupting **Java/Spring** delta too (`Endpoint.wing`, which the
+cross-stack `HITS` bridge filters on). `DeltaDocument` now mirrors the full header.
+
+**Revisit when.** Collection time (not indexing) dominates an export — e.g. a
+frontend with 50k+ modules — or when Vue is also wired into delta and the shared-JS
+label ownership needs a real `source` discriminator.
+

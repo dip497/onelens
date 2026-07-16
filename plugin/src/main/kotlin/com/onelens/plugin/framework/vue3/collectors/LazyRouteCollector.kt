@@ -21,7 +21,7 @@ import com.onelens.plugin.export.DispatchesEdge
 import com.onelens.plugin.export.RouteData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import java.nio.file.Paths
-import com.onelens.plugin.framework.vue3.smartRead
+import com.onelens.plugin.framework.jscommon.smartRead
 
 /**
  * Parses `*-routes.js` / `*-routes.ts` files and emits [RouteData] + `DISPATCHES`
