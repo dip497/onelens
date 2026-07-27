@@ -14,8 +14,10 @@ import com.onelens.plugin.framework.jscommon.SymlinkResolver
 import com.onelens.plugin.framework.jscommon.ViteAliasResolver
 import com.onelens.plugin.framework.vue3.collectors.ComposableCollector
 import com.onelens.plugin.framework.vue3.collectors.LazyRouteCollector
+import com.onelens.plugin.framework.vue3.collectors.OptionsApiCollector
 import com.onelens.plugin.framework.vue3.collectors.PiniaStoreCollector
 import com.onelens.plugin.framework.vue3.collectors.SfcScriptSetupCollector
+import com.onelens.plugin.framework.vue3.collectors.VuexStoreCollector
 import com.onelens.plugin.framework.vue3.resolver.CallThroughResolver
 import com.onelens.plugin.settings.OneLensSettings
 import kotlinx.serialization.json.Json
@@ -39,16 +41,44 @@ class Vue3Adapter : FrameworkAdapter {
     override fun detect(project: Project): Boolean {
         val override = OneLensSettings.getInstance().vueAdapterEnabled
         if (override != null) return override
+        return detectMajor(project) != null
+    }
 
-        val base = project.basePath ?: return false
+    /**
+     * Detected Vue major version (2 or 3), or null when this is not a Vue project.
+     *
+     * Vue 2 and Vue 3 share one adapter: the SFC file type, the PSI tree, the
+     * vue-router route-record shape and the ES module graph are the same, so
+     * only the component and store collectors differ. The major picks which of
+     * those two run — see [Vue3Collector.collect].
+     *
+     * On a mixed monorepo (one Vue 2 app + one Vue 3 app) **3 wins**, because
+     * `ExportService` dispatches on a single `lastContext` and one export run
+     * therefore has one active Vue context. Preferring 3 is not arbitrary: it
+     * keeps a repo that exported as Vue 3 before this feature existing exporting
+     * as Vue 3. Taking the first match instead would depend on
+     * `File.listFiles()` order — unsorted, filesystem-dependent — so the same
+     * repo could silently swap Pinia collection for Vuex on a different machine.
+     * Export the apps as separate graphs to cover both properly.
+     */
+    fun detectMajor(project: Project): Int? {
+        val base = project.basePath ?: return null
         val baseDir = File(base)
         val pkgJsons = buildList {
             add(File(baseDir, "package.json"))
-            baseDir.listFiles()?.filter { it.isDirectory }?.forEach {
+            baseDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }?.forEach {
                 add(File(it, "package.json"))
             }
         }
-        return pkgJsons.any { it.exists() && looksLikeVue3(it) }
+        val majors = pkgJsons.asSequence()
+            .filter { it.exists() }
+            .mapNotNull(::vueMajorOf)
+            .toSet()
+        return when {
+            majors.isEmpty() -> null
+            3 in majors -> 3
+            else -> majors.min()
+        }
     }
 
     /**
@@ -60,18 +90,37 @@ class Vue3Adapter : FrameworkAdapter {
      */
     override fun collectors(): List<Collector> = listOf(Vue3Collector())
 
-    private fun looksLikeVue3(pkg: File): Boolean = try {
-        // Cheap regex over package.json — avoid a JSON parser here so the probe stays
-        // fast on large monorepos. Matches `"vue": "^3…" | "~3…" | "3.x"` inside either
-        // dependencies or devDependencies.
-        VUE_DEP_PATTERN.containsMatchIn(pkg.readText())
+    private fun vueMajorOf(pkg: File): Int? = try {
+        vueMajorFromPackageJson(pkg.readText())
     } catch (_: Throwable) {
-        false
+        null
     }
 
     companion object {
         private val LOG = logger<Vue3Adapter>()
-        private val VUE_DEP_PATTERN = Regex(""""vue"\s*:\s*"[\^~]?3(\.\d|\.\w+)""")
+
+        /**
+         * Vue major declared in a `package.json`'s text, or null if absent.
+         *
+         * Cheap regex rather than a JSON parser so the probe stays fast on large
+         * monorepos, where it runs once per package.json. Split out from the
+         * file read so it is directly testable without a fixture.
+         */
+        fun vueMajorFromPackageJson(text: String): Int? =
+            VUE_DEP_PATTERN.find(text)?.groupValues?.get(1)?.toIntOrNull()
+
+        /**
+         * Captures the Vue major. Covers the npm range forms seen in the wild
+         * (`^2.6.14`, `~2.7.0`, `2.6.11`, `>=2.6.0`, `>= 3.0`) plus an optional
+         * protocol prefix (`workspace:^2.6.14` in pnpm workspaces, `npm:2.7.16`).
+         * The protocol case matters more than it looks: an unparsed range yields
+         * null, and a null major falls back to 3 — silently running the Vue 3
+         * collectors over a Vue 2 repo for an empty-graph result.
+         *
+         * Requires a following `.`, so a bare `"vue": "2"` is the only miss, and
+         * `"latest"` / `"*"` / git URLs correctly yield null rather than a guess.
+         */
+        private val VUE_DEP_PATTERN = Regex(""""vue"\s*:\s*"(?:[a-z-]+:)?[\^~>=<\s]*([23])\.""")
     }
 }
 
@@ -100,11 +149,13 @@ class Vue3Collector : Collector {
         } catch (_: Throwable) {
             emptyList()
         }
+        val vueMajor = Vue3Adapter().detectMajor(project) ?: 3
         val vueCtx = Vue3Context(
             projectBase = base,
             aliases = aliases,
             symlinks = symlinks,
             workspace = workspace,
+            vueMajor = vueMajor,
         )
         lastContext = vueCtx
 
@@ -120,12 +171,24 @@ class Vue3Collector : Collector {
             timings.append("  $label: ${ms}ms\n")
         }
 
+        // `<script setup>` runs on BOTH majors — Vue 2.7 backported the macros,
+        // so a 2.x repo can hold both styles. OptionsApiCollector then picks up
+        // whatever is left; it skips any file with a `<script setup>` block, so
+        // the two can never emit the same component twice.
         timed("components (.vue files)", baseFraction) {
             SfcScriptSetupCollector.collect(project, vueCtx)
+            if (vueMajor == 2) OptionsApiCollector.collect(project, vueCtx)
         }
-        timed("Pinia stores", baseFraction + 0.15) {
-            PiniaStoreCollector.collect(project, vueCtx)
+        timed(if (vueMajor == 2) "Vuex stores" else "Pinia stores", baseFraction + 0.15) {
+            if (vueMajor == 2) {
+                VuexStoreCollector.collect(project, vueCtx)
+            } else {
+                PiniaStoreCollector.collect(project, vueCtx)
+            }
         }
+        // Composables are a Vue 3 / 2.7-composition-api concept. On Vue 2 the
+        // collector finds nothing in practice, but it is cheap and a 2.7 repo
+        // using @vue/composition-api gets real results — so run it either way.
         timed("composables", baseFraction + 0.25) {
             ComposableCollector.collect(project, vueCtx)
         }
@@ -138,16 +201,20 @@ class Vue3Collector : Collector {
         timed("binding parametric URLs", baseFraction + 0.44) {
             ModuleNameBinder.bind(project, vueCtx)
         }
-        timed("store / composable edges (1-hop)", baseFraction + 0.46) {
-            CallThroughResolver.collect(project, vueCtx)
-        }
-        timed("JS modules + functions + imports", baseFraction + 0.48) {
+        // JsModuleCollector MUST run before CallThroughResolver: the Vue 2
+        // component→helper→store hop reads `ctx.imports` to find which helper
+        // module a component pulls its Vuex bindings from. Nothing in the module
+        // collector depends on store/composable edges, so the swap is safe.
+        timed("JS modules + functions + imports", baseFraction + 0.46) {
             JsModuleCollector.collect(project, vueCtx)
+        }
+        timed("store / composable edges (1-hop)", baseFraction + 0.48) {
+            CallThroughResolver.collect(project, vueCtx)
         }
 
         // Log per-collector timings so export bottlenecks are visible without
         // a profiler. Goes to stderr (visible in headless run logs).
-        System.err.println("[onelens] Vue3 collector timings:\n$timings")
+        System.err.println("[onelens] Vue$vueMajor collector timings:\n$timings")
 
         val snapshot: Vue3Data = vueCtx.snapshot()
         val nodeCount = snapshot.components.size + snapshot.composables.size +

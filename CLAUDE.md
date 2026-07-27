@@ -68,9 +68,23 @@ pip install -e ".[context]"
 Nodes: `Class`, `Method`, `Field`, `SpringBean`, `Endpoint`, `Module`, `Annotation`, `EnumConstant`
 Edges: `CALLS`, `EXTENDS`, `IMPLEMENTS`, `HAS_METHOD`, `HAS_FIELD`, `OVERRIDES`, `ANNOTATED_WITH`, `HANDLES`, `INJECTS`, `HAS_ENUM_CONSTANT`, `RETURNS`, `THROWS`, `HAS_PARAMETER`, `READS_FIELD`, `WRITES_FIELD`, `INSTANTIATES`
 
-Frontend — shared JS/TS (Vue 3 + Next.js adapters, from `framework/jscommon/`):
+Frontend — shared JS/TS (Vue 2/3 + Next.js adapters, from `framework/jscommon/`):
 `JsModule`, `JsFunction`, `ApiCall` + `IMPORTS`, `IMPORTS_FN`, `HAS_FUNCTION`, `CALLS_API`, `HITS`
 (`HITS` is the cross-stack bridge: a frontend `ApiCall` → the Spring `Endpoint` it hits.)
+
+Vue (`framework/vue3/`) — ONE adapter serves both majors, selected by a detected
+`vueMajor` from `package.json` (ADR-038). Nodes are shared; only the collectors differ:
+- `Component`, `Composable`, `Store`, `Route`, `ApiCall` + `USES_STORE`, `USES_COMPOSABLE`,
+  `DISPATCHES`, `CALLS_API`
+- **Vue 3**: `<script setup>` → `Component {scriptSetup:true}`; Pinia → `Store {style:"options"|"setup"}`
+- **Vue 2**: Options API → `Component {scriptSetup:false}` + `mixins`; Vuex → `Store {style:"vuex"}`
+  + `mutations` (no Pinia counterpart). `mapState`/`mapActions` produce `USES_STORE`.
+- Vue 2.7 hybrids are fine — the script-setup collector runs on both majors and claims those
+  files; the Options collector skips any file with a `<script setup>` block, so no duplicate fqn.
+- On a mixed monorepo the FIRST detected major wins — export the two apps as separate graphs.
+- Store PK is `filePath::name`, never the Pinia id / Vuex namespace: both collide across files
+  (test mocks for Pinia, directory-derived names for Vuex).
+- Vue is full-export-only for BOTH majors — delta stays Java-only (ADR-037).
 
 Next.js / React (v1.3+, `framework/nextjs/`) — App Router modelled as first-class nodes:
 - `Route` (PK `urlPath`; `(group)` stripped, `[param]`→`:param`, `[...x]`→`*x`), `Page`, `Layout`,

@@ -514,6 +514,19 @@ class GraphLoader:
         """
         wing = graph_name or "default"
 
+        # Vue 2 and Vue 3 share this loader — the payload shape is identical and
+        # Options-API components / Vuex stores map onto the same Component /
+        # Store nodes (ADR-038). Log the major so an import that silently found
+        # nothing is diagnosable from the log alone.
+        logger.info(
+            "Vue %s subdoc: %d components, %d stores, %d composables, %d routes",
+            vue3.get("vueVersion", 3),
+            len(vue3.get("components", [])),
+            len(vue3.get("stores", [])),
+            len(vue3.get("composables", [])),
+            len(vue3.get("routes", [])),
+        )
+
         # Components — primary key = fqn ("<filePath>::<name>"), the stable
         # declaration identity. Components merged on `filePath` alone before,
         # which left the node without a name-qualified identity — 58 components
@@ -528,9 +541,11 @@ class GraphLoader:
             c["propNames"] = ",".join(p.get("name", "") for p in props)
             c["emits"] = ",".join(c.get("emits", []) or [])
             c["exposes"] = ",".join(c.get("exposes", []) or [])
+            # Vue 2 Options API only; empty string for every <script setup> component.
+            c["mixins"] = ",".join(c.get("mixins", []) or [])
         self._batch_nodes(progress, "Vue Components", components, "Component", "fqn", [
-            "name", "filePath", "scriptSetup", "propNames", "emits", "exposes", "body",
-            "isTest", "wing",
+            "name", "filePath", "scriptSetup", "propNames", "emits", "exposes", "mixins",
+            "body", "isTest", "wing",
         ])
 
         # Composables
@@ -551,9 +566,11 @@ class GraphLoader:
             s["state"] = ",".join(s.get("state", []) or [])
             s["getters"] = ",".join(s.get("getters", []) or [])
             s["actions"] = ",".join(s.get("actions", []) or [])
+            # Vuex only — Pinia dropped mutations, so this is empty on Vue 3 stores.
+            s["mutations"] = ",".join(s.get("mutations", []) or [])
         self._batch_nodes(progress, "Vue Stores", stores, "Store", "fqn", [
-            "id", "name", "filePath", "style", "state", "getters", "actions", "body",
-            "isTest", "wing",
+            "id", "name", "filePath", "style", "state", "getters", "actions", "mutations",
+            "body", "isTest", "wing",
         ])
 
         # Routes

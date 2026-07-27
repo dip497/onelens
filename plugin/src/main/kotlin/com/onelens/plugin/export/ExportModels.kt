@@ -183,7 +183,12 @@ data class Vue3Data(
     // (`src/data/*.js`, `*-api.js`, module-local `helpers/*.js`) were invisible.
     val modules: List<JsModuleData> = emptyList(),
     val functions: List<JsFunctionData> = emptyList(),
-    val imports: List<ImportsEdge> = emptyList()
+    val imports: List<ImportsEdge> = emptyList(),
+    // 2 or 3. The payload shape is identical for both majors — Vue 2's Options
+    // API components, Vuex stores and mixins map onto the same Component /
+    // Store / Composable nodes — so this exists only so a query can tell them
+    // apart. The `vue3` jsonKey is kept for both; see ADR-038.
+    val vueVersion: Int = 3
 )
 
 /**
@@ -491,6 +496,9 @@ data class ComponentData(
     val props: List<PropData> = emptyList(),
     val emits: List<String> = emptyList(),
     val exposes: List<String> = emptyList(),
+    // Vue 2 Options API only — identifiers from `mixins: [a, b]`. Empty for
+    // `<script setup>` components, which express reuse via composables instead.
+    val mixins: List<String> = emptyList(),
     val lineStart: Int = 0,
     val lineEnd: Int = 0,
     val body: String? = null,      // <script setup> content, truncated by Python miner
@@ -529,10 +537,14 @@ data class StoreData(
     // (src/modules/.../__tests__/list.test.js::useModulesStore) as separate
     // nodes — same model as Java Bar vs BarTest.
     val fqn: String,
-    val style: String = "options", // "options" | "setup"
+    val style: String = "options", // "options" | "setup" | "vuex"
     val state: List<String> = emptyList(),
     val getters: List<String> = emptyList(),
     val actions: List<String> = emptyList(),
+    // Vuex only — Pinia deliberately dropped mutations, so this is empty for
+    // every Vue 3 store. Kept a separate list rather than folded into `actions`
+    // so "which mutation writes this state" stays answerable.
+    val mutations: List<String> = emptyList(),
     val lineStart: Int = 0,
     val body: String? = null,
     val isTest: Boolean = false

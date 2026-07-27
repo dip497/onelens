@@ -2,11 +2,9 @@ package com.onelens.plugin.framework.vue3.resolver
 
 import com.intellij.lang.javascript.psi.JSCallExpression
 import com.intellij.lang.javascript.psi.JSFunction
-import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.lang.javascript.psi.JSReferenceExpression
 import com.intellij.lang.javascript.psi.JSReturnStatement
 import com.intellij.openapi.application.ReadAction
-import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -20,6 +18,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.UsesComposableEdge
 import com.onelens.plugin.export.UsesStoreEdge
 import com.onelens.plugin.framework.vue3.Vue3Context
+import com.onelens.plugin.framework.vue3.collectors.VuexStoreCollector
 import java.nio.file.Paths
 import com.onelens.plugin.framework.jscommon.smartRead
 
@@ -40,6 +39,36 @@ import com.onelens.plugin.framework.jscommon.smartRead
 object CallThroughResolver {
     private val LOG = logger<CallThroughResolver>()
 
+    /** Vuex binding helpers. Vue 2's equivalent of a `useXStore()` call. */
+    private val VUEX_MAP_HELPERS = setOf("mapState", "mapGetters", "mapActions", "mapMutations")
+
+    /** Cheap text probe — avoids a PSI parse on every non-component JS file. */
+    private fun bindsVuexNamespace(vf: com.intellij.openapi.vfs.VirtualFile): Boolean = try {
+        vf.inputStream.use { it.readNBytes(4096).decodeToString() }.contains("createNamespacedHelpers")
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * Namespace string in argument 0 of a Vuex binding helper.
+     *
+     * Handles the plain literal (`'userGroup'`) and the partially-dynamic
+     * template (`` `status/${Constants.TASK}` ``) by taking the static prefix
+     * before the first interpolation — `status/…` still identifies the parent
+     * module, which is the edge worth having. A fully dynamic argument yields
+     * null and emits no edge rather than a wrong one.
+     */
+    private fun namespaceArg(call: JSCallExpression): String? {
+        val arg = call.argumentList?.arguments?.firstOrNull() ?: return null
+        (arg as? com.intellij.lang.javascript.psi.JSLiteralExpression)
+            ?.takeIf { it.isQuotedLiteral }
+            ?.let { return it.stringValue }
+        val text = arg.text
+        if (!text.startsWith("`")) return null
+        val staticPrefix = text.removePrefix("`").substringBefore("\${").trim('/', ' ')
+        return staticPrefix.ifBlank { null }
+    }
+
     fun collect(project: Project, ctx: Vue3Context) {
         if (DumbService.isDumb(project)) return
         if (ctx.stores.isEmpty() && ctx.composables.isEmpty()) {
@@ -51,6 +80,17 @@ object CallThroughResolver {
         // names (`useCounter`) are unique project-wide in well-organised repos; if they
         // collide the first-registered wins (best effort).
         val storeByName = ctx.stores.associateBy { it.name }
+        // Vuex lookup is normalised (case + separators stripped) because a repo
+        // routinely registers `user-group/` as the namespace `userGroup`.
+        // `associateBy` is last-wins, so any collision silently drops a store from
+        // resolution — log it rather than let edges quietly point at the survivor.
+        val storeByNamespace = ctx.stores.associateBy { VuexStoreCollector.namespaceKey(it.name) }
+        if (storeByNamespace.size < ctx.stores.size) {
+            val dupes = ctx.stores.groupBy { VuexStoreCollector.namespaceKey(it.name) }
+                .filterValues { it.size > 1 }
+                .map { (k, v) -> "$k <- ${v.map { s -> s.fqn }}" }
+            LOG.warn("Vuex namespace collisions (last wins, edges may point at the wrong store): $dupes")
+        }
         val composableByName = ctx.composables.associateBy { it.name }
 
         // File-path → ComponentData index. Replaces the O(files × components) linear
@@ -86,7 +126,15 @@ object CallThroughResolver {
             val component = componentByPath[relative]
             val fileIsComponent = component != null
             val fileIsComposable = relative in composablePaths
-            if (!fileIsComponent && !fileIsComposable) continue
+            // Vue 2 binds Vuex namespaces in plain helper modules, not in the
+            // components themselves — a real codebase put all 44
+            // `createNamespacedHelpers` calls in `state/modules/<ns>/helpers.js`
+            // and none in a `.vue` file. Restricting the walk to components and
+            // composables therefore found zero binding sites. Cheap text probe so
+            // the extra files cost a read, not a PSI parse.
+            val fileBindsVuex = !fileIsComponent && !fileIsComposable &&
+                ctx.vueMajor == 2 && bindsVuexNamespace(vf)
+            if (!fileIsComponent && !fileIsComposable && !fileBindsVuex) continue
 
             ReadAction.run<Throwable> {
                 val psi = psiManager.findFile(vf) ?: return@run
@@ -94,6 +142,39 @@ object CallThroughResolver {
                 for (call in calls) {
                     val ref = call.methodExpression as? JSReferenceExpression ?: continue
                     val name = ref.referenceName ?: continue
+
+                    // Vuex (Vue 2). Two binding forms, both keyed on a namespace
+                    // string literal in argument 0:
+                    //   `...mapState('user', ['profile'])`   — inline helper
+                    //   `createNamespacedHelpers('userGroup')` — bound helpers
+                    // The second dominates in real codebases (a 2100-SFC repo used
+                    // it at all 44 call sites and the inline form at none), so
+                    // handling only the first would emit zero edges there.
+                    // Non-namespaced `mapState(['x'])` has no store to point at and
+                    // is skipped rather than guessed.
+                    if (name in VUEX_MAP_HELPERS || name == "createNamespacedHelpers") {
+                        val namespace = namespaceArg(call)
+                        val store = namespace?.let { storeByNamespace[VuexStoreCollector.namespaceKey(it)] }
+                        if (store != null) {
+                            // In a helper module the caller is the module itself, not a
+                            // component. The component→helper→store hop needs the import
+                            // graph, which is built AFTER this resolver runs — see PROGRESS V7.
+                            val callerFqn = component?.let { "${it.filePath}::${it.name}" }
+                                ?: "$relative::${vf.nameWithoutExtension}"
+                            val key = Triple(callerFqn, store.id, false)
+                            if (emittedStoreEdges.add(key)) {
+                                ctx.usesStore += UsesStoreEdge(
+                                    callerFqn = callerFqn,
+                                    storeId = store.id,
+                                    storeFqn = store.fqn,
+                                    indirect = false,
+                                    via = null
+                                )
+                            }
+                        }
+                        continue
+                    }
+
                     if (!name.startsWith("use")) continue
 
                     val callerFqn = if (fileIsComponent && component != null) {
@@ -155,10 +236,82 @@ object CallThroughResolver {
                 }
             }
         }
+        bridgeComponentsToStores(ctx, emittedStoreEdges)
+
         LOG.info(
             "CallThroughResolver: ${ctx.usesStore.size} USES_STORE edges " +
                 "(${ctx.usesStore.count { it.indirect }} indirect), " +
                 "${ctx.usesComposable.size} USES_COMPOSABLE edges"
         )
     }
+
+    /**
+     * Vue 2 component → helper → store, the 2-hop that makes "which components use
+     * this store" answerable.
+     *
+     * Vue 2 codebases do not bind Vuex in the component. They bind it once per
+     * module in a helper (`createNamespacedHelpers('userGroup')` inside
+     * `state/modules/user-group/helpers.js`), export the resulting computed/methods
+     * maps, and spread those into components. So the direct pass above attributes
+     * every edge to a helper module and NOT ONE to a component — which leaves the
+     * headline frontend query returning nothing useful.
+     *
+     * This walks the already-collected import graph: any component importing from a
+     * file that binds a namespace gets an indirect edge to that store, `via` the
+     * helper. Mirrors the existing composable-as-wrapper 1-hop, using imports rather
+     * than a body-text scan because the binding and the use are in different files.
+     */
+    private fun bridgeComponentsToStores(
+        ctx: Vue3Context,
+        emitted: HashSet<Triple<String, String, Boolean>>,
+    ) {
+        if (ctx.vueMajor != 2) return
+
+        // helper filePath → the store it binds, from the edges just emitted.
+        val componentPaths = ctx.components.associateBy { it.filePath }
+        val storeByFqn = ctx.stores.associateBy { it.fqn }
+        val bindingHelpers: Map<String, List<com.onelens.plugin.export.StoreData>> = ctx.usesStore
+            .filter { it.callerFqn.substringBeforeLast("::") !in componentPaths }
+            .mapNotNull { edge ->
+                storeByFqn[edge.storeFqn]?.let { edge.callerFqn.substringBeforeLast("::") to it }
+            }
+            .groupBy({ it.first }, { it.second })
+        if (bindingHelpers.isEmpty()) return
+
+        // Import targets are written as authored — often extensionless. Expand the
+        // same candidate set the Python loader uses so `@state/x/helpers` matches
+        // `src/state/x/helpers.js`.
+        val modulePaths = ctx.modules.mapTo(HashSet()) { it.filePath }
+        fun resolve(target: String): String? {
+            if (target in bindingHelpers) return target
+            for (ext in EXT_CANDIDATES) {
+                val c = target + ext
+                if (c in bindingHelpers) return c
+            }
+            return null
+        }
+
+        var added = 0
+        for (imp in ctx.imports) {
+            val component = componentPaths[imp.sourceModule] ?: continue
+            val helperPath = resolve(imp.targetModule) ?: continue
+            val callerFqn = "${component.filePath}::${component.name}"
+            for (store in bindingHelpers.getValue(helperPath)) {
+                val key = Triple(callerFqn, store.id, true)
+                if (!emitted.add(key)) continue
+                ctx.usesStore += UsesStoreEdge(
+                    callerFqn = callerFqn,
+                    storeId = store.id,
+                    storeFqn = store.fqn,
+                    indirect = true,
+                    via = helperPath.substringAfterLast('/'),
+                )
+                added++
+            }
+        }
+        LOG.info("CallThroughResolver: $added component→helper→store edges " +
+            "(${bindingHelpers.size} binding helpers, ${modulePaths.size} modules)")
+    }
+
+    private val EXT_CANDIDATES = listOf(".js", ".ts", ".mjs", "/index.js", "/index.ts")
 }

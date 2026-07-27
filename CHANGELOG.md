@@ -7,6 +7,133 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed — skill anti-patterns · interface-dispatch callers (2026-07)
+
+- `skills/onelens/SKILL.md` — added two anti-patterns learned from a real
+  under-reported blast radius: (1) matching callers by the *impl* FQN misses
+  callers that hold the **interface** type, whose `CALLS` edge lands on the
+  interface method — match on `m.name` or walk `OVERRIDES`; (2) grep
+  cross-checks must exclude stale trees (`.claude/worktrees/`, `build/`,
+  vendored copies) whose line numbers don't match HEAD.
+
+### Added — Vue 2 adapter · Options API + Vuex (2026-07)
+
+- **Vue 2 projects are now indexable.** Detection widened from `"vue": "^3…"` to capture
+  the major (2 or 3) across the npm range forms seen in the wild; the detected
+  `vueMajor` selects the component + store collectors. Vue 2 ships as a *mode* of the
+  existing Vue adapter rather than a second adapter — the SFC file type, PSI tree,
+  vue-router record shape, api-call sites and ES module graph are all shared. See ADR-038.
+- `OptionsApiCollector` — `export default {}` SFCs become `Component` nodes
+  (`scriptSetup=false`) with props, `mixins`, and `$emit()` call sites as emits (Vue 2.6
+  has no `emits` option). Unwraps `Vue.extend()` / `defineComponent()` wrappers, and
+  prefers the `name:` option over the filename.
+- `VuexStoreCollector` — namespaced Vuex modules become `Store` nodes (`style="vuex"`),
+  with state-factory unwrapping (`state: () => ({…})`) and a new `mutations` field that
+  has no Pinia counterpart. Identity is `filePath::name`, which matters more than it did
+  for Pinia: Vuex namespaces are directory-derived, so same-named modules across features
+  are the norm rather than the exception.
+- `mapState` / `mapGetters` / `mapActions` / `mapMutations` resolve to `USES_STORE` edges
+  via the namespace string literal — Vue 2's equivalent of a `useXStore()` call.
+- `VuePropParser` extracted from `SfcScriptSetupCollector` and shared: Vue 2's `props:`
+  option and Vue 3's `defineProps()` argument accept the same grammar, and the two would
+  have drifted on the next edge case.
+- Vue 2.7 hybrid repos are handled — `SfcScriptSetupCollector` runs on both majors and
+  claims `<script setup>` files; `OptionsApiCollector` skips any file with that block, so
+  the two can never emit duplicate `Component` fqns.
+
+### Added — Vue 2 shapes found only by E2E (2026-07)
+
+Validating against a real 2114-SFC Vue 2.7.16 codebase disputed four assumptions the
+design made from fixtures. Each would have shipped a silently-empty subgraph:
+
+- **Vuex named-export modules** (`export const state = {…}`) — the validation repo used
+  this for all 44 modules and the planned `export default {…}` for none. Named exports
+  are now checked FIRST, which also resolves the shorthand `export default { state,
+  getters }` form the object path could not unwrap.
+- **Vuex sub-module registries** (`export const modules = { key: factory() }`) → emitted
+  as `<parent>/<key>` namespaces. The keys are static even when factory bodies are
+  parameterised, so the node is accurate even where sections are not resolvable.
+- **`createNamespacedHelpers('ns')` in helper modules**, not namespace-literal `mapState`
+  in components. The planned form appeared 0 times; this one at all 44 call sites — and
+  because the helpers live in plain `.js` modules, the resolver's
+  components-and-composables-only walk had to be widened to reach them.
+- **Namespace casing drift** — directories are kebab-case (`user-group/`), registered
+  namespaces camelCase (`userGroup`). Lookup now normalises both sides instead of
+  guessing a convention.
+
+A fifth shape surfaced on the next run: **sub-module registries**
+(`export const modules = { key: factory() }`) produce `<parent>/<key>` namespaces —
+`status/request`, `form/problem`, `page/dashboard`. The keys are static even where the
+factory bodies are parameterised, so the nodes are accurate even when their sections
+cannot be resolved.
+
+Measured effect on that repo: components **0 → 2099** (zero duplicates), stores
+**0 → 139** (44/44 `module.js` files covered, 95 nested namespaces, none empty),
+USES_STORE edges **0 → 91**, of which **48 originate at a component** — the hop that
+makes "which components use this store" answerable at all. Verified through to the graph: imported into falkordblite and queried via
+Cypher, with `Component.mixins` and `Store.mutations` surviving the loader.
+
+Verified against BOTH majors on real 2000+ SFC repos: the Vue 2 app above, and a
+2469-SFC Vue 3.5.13 app confirming the shared-code changes (alias resolver, call-through
+resolver, extracted prop parser, detection) did NOT regress the Vue 3 path — detection
+still reports major 3, all 2551 components stay `scriptSetup=true`, stores stay Pinia
+(`options`/`setup`, zero `vuex`), and the Vue 2-only `mixins`/`mutations` fields stay
+empty.
+
+### Fixed — defects found by post-implementation review (2026-07)
+
+Adversarial review of the Vue 2 code (plus an audit of the exported payload) found ten
+defects. Seven produced wrong data rather than missing data:
+
+- `registrySubModules` fired on any `const modules = {…}`, so the canonical Vuex root
+  store (`const modules = { user, tickets }`) emitted an empty duplicate Store per
+  module. Since namespace lookup is last-wins, roughly half of all `USES_STORE` edges
+  would have pointed at the empty stub. Now requires every value to be a factory call
+  and the declaration to be top-level.
+- `namedExportSections` walked the full tree, so a `const state` nested inside a later
+  factory silently replaced the module's real exported `state`. Now top-level only.
+- The `aliases.config.js` entry regex matched single-quoted entries only, so a config
+  formatted with Prettier's default (`singleQuote: false`) parsed to **zero** aliases
+  and logged success — dropping every aliased import from the module graph.
+- `returnedObject` took the first descendant object literal rather than the returned
+  one, so `state() { const defaults = {…}; return {…} }` reported `defaults`' keys.
+- `VUE_DEP_PATTERN` rejected protocol-prefixed ranges (`"vue": "workspace:^2.6.14"` in
+  pnpm workspaces). An unparsed range yields a null major, which **falls back to 3** —
+  silently running the Vue 3 collectors over a Vue 2 repo for an empty graph.
+- The silent-empty guard tested the shared component list, so one `<script setup>` file
+  in a Vue 2.7 hybrid suppressed the warning even if every Options-API file failed.
+  `VuexStoreCollector` gained the equivalent guard, which it had lacked entirely.
+- `findDefaultExportObject` fell back to accepting any object literal, contradicting its
+  own contract — a component whose default export is an identifier took its props and
+  body from an unrelated local constant.
+
+### Fixed — regression risk to the shipped Vue 3 / Next.js adapters (2026-07)
+
+- **Mixed Vue 2 + Vue 3 monorepos** selected the major from `File.listFiles()` order —
+  unsorted and filesystem-dependent — so a repo that previously exported as Vue 3 could
+  silently switch to Vuex collection on a different machine, dropping every Pinia store.
+  Vue 3 now wins on ambiguity, reproducing the pre-feature behaviour exactly.
+- **The `@` → `src` alias fallback was removed.** It traded a safe failure (unresolved
+  import) for an unsafe one (wrongly resolved), because prefix substitution has no
+  existence check. Two real counter-examples: the validation repo maps `@` to the project
+  root, and a Next.js monorepo's `paths` can live in an extended tsconfig this resolver
+  does not read. The `aliases.config.js` parser covers the case the fallback was for.
+
+### Fixed — `@` alias dropped on webpack/vue-cli projects (2026-07)
+
+- `ViteAliasResolver` read only tsconfig/jsconfig `paths` and `vite.config`. A vue-cli
+  (Vue 2) repo declares aliases in an executable `vue.config.js`, so nothing resolved and
+  every `@/…` import was marked unresolved — dropping the IMPORTS edges for most of the
+  module graph. Now falls back to the universal vue-cli `@` → `<root>/src` default when no
+  explicit `@` alias was found. ponytail: real `vue.config.js` parsing needs JS evaluation.
+
+### Fixed — Vue list fields silently dropped by the importer (2026-07)
+
+- `_load_vue3` flattens list fields to comma-separated strings for the FTS index, and only
+  the fields named in the `_batch_nodes` property list are written. New `mixins` /
+  `mutations` lists would have arrived as Python lists and been discarded without an
+  error. Both are now flattened and declared.
+
 ### Added — Next.js / React adapter · Phase 4 · delta export side (2026-07)
 
 - **Next.js is the first frontend wired into delta.** `DeltaTracker` no longer filters

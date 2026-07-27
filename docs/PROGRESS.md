@@ -347,6 +347,127 @@ Gate for Phase B. **Passed 2026-04-17.**
 
 ---
 
+## Phase V2 — Vue 2 adapter (Options API + Vuex)
+
+Ships inside the existing Vue adapter, selected by a detected `vueMajor` — see
+ADR-038. Full-export-only, same as Vue 3 (delta stays Java-only per ADR-037).
+
+| # | Deliverable | Status | Where |
+|---|---|---|---|
+| V1 | `detectMajor()` — `VUE_DEP_PATTERN` captures major 2 or 3 across npm range forms (`^2.6.14`, `>= 2.7`, `2.6.11`); unparseable ranges yield null rather than a guessed major | ✅ (8/8 pure-logic) | `plugin/.../framework/vue3/Vue3Adapter.kt` |
+| V1 | `Vue3Context.vueMajor` + `Vue3Data.vueVersion` — payload shape identical across majors | ✅ | `plugin/.../framework/vue3/Vue3Context.kt`, `export/ExportModels.kt` |
+| V2 | `VuePropParser` — prop parsing extracted from `SfcScriptSetupCollector` and shared; Vue 2 `props:` and Vue 3 `defineProps()` accept the same grammar | ✅ | `plugin/.../framework/vue3/collectors/VuePropParser.kt` |
+| V2 | `OptionsApiCollector` — `export default {}` SFCs → `Component` (`scriptSetup=false`); props, `mixins`, `$emit()` call sites as emits, `name:` option over filename; unwraps `Vue.extend()` / `defineComponent()` | ✅ | `plugin/.../framework/vue3/collectors/OptionsApiCollector.kt` |
+| V2 | Silent-empty guard — warns when `.vue` files exist but zero components parsed (the failure mode that exits 0 with an empty graph) | ✅ | `OptionsApiCollector.collect` |
+| V2 | Vue 2.7 hybrid repos — `SfcScriptSetupCollector` runs on both majors and claims `<script setup>` files; `OptionsApiCollector` skips them, so no duplicate `Component` fqn | ✅ | both collectors |
+| V3 | `VuexStoreCollector` — namespaced modules → `Store` (`style="vuex"`), state-factory unwrapping, `mutations` field, directory-derived namespace, fqn identity (name collisions are the norm in Vuex) | ✅ | `plugin/.../framework/vue3/collectors/VuexStoreCollector.kt` |
+| V3 | Shape-based rejection — residence in `store/` only makes a file a candidate; ≥2 Vuex sections or `namespaced` required | ✅ | `VuexStoreCollector.extractStores` |
+| V4 | `mapState`/`mapGetters`/`mapActions`/`mapMutations` → `USES_STORE` edges via the namespace string literal | ✅ | `plugin/.../framework/vue3/resolver/CallThroughResolver.kt` |
+| V5 | `@` → `src` alias fallback — vue-cli/webpack repos declare aliases in an executable `vue.config.js`; without this every `@/…` import drops | ✅ | `plugin/.../framework/jscommon/ViteAliasResolver.kt` |
+| V6 | Python loader — `mixins` + `mutations` flattened onto `Component`/`Store` nodes (list fields silently drop otherwise); logs the detected major | ✅ | `python/.../importer/loader.py::_load_vue3` |
+| V7 | `this.$store.dispatch('ns/action')` string-path resolution | ⬜ | Deferred — needs a namespace→fqn index; minority of call sites |
+| V7 | Mixin → `Component` `USES_COMPOSABLE` edges | ⬜ | Deferred — needs import resolution of `mixins: [x]` identifiers |
+| V7 | Template `RENDERS` edges from the local `components: {}` map | ⬜ | Deferred — Next's `RendersResolver` cost a full debug cycle for 11 edges; same trap here |
+| V8 | E2E on a real Vue 2.7.16 app — 2114 SFCs, 44 Vuex modules, vue-cli/webpack, no jsconfig | ✅ | 3 headless export runs; numbers below |
+| V9 | `aliases.config.js` parser — the vue-cli convention for sharing one alias map across webpack/jest/jsconfig | ✅ | `plugin/.../framework/jscommon/ViteAliasResolver.kt` |
+| V10 | Vuex named-export module shape (`export const state/getters/…`) — the ONLY shape used by the validation repo | ✅ | `VuexStoreCollector.namedExportSections` |
+| V11 | Vuex sub-module registries (`export const modules = { key: factory() }`) → `<parent>/<key>` namespaces — took 44/44 module coverage, 95 nested namespaces | ✅ | `VuexStoreCollector.registrySubModules` |
+| V12 | `createNamespacedHelpers('ns')` in helper modules → `USES_STORE` (the form the validation repo used at all 44 call sites; namespace-literal `mapState` appeared 0 times) | ✅ | `CallThroughResolver` |
+| V13 | Component → helper → store 2-hop edge | ⬜ | Deferred — needs the import graph, which `JsModuleCollector` builds AFTER `CallThroughResolver` runs |
+
+**E2E verification (real Vue 2.7.16 codebase, 2114 SFCs, 44 Vuex modules).** Three
+export runs against the same repo, each fixing what the previous run's counts exposed:
+
+| Metric | Run 1 | Run 3 | Final | Note |
+|---|---|---|---|---|
+| components | 2099 | 2099 | **2099** | **was 0 before this work** — 0 files use `<script setup>`, so the Vue 3 collector matched nothing |
+| stores | 34 | 131 | **139** | named-export priority → sub-module registries → assignment-built sections |
+| stores with NO sections | — | 95 | **0** | the 95 sub-modules were empty shells until `sectionsFromAssignments` landed |
+| `module.js` coverage | 34/44 | 44/44 | **44/44** | |
+| USES_STORE edges | 0 | 43 | **91** | of which **48 originate at a component** (was 0 — every edge used to start at a helper module, so "which components use this store" answered nothing) |
+| routes / apiCalls | 379 / 1163 | 379 / 1163 | 379 / 1163 | unchanged — version-agnostic collectors |
+| modules / functions | 3160 / 15975 | 3160 / 15975 | 3160 / 15975 | unchanged |
+
+Component detail: 2099 components across 2099 unique filePaths AND 2099 unique fqns —
+zero duplicates. 1502 with props, 1023 with emits, 97 with mixins, 488 presentational
+(`export default { name: 'X' }` only). Store detail: 139/139 unique fqns, all
+`style="vuex"`, none empty; kebab↔camel namespace matching confirmed (`ciType` →
+`ci-type`); nested namespaces resolve (`status/request`, `form/problem`).
+
+**Graph round-trip verified** — run 3 imported into falkordblite and queried via
+Cypher: `Component.mixins` and `Store.mutations` (both new fields) survive the loader,
+and `MATCH (s:Store) WHERE s.mutations CONTAINS 'SET_SOURCES'` returns the owning
+store. Import produced 2099 Components / 131 Stores / 379 Routes / 43 USES_STORE /
+13310 IMPORTS / 13248 IMPORTS_FN.
+
+**Non-issue, investigated.** Every `imports` record carries `unresolved: true`. This is
+a **pre-existing, documented** Kotlin-side limitation (empty `importedBindings` on
+stub-backed files) that the Python loader already compensates for by re-deriving
+`IMPORTS_FN` and expanding extensionless paths — hence 13248 IMPORTS_FN edges in the
+graph despite the flag. Not a Vue 2 regression.
+
+### Post-implementation review (2026-07)
+
+Two independent adversarial reviews of the shipped code, plus an empirical audit of
+the export payload. Ten defects found; seven fixed, three accepted with reasons.
+
+**Fixed — would have produced WRONG data:**
+
+| # | Defect | Effect | Fix |
+|---|---|---|---|
+| R1 | `registrySubModules` fired on ANY `const modules = {…}` | The canonical Vuex root store (`const modules = { user, tickets }`) emitted an empty duplicate Store per module; `associateBy` is last-wins, so ~half of USES_STORE edges would point at the empty stub | Require every value to be a factory CALL, and the declaration to be top-level |
+| R2 | `namedExportSections` walked full depth | A `const state` nested in a later factory silently replaced the module's real exported `state` | Top-level-only guard (`isTopLevel`) |
+| R3 | `ALIAS_ENTRY_RE` matched single quotes only | Any `aliases.config.js` formatted with Prettier's default (`singleQuote: false`) parsed to ZERO aliases — logged as success — dropping every aliased import | Accept both quote styles; anchor the block regex; allow an indented closing brace |
+| R4 | `returnedObject` took the first descendant object | `state() { const defaults = {…}; return {…} }` returned `defaults`' keys | Check the `return` statement first; descendant search only as the concise-arrow fallback |
+| R5 | `VUE_DEP_PATTERN` rejected protocol prefixes | `"vue": "workspace:^2.6.14"` (pnpm) → null major → **fell back to 3 and ran the Vue 3 collectors over a Vue 2 repo**, empty graph, exit 0 | Optional `[a-z-]+:` prefix |
+| R6 | Silent-empty guard tested shared `ctx.components` | One `<script setup>` file in a 2.7 hybrid suppressed the warning even if all 2000 Options-API files failed to parse | Test this collector's own emitted count; same guard added to `VuexStoreCollector` |
+| R7 | `findDefaultExportObject` fell back to any object literal | Contradicted its own contract — a component whose default export is an identifier got props/body from an unrelated local constant | Fallback removed; unparseable is reported as absent |
+
+**Also fixed — regression risk to shipped adapters** (found by the cross-adapter review):
+
+- Mixed Vue 2 + Vue 3 monorepos selected the major by `File.listFiles()` order — unsorted
+  and filesystem-dependent — so a repo that exported as Vue 3 could silently switch to
+  Vuex collection on another machine, dropping every Pinia store. Now **3 wins on
+  ambiguity**, which reproduces the pre-feature behaviour exactly.
+- The `@` → `src` alias fallback was **removed entirely**. It converted a safe failure
+  (unresolved import) into an unsafe one (wrongly resolved), because substitution has no
+  existence check — and two real counter-examples exist: the validation repo maps `@` to
+  the project ROOT, and a Next monorepo's `paths` can live in an extended tsconfig this
+  resolver does not read. The `aliases.config.js` parser covers the case it was added for.
+
+**Accepted, not fixed:**
+
+- `callerFqn` for a non-component file differs between two branches
+  (`helpers.js::helpers.js` vs `helpers.js::helpers`). Cosmetic — neither form matches an
+  emitted node, and unifying them would change existing Vue 3 composable fqns.
+- The indirect store scan (`body.contains("<name>(")`) is dead for Vuex, since a namespace
+  like `user/group` never appears as a call. No wrong output, just an unused path.
+- `<script setup>` / `export default` are detected by raw-text search, so the literal
+  appearing inside a `<template>` code sample would misclassify a file. Pre-existing
+  pattern shared with `SfcScriptSetupCollector`; fixing needs PSI-level script-tag
+  resolution and should be done for both collectors at once.
+
+**Vue 3 regression check (real Vue 3.5.13 repo, 2469 SFCs).** The Vue 2 work touched
+code shared with the shipped Vue 3 / Next.js paths — `ViteAliasResolver`,
+`CallThroughResolver`, the extracted `VuePropParser`, and detection. A full export of a
+2469-SFC Vue 3 app confirms none of it regressed:
+
+| Discriminator | Result | Confirms |
+|---|---|---|
+| `vueVersion` | 3 | detection picked major 3, not misrouted to Vue 2 |
+| scriptSetup | 2551/2551 true | `SfcScriptSetupCollector` still owns components; `OptionsApiCollector` never ran |
+| store styles | options 65 / setup 1 / **vuex 0** | Pinia collector ran, not Vuex |
+| mutations / mixins | 0 / 0 | Vue 2-only fields stay empty on Vue 3 |
+| props | 1892 components extracting | `VuePropParser` extraction is behaviour-preserving |
+| composables / usesStore / usesComposable | 740 / 2423 / 4925 | shared resolver output unchanged |
+
+**Test status.** Pure-logic: 26/26 pass (13 Vue 2 + 13 Next.js). Real-PSI fixture tests written
+(`Vue2CollectorsSmokeTest`, 5 cases) but `BasePlatformTestCase` does not complete in
+this environment — a recurrence of the platform-fixture wall hit during the Next.js
+work. The E2E exports (Vue 2 AND Vue 3, both ~2000+ SFC real repos) are what actually
+verified the PSI walk, and they found five design errors the fixtures could not (see the
+PLAN postmortem).
+
 ## Phase B — Vue 3 adapter (P0 collectors)
 
 Full-import-only. Delta + auto-sync deferred to Phase B2.

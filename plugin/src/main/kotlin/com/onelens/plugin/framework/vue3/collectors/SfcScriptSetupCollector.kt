@@ -1,10 +1,8 @@
 package com.onelens.plugin.framework.vue3.collectors
 
 import com.intellij.lang.javascript.psi.JSCallExpression
-import com.intellij.lang.javascript.psi.JSLiteralExpression
 import com.intellij.lang.javascript.psi.JSObjectLiteralExpression
 import com.intellij.openapi.application.ReadAction
-import com.intellij.openapi.util.Computable
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
@@ -16,7 +14,6 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
 import com.intellij.psi.util.PsiTreeUtil
 import com.onelens.plugin.export.ComponentData
-import com.onelens.plugin.export.PropData
 import com.onelens.plugin.framework.vue3.Vue3Context
 import com.onelens.plugin.framework.jscommon.isTestFile
 import com.onelens.plugin.framework.jscommon.smartRead
@@ -91,7 +88,7 @@ object SfcScriptSetupCollector {
             return null
         }
 
-        val props = defineProps?.let(::extractProps).orEmpty()
+        val props = VuePropParser.parse(defineProps?.argumentList?.arguments?.firstOrNull())
         val emits = defineEmits?.let(::extractStringList).orEmpty()
         val exposes = defineExpose?.let(::extractObjectKeys).orEmpty()
 
@@ -108,37 +105,6 @@ object SfcScriptSetupCollector {
             body = scriptSetupBody?.take(MAX_BODY_CHARS),
             isTest = isTestFile(relative)
         )
-    }
-
-    /**
-     * Parses the first argument of `defineProps({...})`. Supports:
-     *   - `defineProps({ title: String })` → `PropData("title", "String")`
-     *   - `defineProps({ count: { type: Number, default: 0 } })` →
-     *       `PropData("count", "Number", default="0")`
-     *   - `defineProps({ active: { type: Boolean, required: true } })` → `required=true`
-     *   - `defineProps(['title', 'id'])` → names only, no types.
-     */
-    private fun extractProps(call: JSCallExpression): List<PropData> {
-        val arg = call.argumentList?.arguments?.firstOrNull() ?: return emptyList()
-        if (arg is JSObjectLiteralExpression) {
-            return arg.properties.mapNotNull { prop ->
-                val key = prop.name ?: return@mapNotNull null
-                when (val v = prop.value) {
-                    is JSObjectLiteralExpression -> {
-                        val typeText = v.findProperty("type")?.value?.text.orEmpty()
-                        val required = v.findProperty("required")?.value?.text == "true"
-                        val default = v.findProperty("default")?.value?.text
-                        PropData(name = key, type = typeText, required = required, defaultValue = default)
-                    }
-                    else -> PropData(name = key, type = v?.text.orEmpty())
-                }
-            }
-        }
-        // Array form: defineProps(['a', 'b'])
-        val arrayNames = STRING_LITERAL_RE.findAll(arg.text)
-            .map { it.groupValues[1] }
-            .toList()
-        return arrayNames.map { PropData(name = it) }
     }
 
     private fun extractStringList(call: JSCallExpression): List<String> {

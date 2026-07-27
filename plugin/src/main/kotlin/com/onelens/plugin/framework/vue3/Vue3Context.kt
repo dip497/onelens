@@ -30,6 +30,12 @@ class Vue3Context(
     override val symlinks: List<SymlinkResolver.SymlinkEntry>,
     /** Workspace driving root scope. Every collector + resolver scopes through this. */
     override val workspace: Workspace,
+    /**
+     * Detected Vue major (2 or 3). Selects the component + store collectors —
+     * Options API / Vuex for 2, `<script setup>` / Pinia for 3. Everything else
+     * (routes, api calls, modules, imports) is version-agnostic.
+     */
+    val vueMajor: Int = 3,
 ) : JsCommonSink {
     val components: MutableList<ComponentData> = mutableListOf()
     val composables: MutableList<ComposableData> = mutableListOf()
@@ -61,7 +67,8 @@ class Vue3Context(
         callsApi = callsApi.toList(),
         modules = modules.toList(),
         functions = functions.toList(),
-        imports = imports.toList()
+        imports = imports.toList(),
+        vueVersion = vueMajor
     )
 
     /** Make a file path relative to [projectBase]. Falls back to absolute path string on failure. */

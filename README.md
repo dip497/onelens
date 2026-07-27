@@ -1,6 +1,6 @@
 # OneLens
 
-Code knowledge graph for Java/Spring Boot backends **and Vue 3 / Next.js (React) frontends**. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints, Vue components / Pinia stores / composables, Next.js App Router routes / React components / hooks / server actions — plus cross-stack traversal via `HITS` edges that link a frontend `ApiCall` to the Spring `Endpoint` it dispatches to.
+Code knowledge graph for Java/Spring Boot backends **and Vue 2/3 / Next.js (React) frontends**. Gives AI 100% type-accurate understanding of your codebase — call graphs, inheritance, Spring bean wiring, REST endpoints, Vue components / Pinia + Vuex stores / composables, Next.js App Router routes / React components / hooks / server actions — plus cross-stack traversal via `HITS` edges that link a frontend `ApiCall` to the Spring `Endpoint` it dispatches to.
 
 **Built for AI agents (Claude Code, Cursor, MCP clients).** Two simple tools — `search` and `query` — plus a detailed skill that teaches the agent how to navigate your codebase.
 
@@ -154,7 +154,9 @@ The [SKILL.md](./skills/onelens/SKILL.md) contains 10+ copy-paste Cypher recipes
 | Spring beans, endpoints, injections, auto-config | `@Service`/`@RestController` + Spring plugin |
 | JPA entities, repositories, columns | `@Entity`/`JpaRepository` detection |
 | Vue 3 components (SFC `<script setup>`) | Vue PSI + JS PSI extraction |
+| Vue 2 components (Options API `export default {}`) | Vue PSI — props, mixins, `$emit()` call sites |
 | Pinia stores, composables, routes, API calls | JS PSI patterns |
+| Vuex modules (state / getters / mutations / actions) | JS PSI + namespace derivation |
 | Next.js App Router routes / pages / layouts / special files | `app/` directory + segment grammar (`[param]`, `(group)`, `@slot`) |
 | React components + client/server (RSC) boundary | JSX PSI + module-level `"use client"` directive |
 | React hooks (react / library / custom), context providers | `use*` call sites + `createContext` |
@@ -175,6 +177,7 @@ The [SKILL.md](./skills/onelens/SKILL.md) contains 10+ copy-paste Cypher recipes
 │  OneLens Plugin (Kotlin)                                   │
 │  ├── SpringBootAdapter → Class/Method/CallGraph/Spring/JPA │
 │  ├── Vue3Adapter → Component/Store/Composable/Route/ApiCall│
+│  │    (Vue 2 + Vue 3 — Options API/Vuex or setup/Pinia)     │
 │  ├── NextjsAdapter → Route/Page/ReactComponent/Hook/Action │
 │  └── FrameworkAdapter SPI (extensible — add your own)      │
 └──────────────────────┬──────────────────────────────────────┘
@@ -212,6 +215,7 @@ language/framework lives in its own adapter and contributes:
 |-----------|---------|-----------|--------|
 | Java / Spring Boot | `SpringBootAdapter` | Class, Method, Field, Endpoint, SpringBean, JpaEntity, TestCase | ✅ Production |
 | Vue 3 / Pinia | `Vue3Adapter` | Component, Store, Composable, Route, ApiCall, JsFunction, JsModule | ✅ Production |
+| Vue 2 / Vuex | `Vue3Adapter` (same adapter, `vueMajor=2`) | Component (Options API), Store (Vuex + sub-modules), Route, ApiCall, JsFunction, JsModule | ✅ Production |
 | Next.js / React | `NextjsAdapter` | Route, Page, Layout, ReactComponent, Hook, ServerAction, RouteHandler, ContextProvider, Middleware | ✅ Production |
 
 ### How to add a new framework (e.g., Python/FastAPI, Go, Rust)
@@ -320,7 +324,7 @@ onelens/
 │       ├── export/collectors/   # Java collectors (Class, Method, CallGraph, ...)
 │       ├── framework/           # FrameworkAdapter SPI
 │       │   ├── springboot/      # Spring Boot adapter
-│       │   └── vue3/            # Vue 3 adapter
+│       │   └── vue3/            # Vue 2 + Vue 3 adapter
 │       └── headless/            # Headless export + delta + state management
 ├── python/              # MCP server + importer + CLI
 │   └── src/onelens/

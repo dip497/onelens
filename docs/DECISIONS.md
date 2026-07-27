@@ -1715,3 +1715,56 @@ cross-stack `HITS` bridge filters on). `DeltaDocument` now mirrors the full head
 frontend with 50k+ modules — or when Vue is also wired into delta and the shared-JS
 label ownership needs a real `source` discriminator.
 
+
+---
+
+## ADR-038 · 2026-07 · Vue 2 is a mode of the Vue adapter, not a second adapter
+
+**Decision.** Vue 2 support ships inside `Vue3Adapter` / `Vue3Context`, selected by
+a detected `vueMajor` (2 or 3), not as a parallel `Vue2Adapter`. Two collectors are
+version-specific — `OptionsApiCollector` and `VuexStoreCollector` — and everything
+else runs unchanged. Vue 2 reuses the `vue3` JSON key, the `Vue3Data` payload, and
+the existing `Component` / `Store` / `Composable` node labels.
+
+**Context.** Vue 2 and Vue 3 differ far less than the version bump suggests. They
+share the `.vue` file type and the same IntelliJ `VueFile` PSI tree, the same
+vue-router route-record shape (v3 and v4 differ in the router *constructor*, not in
+the `{ path, name, component, children }` records `LazyRouteCollector` reads), the
+same axios/fetch call sites, and the same ES module graph. The real differences are
+confined to how a component declares itself (`export default {}` vs `<script setup>`)
+and which state library it uses (Vuex vs Pinia). A second adapter would duplicate the
+orchestration, context, and snapshot code to express a difference living inside two
+collectors — and both adapters would `detect()` true on a part-migrated repo, while
+`ExportService` dispatches on a single `lastContext` and can only hold one active Vue
+context per run.
+
+Concept mapping onto existing nodes: Options-API SFC → `Component` (`scriptSetup=false`),
+Vuex module → `Store` (`style="vuex"`, plus a new `mutations` field Pinia has no
+counterpart for), `mapState`/`mapActions`/`createNamespacedHelpers` → `USES_STORE`.
+
+Mixins are the one Vue 2 concept NOT given a node. They are captured as a
+`Component.mixins` string list, not as `Composable` nodes — modelling them as
+Composables would need import resolution of the `mixins: [x]` identifiers to
+distinguish a local mixin from an imported one, and nothing queries them yet.
+Recorded so the gap is visible rather than assumed.
+
+**Alternatives.** (1) A separate `Vue2Adapter` — rejected: duplicated orchestration,
+ambiguous detection on migrating repos. (2) New `VuexStore` / `OptionsComponent` node
+labels — rejected: every downstream query and the skill would need a second branch to
+answer "which store holds this state", for no gain; the `style` and `scriptSetup`
+fields already discriminate. (3) Rename `Vue3Data`/`vue3` → `VueData`/`vue` — rejected:
+touches the loader, the delta path, the skill, and every doc to buy nothing. The
+naming is now inaccurate; that is accepted debt, recorded here.
+
+**Consequences / ceilings.** On a mixed monorepo (a Vue 2 app *and* a Vue 3 app) the
+FIRST detected major wins — export them as separate graphs. Vue 2.7 hybrid repos are
+handled: `SfcScriptSetupCollector` runs on both majors and claims `<script setup>`
+files, `OptionsApiCollector` skips any file with that block, so the two cannot emit
+duplicate `Component` nodes. `this.$store.dispatch('ns/action')` string-path
+resolution, mixin→component edges, and template `RENDERS` edges are deliberately NOT
+implemented — see PROGRESS. Vue 2 inherits Vue 3's full-export-only status (ADR-037):
+delta remains Java-only.
+
+**Revisit when.** A repo needs both majors in ONE graph, or `vue.config.js` alias
+parsing becomes necessary (the current `@`→`src` fallback covers the vue-cli default;
+real parsing needs JS evaluation).
