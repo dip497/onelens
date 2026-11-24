@@ -30,6 +30,7 @@ from onelens.importer.graph_writer import (
     _normalize_type,
     _anno_simple_names,
     _enrich_method,
+    method_api_calls,
 )
 from onelens.importer.loaders.annotations import AnnotationLoader
 from onelens.importer.loaders.enums import EnumLoader
@@ -329,6 +330,20 @@ class GraphLoader:
             overrides = [{"src": o["methodFqn"], "dst": o["overridesFqn"]}
                          for o in data.get("methodOverrides", [])]
             self._batch_edges(progress, "OVERRIDES", overrides, "Method", "fqn", "Method", "fqn")
+
+            api_calls = method_api_calls(data.get("apiCalls") or [], graph_wing)
+            if api_calls:
+                self._batch_nodes(progress, "ApiCalls", api_calls, "ApiCall", "fqn", [
+                    "method", "path", "parametric", "callerFqn", "filePath", "line", "wing",
+                ])
+                self._batch_edges(progress, "CALLS_API", [
+                    {"src": a["callerFqn"], "dst": a["fqn"]} for a in api_calls
+                ], "Method", "fqn", "ApiCall", "fqn")
+                try:
+                    from onelens.importer import bridge_http
+                    bridge_http.compute_hits(self.db, graph_name=graph_wing)
+                except Exception as e:
+                    logger.warning("HTTP bridge pass failed: %s", e)
 
             # Tier-0 type-flow edges (Method → Class). Powers "what produces a
             # User" (RETURNS), "what consumes a UserDto" (HAS_PARAMETER), and

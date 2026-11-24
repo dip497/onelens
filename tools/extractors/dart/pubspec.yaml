@@ -1,0 +1,8 @@
+name: onelens_dart_extractor
+description: Type-resolved OneLens export for Dart and Flutter projects, built on package:analyzer.
+publish_to: none
+environment:
+  sdk: ^3.13.0
+dependencies:
+  analyzer: 14.7.0
+  path: ^1.9.0

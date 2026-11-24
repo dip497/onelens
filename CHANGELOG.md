@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-### Added — Go, Python and C# extractors on compiler tooling (2026-11)
+### Added — Go, Python, C# and Dart extractors on compiler tooling (2026-11)
 
 - **Go** (`tools/extractors/go/`): rewritten on `go/packages` + `go/types`, so every
   call resolves to the function the compiler binds. Loads every `go.mod` under the
@@ -21,6 +21,15 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   sources and references. Handles SDK-style .NET 8 and old .NET Framework 4.0 projects
   (reference assemblies and packages.config libraries fetched from nuget.org).
   ASP.NET controller actions become Endpoints. Poller: 4 projects, 0 compile errors.
+- **Dart / Flutter** (`tools/extractors/dart/`): `package:analyzer`, so every call is
+  the element the analyzer resolved (methods, constructors, getters/setters, operators,
+  extension methods). Mixins and `implements` → IMPLEMENTS, overrides → OVERRIDES. HTTP
+  calls (`client.get('/request/$id')`) become `ApiCall` nodes with their paths rebuilt
+  from literals, interpolations and `final` String constants. A 705-file Flutter app:
+  5,057 methods, 31,070 project calls, 477 API calls.
+- Importer: a top-level `apiCalls` list in any export becomes `ApiCall` nodes linked to
+  their calling Method (`CALLS_API`) and to Spring Endpoints (`HITS`)
+  (`python/tests/test_method_api_calls.py`).
 - `tools/extractors/merge_exports.py`: merges one component's per-language exports into
   one graph export (`python/tests/test_merge_exports.py`).
 - Importer: Go and C# type strings (`*T`, `[]T`, `List[T]`, `Foo?`) now link RETURNS /

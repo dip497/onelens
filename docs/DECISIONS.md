@@ -1811,3 +1811,13 @@ calls go unresolved, so "who calls X" becomes unreliable.
 the route rules by hand costs more than wiring `Pythonid`; or C# work needs
 something Roslyn cannot give.
 
+**Dart (added 2026-11).** Dart and Flutter use `package:analyzer` directly. The
+IntelliJ Dart plugin (now `flutter/dart-intellij-third-party`) does not resolve
+references itself: `DartResolver` reads navigation regions that the Dart analysis
+server pushes only for files open in an editor (`DartAnalysisServerService.updateVisibleFiles`
+subscribes `FileEditorManager.getSelectedFiles()`), so a headless run resolves
+nothing unless the plugin's private list of visible files is forced by reflection.
+The analysis server is itself built on `package:analyzer`, so going through the
+IDE would add a licence and a plugin install for the same answers. Measured on a
+705-file Flutter app: 31,070 project calls, every one checked against its source line.
+

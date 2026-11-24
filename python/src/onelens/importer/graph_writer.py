@@ -71,6 +71,26 @@ def _anno_simple_names(method: dict) -> set[str]:
     return out
 
 
+def method_api_calls(calls: list[dict], wing: str) -> list[dict]:
+    """ApiCall rows for HTTP calls made from Method nodes (Dart, and any export
+    with a top-level `apiCalls` list). One row per method + verb + path; rows
+    without a caller or a path are dropped."""
+    out: dict[str, dict] = {}
+    for c in calls:
+        caller, path = c.get("callerFqn") or "", c.get("path") or ""
+        if not caller or not path:
+            continue
+        method = (c.get("method") or "GET").upper()
+        fqn = f"{method}:{path}:{caller}"
+        out.setdefault(fqn, {
+            "fqn": fqn, "method": method, "path": path,
+            "parametric": bool(c.get("parametric")), "callerFqn": caller,
+            "filePath": c.get("filePath") or "", "line": int(c.get("line") or 0),
+            "wing": wing,
+        })
+    return list(out.values())
+
+
 def _enrich_method(m: dict) -> None:
     """Add derived structural props to a method dict in place (Tier-0 enrich).
 

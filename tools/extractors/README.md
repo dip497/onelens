@@ -11,6 +11,7 @@ IntelliJ plugin emits for Java. The existing `GraphLoader` imports it unchanged.
 | (plugin) Java/Kotlin | IntelliJ PSI | shipped, 100% type-accurate (`source=PSI`) |
 | `go/` | Go type checker: `golang.org/x/tools/go/packages` + `go/types` | **verified** on a 971-file agent: 0 type errors, 15,602 calls, every call to project code lands on a line naming its callee (`source=TYPES`) |
 | `python_extractor.py` | stdlib `ast` + Jedi (follows imports, infers `obj.method()`) | **verified** on an 83-file agent: 3,505 project calls; `system_env()` callers 16/16 against grep (`source=LSP`) |
+| `dart/` | `package:analyzer` resolved AST + element model (the engine behind the Dart analysis server and both IDE plugins) | **verified** on a 705-file Flutter app: 31,070 project calls, 30,961 land on a line naming the callee and the other 109 are `super(...)` / multi-line setter calls; HTTP call sites 310/310 against grep (6 grep-only hits are commented out or not HTTP) (`source=TYPES`) |
 | `csharp/` | Roslyn semantic model; MSBuild (`dotnet msbuild -getItem`) gives each project's exact sources, defines and references | **verified** on the poller (4 projects, 0 compile errors, 3,646/3,646 project calls land on a line naming the callee, `ExecuteGetRequestR` call sites 39/39 against grep, 75 ASP.NET endpoints) and the agent's .NET Framework 4.0 code (7 projects, 4,191/4,191; 38 compile errors, all in Windows COM libraries) (`source=TYPES`) |
 
 Why not IntelliJ PSI for these: `docs/DECISIONS.md` ADR-039.
@@ -61,6 +62,12 @@ cd tools/extractors/csharp && dotnet build -c Release -o /tmp/cs-extractor && \
 # old projects: reference assemblies and packages.config libraries are fetched from nuget.org
 # into ~/.onelens/csharp-cache (--offline skips the fetch); ONELENS_CSHARP_DIAGNOSTICS=1 prints compile errors
 
+# Dart / Flutter — needs the Flutter (or Dart) SDK; run `flutter pub get` first, and
+# `dart run build_runner build` when the project generates *.g.dart files
+cd tools/extractors/dart && dart pub get && dart compile exe -o /tmp/dart-extractor bin/dart_extractor.dart
+/tmp/dart-extractor <project_root> --name myproj --out out.json   # SDK: $ONELENS_DART_SDK, else the `dart` on PATH
+# ONELENS_DART_DIAGNOSTICS=1 prints compile errors
+
 # A component in several languages (an agent in Go + Python + C#): one export per
 # extractor, merged into one graph (same fqn twice → the first part wins)
 python tools/extractors/merge_exports.py --name myproj out.json go.json py.json cs.json
@@ -75,6 +82,20 @@ and `OVERRIDES` from its methods, so impact analysis fans out from an interface
 call exactly as it does for Java. A `(T, error)` result is recorded as returning `T`.
 
 Python calls Jedi cannot infer (about 16% on the agent) are left out, never guessed.
+
+Dart FQNs use the library path: `acme.services.request_service.RequestService#getRequest(int)`
+(`package:` URIs drop the scheme; `dart:core` becomes `dart.core`). Dart has no
+overloading, but parameter types stay in the signature like every other language.
+Named constructors are `#Class.named(...)`, setters `#name=(T)`, getters `#name()`;
+top-level functions hang off a `LIBRARY` node per file, and field initializers off a
+synthetic `#<init>()`. Implicit field getters/setters are field access, not calls.
+`extends` → EXTENDS; `implements` and `with` (mixins) → IMPLEMENTS; every member that
+overrides another (`InterfaceElement.getOverridden`) → OVERRIDES. Each HTTP call — a
+method named get/post/put/patch/delete/head whose first argument binds a parameter
+named `url`/`path`/`uri` — becomes an `ApiCall` with its path rebuilt from string
+literals, interpolations, `+` and both arms of a ternary; `const` and `final` String
+fields with a literal value are filled in, anything else stays `${expr}`. The importer
+links each ApiCall to its caller (`CALLS_API`) and to Spring Endpoints (`HITS`).
 
 C# FQNs are `Namespace.Outer.Inner#Method(int,System.Collections.Generic.List<Ns.T>)`,
 with `ref `/`out `/`in ` kept in the signature so overloads stay apart. Constructors

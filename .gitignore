@@ -81,3 +81,4 @@ internal-docs/
 # C# extractor build output
 tools/extractors/csharp/bin/
 tools/extractors/csharp/obj/
+tools/extractors/dart/.dart_tool/
