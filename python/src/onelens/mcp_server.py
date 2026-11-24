@@ -612,6 +612,42 @@ def onelens_import(
 
 
 @mcp.tool
+def onelens_replace_graph(
+    graph: str,
+    db_path: str = "~/.onelens/graphs",
+) -> dict:
+    """Swap a rebuilt graph file in for the live one, on a running server.
+
+    Upload the new file as `<db_path>/<graph>/<graph>.rdb.incoming`, then call
+    this. The open copy is stopped WITHOUT saving — a normal stop saves, which
+    writes the old graph over the new file — and the incoming file takes the
+    place of `<graph>.rdb`. The next query opens the new graph. falkordblite only.
+    """
+    from onelens.graph.backends.falkordb_lite import stop_graph_server_without_saving
+
+    if not graph or graph != Path(graph).name or graph.startswith("."):
+        raise ValueError(f"not a plain graph name: {graph!r}")
+    graph_dir = Path(db_path).expanduser() / graph
+    incoming = graph_dir / f"{graph}.rdb.incoming"
+    live = graph_dir / f"{graph}.rdb"
+    if not incoming.is_file():
+        raise FileNotFoundError(f"upload the new graph to {incoming} first")
+
+    cache = _STATE["db_handles"]
+    for key in [k for k in cache if k[0] == "falkordblite" and k[1] == graph
+                and Path(k[2]).expanduser() == Path(db_path).expanduser()]:
+        cache.pop(key).close_without_saving()
+    stopped_left_over_server = stop_graph_server_without_saving(live)
+
+    os.replace(incoming, live)
+    return {
+        "graph": graph,
+        "rdb_bytes": live.stat().st_size,
+        "stopped_left_over_server": stopped_left_over_server,
+    }
+
+
+@mcp.tool
 def onelens_reindex_semantic(
     graph: str = "onelens",
     backend: Literal["falkordb", "falkordblite", "neo4j"] = "falkordblite",

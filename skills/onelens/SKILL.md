@@ -373,6 +373,12 @@ MATCH (s:Store) WHERE NOT s.isTest RETURN s.name
   ANNOTATED_WITH (@Scheduled, @EventListener, @PostConstruct), and reflection.
 - Don't stop at abstract declarations — `(caller)-[:CALLS]->(abstract_method)`
   means the real implementation lives on subclasses via OVERRIDES.
+- Don't match callers by the *impl* FQN alone — a caller holding the interface
+  type produces a CALLS edge to the **interface** method, not the impl. Match on
+  `m.name` (or walk `(impl)-[:OVERRIDES]->(iface)`) or you will under-report the
+  blast radius and wrongly conclude the graph is incomplete.
+- Don't trust a grep cross-check without excluding stale trees — `.claude/worktrees/`,
+  `build/`, vendored copies hold outdated duplicates whose line numbers don't match HEAD.
 - Don't claim a bug from graph reachability alone — read the actual source
   code at `file:line` before asserting "off-by-one" or "dead branch".
 </anti_patterns>

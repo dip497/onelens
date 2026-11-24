@@ -24,7 +24,7 @@ onelens call-tool onelens_init \
 ```
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_init --graph <value> --backend <value> --export-path <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_init --graph <value> --backend <value> --export-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -43,7 +43,7 @@ SQL-surface queries vs code-only, …). Works on any graph — code
 graphs, Vue3 graphs, and the palace memory graph alike.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_status --graph <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_status --graph <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -114,7 +114,7 @@ Cross-stack: `MATCH (comp:Component)-[:CALLS_API]->(a:ApiCall)-[:HITS]->(e:Endpo
 Dead code: `MATCH (m:Method) WHERE m.external IS NULL AND NOT ()-[:CALLS]->(m) RETURN m.fqn`
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_query --cypher <value> --graph <value> --backend <value> --db-path <value> --limit <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_query --cypher <value> --graph <value> --backend <value> --db-path <value> --limit <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -168,7 +168,7 @@ onelens_search("ticket*", node_type="component") — Vue components for tickets
 onelens_search("*", node_type="store") — list all Pinia stores
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_search --query <value> --graph <value> --node-type <value> --n-results <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_search --query <value> --graph <value> --node-type <value> --n-results <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -238,7 +238,7 @@ per-call token footprint small (~250 tokens for 8 hits vs ~3000 with
 bodies).
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_retrieve --query <value> --graph <value> --n-results <value> --fanout <value> --rerank --rerank-pool <value> --project-root <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_retrieve --query <value> --graph <value> --n-results <value> --fanout <value> --rerank --rerank-pool <value> --project-root <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -261,7 +261,7 @@ Import an export JSON (auto-detects full vs delta).
 `onelens_retrieve` works afterwards.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_import --export-path <value> --graph <value> --backend <value> --db-path <value> --clear --context
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_import --export-path <value> --graph <value> --backend <value> --db-path <value> --clear --context
 ```
 
 | Flag | Type | Required | Description |
@@ -272,6 +272,24 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_import --export-pa
 | `--db-path` | string | no |  |
 | `--clear` | boolean | no |  |
 | `--context` | boolean | no |  |
+
+### onelens_replace_graph
+
+Swap a rebuilt graph file in for the live one, on a running server.
+
+Upload the new file as `<db_path>/<graph>/<graph>.rdb.incoming`, then call
+this. The open copy is stopped WITHOUT saving — a normal stop saves, which
+writes the old graph over the new file — and the incoming file takes the
+place of `<graph>.rdb`. The next query opens the new graph. falkordblite only.
+
+```bash
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_replace_graph --graph <value> --db-path <value>
+```
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--graph` | string | yes |  |
+| `--db-path` | string | no |  |
 
 ### onelens_reindex_semantic
 
@@ -287,7 +305,7 @@ Finds the newest `<graph>-full-*.json` in `~/.onelens/exports/` and
 replays `CodeMiner.mine()` against it. Requires `[context]` extras.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_reindex_semantic --graph <value> --backend <value> --db-path <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_reindex_semantic --graph <value> --backend <value> --db-path <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -301,7 +319,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_reindex_semantic -
 Apply a delta export explicitly (bypasses the auto-detect in onelens_import).
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_delta_import --delta-path <value> --graph <value> --backend <value> --db-path <value> --context
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_delta_import --delta-path <value> --graph <value> --backend <value> --db-path <value> --context
 ```
 
 | Flag | Type | Required | Description |
@@ -317,7 +335,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_delta_import --del
 Store content in a wing/room drawer. Runs embedding + dedups unless force=True.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_add_drawer --wing <value> --room <value> --content <value> --source-file <value> --added-by <value> --hall <value> --kind <value> --importance <value> --fqn <value> --force
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_add_drawer --wing <value> --room <value> --content <value> --source-file <value> --added-by <value> --hall <value> --kind <value> --importance <value> --fqn <value> --force
 ```
 
 | Flag | Type | Required | Description |
@@ -338,7 +356,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_add_drawer --wing 
 Delete one drawer by id.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_delete_drawer --drawer-id <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_delete_drawer --drawer-id <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -350,7 +368,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_delete_drawer --dr
 Semantic dedup check before `onelens_add_drawer`. Returns hits ≥ threshold.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_check_duplicate --content <value> --threshold <value> --wing <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_check_duplicate --content <value> --threshold <value> --wing <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -364,7 +382,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_check_duplicate --
 Add a temporal fact triple. Dedupes by hash(s|p|o|valid_from).
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_add --subject <value> --predicate <value> --object <value> --valid-from <value> --confidence <value> --source-closet <value> --ended <value> --wing <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_kg_add --subject <value> --predicate <value> --object <value> --valid-from <value> --confidence <value> --source-closet <value> --ended <value> --wing <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -383,7 +401,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_add --subject <
 Close an existing fact by id (temporal retraction; history preserved).
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_invalidate --fact-id <value> --ended-at <value> --reason <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_kg_invalidate --fact-id <value> --ended-at <value> --reason <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -397,7 +415,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_invalidate --fa
 Time-bucketed view of facts touching an entity — see how knowledge evolved.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_timeline --entity <value> --predicate <value> --since <value> --until <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_kg_timeline --entity <value> --predicate <value> --since <value> --until <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -412,7 +430,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_kg_timeline --enti
 Cross-wing semantic similarity — concepts shared across repos / subsystems.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_find_tunnels --wing-a <value> --wing-b <value> --threshold <value> --n-results <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_find_tunnels --wing-a <value> --wing-b <value> --threshold <value> --n-results <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -427,7 +445,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_find_tunnels --win
 Append a diary entry for `wing`. WAL-backed — crash-safe.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_diary_write --wing <value> --content <value> --author <value> --date <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_diary_write --wing <value> --content <value> --author <value> --date <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -442,7 +460,7 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_diary_write --wing
 Read diary entries for a wing, optionally time-ranged.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_diary_read --wing <value> --since <value> --until <value> --limit <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_diary_read --wing <value> --since <value> --until <value> --limit <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -462,7 +480,7 @@ SHA256 checksum, and (when cosign is on PATH) a Sigstore signature.
 maintains a `snapshots.json` index on the pinned `onelens-index` tag.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshot_publish --graph <value> --tag <value> --repo <value> --include-embeddings --sign --backend <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_snapshot_publish --graph <value> --tag <value> --repo <value> --include-embeddings --sign --backend <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -483,7 +501,7 @@ one HTTPS GET, no pagination. Returns an empty list when the repo has
 never published a snapshot.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshots_list --graph <value> --repo <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_snapshots_list --graph <value> --repo <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -501,7 +519,7 @@ back to the `.sha256` sidecar. Optionally cosign-verifies when the
 `onelens_status` calls under `--graph <graph>@<tag>`.
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshots_pull --graph <value> --tag <value> --repo <value> --verify
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_snapshots_pull --graph <value> --tag <value> --repo <value> --verify
 ```
 
 | Flag | Type | Required | Description |
@@ -526,7 +544,7 @@ next sync. Prerequisite: the snapshot is installed (via
 `onelens_snapshots_pull --repo local`).
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshot_promote --graph <value> --tag <value> --commit-sha <value>
+uv run --with fastmcp python tmp.IIpFyWjEp2 call-tool onelens_snapshot_promote --graph <value> --tag <value> --commit-sha <value>
 ```
 
 | Flag | Type | Required | Description |
@@ -538,9 +556,9 @@ uv run --with fastmcp python tmp.T46fZvkHpT call-tool onelens_snapshot_promote -
 ## Utility Commands
 
 ```bash
-uv run --with fastmcp python tmp.T46fZvkHpT list-tools
-uv run --with fastmcp python tmp.T46fZvkHpT list-resources
-uv run --with fastmcp python tmp.T46fZvkHpT read-resource <uri>
-uv run --with fastmcp python tmp.T46fZvkHpT list-prompts
-uv run --with fastmcp python tmp.T46fZvkHpT get-prompt <name> [key=value ...]
+uv run --with fastmcp python tmp.IIpFyWjEp2 list-tools
+uv run --with fastmcp python tmp.IIpFyWjEp2 list-resources
+uv run --with fastmcp python tmp.IIpFyWjEp2 read-resource <uri>
+uv run --with fastmcp python tmp.IIpFyWjEp2 list-prompts
+uv run --with fastmcp python tmp.IIpFyWjEp2 get-prompt <name> [key=value ...]
 ```

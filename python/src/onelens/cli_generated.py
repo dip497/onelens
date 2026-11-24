@@ -485,6 +485,21 @@ async def onelens_import(
     await _call_tool('onelens_import', {'export_path': export_path, 'graph': graph, 'backend': backend, 'db_path': db_path, 'clear': clear, 'context': context})
 
 
+@call_tool_app.command(name='onelens_replace_graph')
+async def onelens_replace_graph(
+    *,
+    graph: Annotated[str, cyclopts.Parameter(help="")],
+    db_path: Annotated[str, cyclopts.Parameter(help="")] = '~/.onelens/graphs',
+) -> None:
+    '''Swap a rebuilt graph file in for the live one, on a running server.
+
+Upload the new file as `<db_path>/<graph>/<graph>.rdb.incoming`, then call
+this. The open copy is stopped WITHOUT saving — a normal stop saves, which
+writes the old graph over the new file — and the incoming file takes the
+place of `<graph>.rdb`. The next query opens the new graph. falkordblite only.'''
+    await _call_tool('onelens_replace_graph', {'graph': graph, 'db_path': db_path})
+
+
 @call_tool_app.command(name='onelens_reindex_semantic')
 async def onelens_reindex_semantic(
     *,

@@ -23,25 +23,36 @@ _PRIMITIVES = frozenset({
 # and a re-exported `Transactional` both hit.
 _TXN_ANNOS = frozenset({"Transactional"})
 _ASYNC_ANNOS = frozenset({"Async"})
-_DEPRECATED_ANNOS = frozenset({"Deprecated"})
+_DEPRECATED_ANNOS = frozenset({"Deprecated", "ObsoleteAttribute"})
 
 
 def _normalize_type(t: str) -> str:
-    """Reduce a Java type string to a Class FQN, or '' if it isn't one.
+    """Reduce a Java or Go type string to a Class FQN, or '' if it isn't one.
 
-    Strips generics (`List<Foo>` → `List`), array suffixes (`Foo[]` → `Foo`),
-    varargs (`Foo...` → `Foo`), and rejects primitives/void. Used to turn
-    declared return / param / throws types into edges to Class nodes.
+    Java: strips generics (`List<Foo>` → `List`), array suffixes (`Foo[]` → `Foo`),
+    varargs (`Foo...` → `Foo`), and rejects primitives/void.
+    Go: strips pointers, slices and varargs (`*pkg.T`, `[]pkg.T`, `...pkg.T` → `pkg.T`)
+    and type arguments (`pkg.List[pkg.T]` → `pkg.List`); maps, funcs, channels
+    and anonymous structs are not a single class, so they give ''.
+    C#: also drops the nullable marker (`Foo?` → `Foo`).
+    Used to turn declared return / param / throws types into edges to Class nodes.
     """
     if not t:
         return ""
-    t = t.strip()
+    t = t.strip().rstrip("?")
     # Strip generic args first — the outermost <...> and everything after.
     lt = t.find("<")
     if lt != -1:
         t = t[:lt]
+    while t.startswith(("*", "[]", "...")):
+        t = t.lstrip("*").removeprefix("[]").removeprefix("...")
+    bracket = t.find("[")
+    if bracket > 0 and not t.endswith("[]"):
+        t = t[:bracket]
     t = t.replace("[]", "").replace("...", "").strip()
     if not t or t in _PRIMITIVES:
+        return ""
+    if any(ch in t for ch in "[]() {}*"):
         return ""
     # Bare type var (e.g. `T`, `E`) or unqualified name with no package — keep
     # only fully-qualified reference types so edges resolve against real nodes.
@@ -85,7 +96,7 @@ def _enrich_method(m: dict) -> None:
     annos = _anno_simple_names(m)
     m["isDeprecated"] = bool(annos & _DEPRECATED_ANNOS)
     m["isTransactional"] = bool(annos & _TXN_ANNOS)
-    m["isAsync"] = bool(annos & _ASYNC_ANNOS)
+    m["isAsync"] = bool(annos & _ASYNC_ANNOS) or "async" in mods_set
 
 
 class GraphWriter:

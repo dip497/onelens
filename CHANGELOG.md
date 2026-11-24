@@ -7,6 +7,38 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added — Go, Python and C# extractors on compiler tooling (2026-11)
+
+- **Go** (`tools/extractors/go/`): rewritten on `go/packages` + `go/types`, so every
+  call resolves to the function the compiler binds. Loads every `go.mod` under the
+  root, merges the platforms given in `--goos`, writes IMPLEMENTS + OVERRIDES for
+  Go's implicit interfaces. The old `go/ast` reference wrote capitalised keys and
+  name-only calls, so its output never imported.
+- **Python** (`tools/extractors/python_extractor.py`, replaces `python_ast_extractor.py`):
+  calls, base classes and imports resolved with Jedi; source roots found from the
+  imports. Project calls resolved on the agent: 3,505, was 40.
+- **C#** (`tools/extractors/csharp/`): Roslyn, with MSBuild giving each project's exact
+  sources and references. Handles SDK-style .NET 8 and old .NET Framework 4.0 projects
+  (reference assemblies and packages.config libraries fetched from nuget.org).
+  ASP.NET controller actions become Endpoints. Poller: 4 projects, 0 compile errors.
+- `tools/extractors/merge_exports.py`: merges one component's per-language exports into
+  one graph export (`python/tests/test_merge_exports.py`).
+- Importer: Go and C# type strings (`*T`, `[]T`, `List[T]`, `Foo?`) now link RETURNS /
+  HAS_PARAMETER to the real Class instead of creating stand-in types; C# `[Obsolete]`
+  sets isDeprecated and `async` sets isAsync
+  (`importer/graph_writer.py`, `python/tests/test_type_to_class.py`, `test_method_flags.py`).
+- Why not IntelliJ PSI for these languages: ADR-039.
+
+### Added — `onelens_replace_graph` MCP tool (2026-11)
+
+- **Rebuilt graphs can replace a live one on a running MCP server.** Upload the new
+  file as `<graph>/<graph>.rdb.incoming` and call `onelens_replace_graph`; the open
+  copy is stopped without saving (a normal stop saves the old graph over the new
+  file), any server left over from a killed process is stopped, and the file is
+  renamed in. Used by scheduled rebuilds that keep one graph name (`…-master`).
+  `python/src/onelens/mcp_server.py`, `graph/backends/falkordb_lite.py`,
+  tests in `python/tests/test_replace_graph.py`. See LESSONS-LEARNED #25.
+
 ### Fixed — skill anti-patterns · interface-dispatch callers (2026-07)
 
 - `skills/onelens/SKILL.md` — added two anti-patterns learned from a real

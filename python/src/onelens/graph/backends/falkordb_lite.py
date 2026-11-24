@@ -29,13 +29,51 @@ Persistence:
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from onelens.graph.db import GraphDB
 
 logger = logging.getLogger(__name__)
+
+
+def stop_graph_server_without_saving(rdb: Path) -> bool:
+    """Stop a redis-server still serving `rdb` that no open handle owns.
+
+    A server process outlives its Python parent when the parent is killed. Its
+    `<rdb>.settings` file stays, and the next open attaches to that server and
+    its old data instead of reading the file. Returns True if one was stopped.
+    """
+    import json
+
+    import psutil
+    import redis
+
+    settings_file = Path(f"{rdb}.settings")
+    if not settings_file.is_file():
+        return False
+    settings = json.loads(settings_file.read_text())
+    stopped = False
+    socket_path = settings.get("unixsocket")
+    if socket_path and Path(socket_path).exists():
+        with contextlib.suppress(redis.RedisError):
+            redis.Redis(unix_socket_path=socket_path).shutdown(
+                nosave=True, now=True, force=True
+            )
+        stopped = True
+    pidfile = Path(settings.get("pidfile") or "")
+    if pidfile.is_file():
+        with contextlib.suppress(ValueError, psutil.NoSuchProcess):
+            pid = int(pidfile.read_text().strip())
+            if "redis-server" in psutil.Process(pid).name():
+                psutil.Process(pid).kill()
+                stopped = True
+    settings_file.unlink(missing_ok=True)
+    return stopped
 
 
 class FalkorDBLiteBackend(GraphDB):
@@ -99,6 +137,21 @@ class FalkorDBLiteBackend(GraphDB):
             self._graph.query("MATCH (n) DETACH DELETE n")
         # Re-bind so subsequent writes land in a fresh graph handle.
         self._graph = self._db.select_graph(self.graph_name)
+
+    def close_without_saving(self) -> None:
+        import redis
+
+        client = self._db.client
+        atexit.unregister(client._cleanup)
+        with contextlib.suppress(redis.RedisError):
+            client.shutdown(nosave=True, now=True, force=True)
+        if client.settingregistryfile:
+            Path(client.settingregistryfile).unlink(missing_ok=True)
+        if client.redis_dir:
+            shutil.rmtree(client.redis_dir, ignore_errors=True)
+        client.pidfile = None
+        client.redis_dir = None
+        client.running = False
 
     def close(self) -> None:
         # redislite manages subprocess lifecycle via psutil; shutting the

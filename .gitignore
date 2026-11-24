@@ -18,6 +18,9 @@ plugin/.idea/
 plugin/out/
 plugin/.intellijPlatform/
 plugin/.kotlin/
+# Stray decompiled IntelliJ platform stubs (e.g. plugin/org/jetbrains/...*.class)
+plugin/org/
+*.class
 
 # Gradle
 .gradle/
@@ -74,3 +77,7 @@ scripts/*@*
 
 # Internal / client-specific docs — never commit (contains VM IPs, client names, deployment notes).
 internal-docs/
+
+# C# extractor build output
+tools/extractors/csharp/bin/
+tools/extractors/csharp/obj/

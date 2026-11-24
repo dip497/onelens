@@ -1768,3 +1768,46 @@ delta remains Java-only.
 **Revisit when.** A repo needs both majors in ONE graph, or `vue.config.js` alias
 parsing becomes necessary (the current `@`→`src` fallback covers the vue-cli default;
 real parsing needs JS evaluation).
+
+## ADR-039 · 2026-11 · Go, Python and C# use the compiler's own tooling, not IntelliJ PSI
+
+**Decision.** Go is read with `go/packages` + `go/types`, Python with stdlib `ast`
++ Jedi, and C# with Roslyn, fed by MSBuild's own evaluation of each `.csproj`. Each is a standalone extractor in
+`tools/extractors/` writing the same JSON the plugin writes for Java. IntelliJ
+PSI stays the backend for Java/Kotlin, Vue and Next.js.
+
+**Context.** The ServiceOps product is Java + Vue plus a Go/C#/Python agent, a
+C# poller and a Go/Java edge server, so the graph needed three more languages.
+We checked what PSI would add before choosing:
+- *Go.* The Go plugin (`org.jetbrains.plugins.go`, Marketplace, Ultimate-only) is
+  compatible with our IU 2025.1.3, but `go/types` is generated from the
+  compiler's own checker, so PSI cannot be more accurate; GoLand's Endpoints
+  window has no gin/echo/net/http routes either. PSI would only add a paid
+  licence per headless run (the `idea.key` that self-invalidates, ADR-035) and a
+  closed, undocumented API.
+- *C#.* IntelliJ IDEA has no C# PSI at all: in Rider the language lives in the
+  ReSharper .NET backend, which a JVM plugin can reach only inside Rider.
+- *Python.* `Pythonid` adds ready-made Django/Flask/FastAPI endpoint models; for
+  call resolution Jedi/pyright are comparable, licence-free and need no
+  interpreter set up inside IntelliJ. The agent's Python has no web framework.
+
+Measured on the agent repo: Go 971 files, 0 type errors, 15,602 calls with
+every project call landing on a line that names its callee; Python 3,505
+project calls (was 40 with the old name-guessing extractor), `system_env()`
+callers 16/16 against grep. C#: the poller (4 projects, 0 compile errors) and the
+agent's .NET Framework 4.0 code (7 projects) — every one of 7,837 project calls
+lands on a line naming its callee; `ExecuteGetRequestR` call sites 39/39 against grep.
+For C# the sources come from `dotnet msbuild -getItem:Compile` rather than a
+folder walk, because old projects list files explicitly and SDK projects add
+generated and linked files; old .NET Framework projects get reference assemblies
+from the `Microsoft.NETFramework.ReferenceAssemblies` packages and their
+`packages.config` libraries from nuget.org, so they compile on Linux.
+
+**Alternatives.** (a) IntelliJ PSI for Go and Python — rejected: no accuracy
+gain, a licence per run. (b) tree-sitter for all three — rejected: cross-file
+calls go unresolved, so "who calls X" becomes unreliable.
+
+**Revisit when.** A Python service needs Django/Flask/FastAPI routes and writing
+the route rules by hand costs more than wiring `Pythonid`; or C# work needs
+something Roslyn cannot give.
+
